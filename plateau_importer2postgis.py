@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-米子市Plateau建物データ完全インポートスクリプト（インポーター）
+Plateau建物データ PostGISインポーター
 ローカルのzipファイルからPostgreSQLに安全にインポート
 
 前提条件:
-- yonago_complete_downloader.py で全メッシュを取得済み
-- fixed_importer.py の修復済み技術を使用（ノードID重複問題解決済み）
+- Plateau建物データのzipファイルを取得済み
 - PostgreSQL/PostGISデータベースが準備済み
 """
 
@@ -27,18 +26,38 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('yonago_complete_importer.log'),
+        logging.FileHandler('plateau_importer2postgis.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-class YonagoCompleteImporter:
+class PlateauImporter2PostGIS:
     def __init__(self,
-                 data_dir="./yonago_plateau_data",
-                 postgres_url="postgresql://osmfj_user:secure_plateau_password@localhost:5432/osmfj_plateau"):
+                 data_dir="./plateau_data",
+                 postgres_url="postgresql://osmfj_user:secure_plateau_password@localhost:5432/osmfj_plateau",
+                 coord_bounds=None,
+                 citycode=None):
+        """
+        Args:
+            data_dir: zipファイルが格納されたディレクトリ
+            postgres_url: PostgreSQL接続URL
+            coord_bounds: 座標範囲チェック用 (min_lat, max_lat, min_lon, max_lon)。Noneで無効化
+            citycode: 市区町村コード (例: "31202")。Noneの場合はdata_dirのディレクトリ名から推定
+        """
         self.data_dir = Path(data_dir)
         self.postgres_url = postgres_url
+        self.coord_bounds = coord_bounds
+
+        # 市区町村コードの決定
+        if citycode:
+            self.citycode = citycode
+        else:
+            # data_dirのディレクトリ名から推定 (例: ./plateau_data/31202 → "31202")
+            dirname = self.data_dir.name
+            match = re.match(r'^(\d{5})', dirname)
+            self.citycode = match.group(1) if match else "unknown"
+        logger.info(f"🏙️ 市区町村コード: {self.citycode}")
         self.extracted_dir = self.data_dir / "extracted"
 
         # 一時ディレクトリ作成
@@ -297,8 +316,13 @@ class YonagoCompleteImporter:
                 lat = float(node_elem.get('lat'))
                 lon = float(node_elem.get('lon'))
 
-                # 米子市周辺の妥当な座標範囲チェック
-                if 35.2 <= lat <= 35.6 and 133.0 <= lon <= 133.5:
+                # 座標範囲チェック（指定がなければ日本全域）
+                if self.coord_bounds:
+                    min_lat, max_lat, min_lon, max_lon = self.coord_bounds
+                    in_bounds = min_lat <= lat <= max_lat and min_lon <= lon <= max_lon
+                else:
+                    in_bounds = 20.0 <= lat <= 46.0 and 122.0 <= lon <= 154.0
+                if in_bounds:
                     # 座標ベースのユニークID生成（修復済み技術）
                     coord_key = f"{lat:.7f},{lon:.7f}"
 
@@ -356,6 +380,7 @@ class YonagoCompleteImporter:
         result = {
             'building': 'yes',
             'height': None,
+            'ele': None,
             'building_levels': None,
             'name': None,
             'addr_housenumber': None,
@@ -369,8 +394,7 @@ class YonagoCompleteImporter:
             'tourism': None,
             'leisure': None,
             'landuse': None,
-            'ref_mlit_plateau': None,
-            'source_dataset': f"yonago_complete_{source_info}"
+            'source_dataset': f"plateau_{self.citycode}_{source_info}"
         }
 
         # 基本建物タイプ
@@ -425,6 +449,16 @@ class YonagoCompleteImporter:
         if roof_shape:
             result['roof_shape'] = roof_shape[:50]
 
+        # 標高情報
+        ele_raw = tags.get('ele')
+        if ele_raw:
+            try:
+                ele_val = float(ele_raw)
+                if -100 <= ele_val <= 9000:  # 現実的な標高範囲
+                    result['ele'] = ele_val
+            except (ValueError, TypeError):
+                pass
+
         # 建設年
         start_date = tags.get('start_date')
         if start_date:
@@ -435,11 +469,6 @@ class YonagoCompleteImporter:
             value = tags.get(key)
             if value:
                 result[key] = value[:50]
-
-        # Plateau参照
-        plateau_ref = tags.get('ref:MLIT_PLATEAU')
-        if plateau_ref:
-            result['ref_mlit_plateau'] = plateau_ref[:50]
 
         return result
 
@@ -541,13 +570,13 @@ class YonagoCompleteImporter:
                                 self.building_id_counter,           # osm_id
                                 converted_tags.get('building', 'yes'),  # building
                                 converted_tags.get('height'),       # height
-                                None,                               # ele
+                                converted_tags.get('ele'),          # ele
                                 converted_tags.get('building_levels'),  # building_levels
                                 None,                               # building_levels_underground
                                 converted_tags.get('source_dataset'),   # source_dataset
                                 building['way_id'],                 # plateau_id
                                 polygon_wkt,                        # geometry_wkt
-                                converted_tags.get('ref_mlit_plateau'), # ref_mlit_plateau
+                                None,                               # ref_mlit_plateau
                                 converted_tags.get('name'),         # name
                                 None,                               # addr_full
                                 converted_tags.get('start_date'),   # start_date
@@ -686,7 +715,7 @@ class YonagoCompleteImporter:
         final_analysis = self.analyze_existing_data()
 
         with open(report_file, 'w', encoding='utf-8') as f:
-            f.write("# 米子市Plateau建物データ完全インポートレポート\n")
+            f.write("# Plateau建物データ インポートレポート\n")
             f.write(f"# 実行日時: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
             f.write("## インポート前状況\n")
@@ -713,9 +742,7 @@ class YonagoCompleteImporter:
 
     def run_complete_import(self):
         """完全インポート実行"""
-        logger.info("🚀 米子市Plateau建物データ完全インポート開始")
-        logger.info("=" * 60)
-        logger.info("🎯 目標: 修復済み技術による安全で高品質なインポート")
+        logger.info("🚀 Plateau建物データ PostGISインポート開始")
         logger.info("=" * 60)
 
         start_time = time.time()
@@ -730,7 +757,7 @@ class YonagoCompleteImporter:
             zip_files = self.find_zip_files()
             if not zip_files:
                 logger.error("❌ zipファイルが見つかりません")
-                logger.info("💡 ヒント: yonago_complete_downloader.py を先に実行してください")
+                logger.info("💡 ヒント: データディレクトリにzipファイルを配置してください")
                 return False
 
             # Phase 3: OSM抽出
@@ -792,20 +819,20 @@ class YonagoCompleteImporter:
             elapsed_time = time.time() - start_time
 
             logger.info("=" * 60)
-            logger.info("🎉 米子市Plateau建物データ完全インポート成功!")
+            logger.info("🎉 Plateau建物データ PostGISインポート成功!")
             logger.info(f"⏱️ 処理時間: {elapsed_time/60:.1f}分")
             logger.info(f"🏢 新規建物: {len(buildings_data):,}件")
             logger.info(f"📍 新規ノード: {len(nodes_data):,}件")
             logger.info("✅ 次のステップ:")
             logger.info("   1. API動作確認")
             logger.info("   2. RapiD Editor表示テスト")
-            logger.info("   3. 完全カバレッジ検証")
+            logger.info("   3. カバレッジ検証")
             logger.info("=" * 60)
 
             return True
 
         except Exception as e:
-            logger.error(f"❌ 完全インポート失敗: {e}")
+            logger.error(f"❌ インポート失敗: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -813,12 +840,16 @@ class YonagoCompleteImporter:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description='米子市Plateau建物データ完全インポート')
-    parser.add_argument('--data-dir', default='./yonago_plateau_data',
-                       help='データディレクトリ (default: ./yonago_plateau_data)')
+    parser = argparse.ArgumentParser(description='Plateau建物データ PostGISインポーター')
+    parser.add_argument('--data-dir', default='./plateau_data',
+                       help='データディレクトリ (default: ./plateau_data)')
     parser.add_argument('--postgres-url',
                        default='postgresql://osmfj_user:secure_plateau_password@localhost:5432/osmfj_plateau',
                        help='PostgreSQL接続URL')
+    parser.add_argument('--citycode',
+                       help='市区町村コード (例: "31202")。未指定時はdata-dirのディレクトリ名から推定')
+    parser.add_argument('--coord-bounds',
+                       help='座標範囲チェック: "min_lat,max_lat,min_lon,max_lon" (例: "35.2,35.6,133.0,133.5")')
     parser.add_argument('--verbose', action='store_true',
                        help='詳細ログ出力')
 
@@ -827,20 +858,23 @@ def main():
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    logger.info("🏗️ 米子市Plateau建物データ完全インポーター起動")
+    coord_bounds = None
+    if args.coord_bounds:
+        coord_bounds = tuple(float(x) for x in args.coord_bounds.split(','))
 
-    importer = YonagoCompleteImporter(args.data_dir, args.postgres_url)
+    logger.info("🏗️ Plateau建物データ PostGISインポーター起動")
+
+    importer = PlateauImporter2PostGIS(args.data_dir, args.postgres_url, coord_bounds, args.citycode)
     success = importer.run_complete_import()
 
     if success:
-        logger.info("✅ 完全インポート成功！APIテストを実行してください")
-        print("\n🎉 完全インポート成功!")
-        print("🎯 米子市Plateau建物データ完全カバレッジ達成")
+        logger.info("✅ インポート成功！APIテストを実行してください")
+        print("\n🎉 インポート成功!")
         print("🚀 次は API動作確認とRapiD Editorテスト")
     else:
-        logger.error("❌ 完全インポートに失敗しました")
+        logger.error("❌ インポートに失敗しました")
         print("\n❌ インポートに問題が発生しました")
-        print("📋 詳細: yonago_complete_importer.log を確認")
+        print("📋 詳細: plateau_importer2postgis.log を確認")
 
 if __name__ == "__main__":
     main()

@@ -113,7 +113,18 @@ http://localhost:8000 で起動します。
 | source_dataset | text | データソース識別子 (`plateau_{citycode}_{file}`) |
 | plateau_id | text | Plateau 元データの way ID |
 | name | text | 建物名称 |
+| addr_full | text | 住所 (通り名+番地の結合) |
+| addr_housenumber | text | 番地 |
+| addr_street | text | 通り名 |
 | start_date | text | 建設年 |
+| building_material | text | 建材 |
+| roof_material | text | 屋根材 |
+| roof_shape | text | 屋根形状 |
+| amenity | text | 施設種別 |
+| shop | text | 店舗種別 |
+| tourism | text | 観光施設 |
+| leisure | text | レジャー施設 |
+| landuse | text | 土地利用 |
 | geom | geometry | ポリゴン (SRID 4326) |
 | centroid | geometry | 重心点 (SRID 4326) |
 
@@ -138,11 +149,21 @@ RapiD エディタの Plateau データセット設定で、この API の URL �
 | タグ | 説明 |
 |------|------|
 | `building` | 建物タイプ |
-| `height` | 建物高さ |
-| `ele` | 標高 |
+| `height` | 建物高さ (m) |
+| `ele` | 標高 (m) |
 | `building:levels` | 階数 |
-| `source` | `Plateau Japan (MLIT)` |
-| `ref:plateau` | Plateau ID |
+| `name` | 建物名称 |
+| `addr:housenumber` | 番地 |
+| `addr:street` | 通り名 |
+| `start_date` | 建設年 |
+| `building:material` | 建材 |
+| `roof:material` | 屋根材 |
+| `roof:shape` | 屋根形状 |
+| `amenity` | 施設種別 |
+| `shop` | 店舗種別 |
+| `tourism` | 観光施設 |
+| `leisure` | レジャー施設 |
+| `landuse` | 土地利用 |
 
 ## ライセンス
 

@@ -112,15 +112,18 @@ class OSMFJPlateauAPI:
                         b.height,
                         b.ele,
                         b.building_levels,
-                        b.building_levels_underground,
-                        b.source_dataset,
-                        b.plateau_id,
                         b.name,
-                        b.addr_full,
+                        b.addr_housenumber,
+                        b.addr_street,
                         b.start_date,
-                        b.survey_date,
-                        b.building_class,
-                        b.building_usage,
+                        b.building_material,
+                        b.roof_material,
+                        b.roof_shape,
+                        b.amenity,
+                        b.shop,
+                        b.tourism,
+                        b.leisure,
+                        b.landuse,
                         b.geom,
                         b.centroid,
                         ST_AsText(b.geom) as geometry_wkt,
@@ -138,15 +141,18 @@ class OSMFJPlateauAPI:
                     ub.height,
                     ub.ele,
                     ub.building_levels,
-                    ub.building_levels_underground,
-                    ub.source_dataset,
-                    ub.plateau_id,
                     ub.name,
-                    ub.addr_full,
+                    ub.addr_housenumber,
+                    ub.addr_street,
                     ub.start_date,
-                    ub.survey_date,
-                    ub.building_class,
-                    ub.building_usage,
+                    ub.building_material,
+                    ub.roof_material,
+                    ub.roof_shape,
+                    ub.amenity,
+                    ub.shop,
+                    ub.tourism,
+                    ub.leisure,
+                    ub.landuse,
                     ub.geometry_wkt,
                     ub.distance,
                     ub.centroid_lon,
@@ -163,10 +169,11 @@ class OSMFJPlateauAPI:
                 FROM unique_buildings ub
                 LEFT JOIN plateau_building_nodes n ON ub.id = n.building_id
                 GROUP BY ub.id, ub.osm_id, ub.building, ub.height, ub.ele, ub.building_levels,
-                         ub.building_levels_underground, ub.source_dataset, ub.plateau_id,
-                         ub.name, ub.addr_full, ub.start_date,
-                         ub.survey_date, ub.building_class, ub.building_usage, ub.geom,
-                         ub.centroid, ub.geometry_wkt, ub.distance, ub.centroid_lon, ub.centroid_lat
+                         ub.name, ub.addr_housenumber, ub.addr_street, ub.start_date,
+                         ub.building_material, ub.roof_material, ub.roof_shape,
+                         ub.amenity, ub.shop, ub.tourism, ub.leisure, ub.landuse,
+                         ub.geom, ub.centroid, ub.geometry_wkt, ub.distance,
+                         ub.centroid_lon, ub.centroid_lat
                 ORDER BY ub.distance, ub.osm_id
                 LIMIT %s
             """
@@ -286,13 +293,34 @@ class OSMFJPlateauAPI:
                 add_tag(way_elem, 'building', building.get('building', 'yes'))
                 if building.get('height'):
                     add_tag(way_elem, 'height', str(building['height']))
-                if building.get('building_levels'):
-                    add_tag(way_elem, 'building:levels', str(building['building_levels']))
-                add_tag(way_elem, 'source', 'Plateau Japan (MLIT)')
-                if building.get('plateau_id'):
-                    add_tag(way_elem, 'ref:plateau', building['plateau_id'])
                 if building.get('ele'):
                     add_tag(way_elem, 'ele', str(building['ele']))
+                if building.get('building_levels'):
+                    add_tag(way_elem, 'building:levels', str(building['building_levels']))
+                if building.get('name'):
+                    add_tag(way_elem, 'name', building['name'])
+                if building.get('addr_housenumber'):
+                    add_tag(way_elem, 'addr:housenumber', building['addr_housenumber'])
+                if building.get('addr_street'):
+                    add_tag(way_elem, 'addr:street', building['addr_street'])
+                if building.get('start_date'):
+                    add_tag(way_elem, 'start_date', building['start_date'])
+                if building.get('building_material'):
+                    add_tag(way_elem, 'building:material', building['building_material'])
+                if building.get('roof_material'):
+                    add_tag(way_elem, 'roof:material', building['roof_material'])
+                if building.get('roof_shape'):
+                    add_tag(way_elem, 'roof:shape', building['roof_shape'])
+                if building.get('amenity'):
+                    add_tag(way_elem, 'amenity', building['amenity'])
+                if building.get('shop'):
+                    add_tag(way_elem, 'shop', building['shop'])
+                if building.get('tourism'):
+                    add_tag(way_elem, 'tourism', building['tourism'])
+                if building.get('leisure'):
+                    add_tag(way_elem, 'leisure', building['leisure'])
+                if building.get('landuse'):
+                    add_tag(way_elem, 'landuse', building['landuse'])
 
                 all_ways.append(way_elem)
                 processed_buildings += 1

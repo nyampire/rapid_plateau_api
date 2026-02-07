@@ -565,6 +565,14 @@ class PlateauImporter2PostGIS:
                             coords_str = ','.join([f"{lon} {lat}" for lon, lat in coords])
                             polygon_wkt = f"POLYGON(({coords_str}))"
 
+                            # 住所を結合
+                            addr_parts = []
+                            if converted_tags.get('addr_street'):
+                                addr_parts.append(converted_tags['addr_street'])
+                            if converted_tags.get('addr_housenumber'):
+                                addr_parts.append(converted_tags['addr_housenumber'])
+                            addr_full = ' '.join(addr_parts) if addr_parts else None
+
                             # 建物データ（plateau_buildingsテーブル構造に合わせる）
                             buildings_data.append((
                                 self.building_id_counter,           # osm_id
@@ -576,13 +584,19 @@ class PlateauImporter2PostGIS:
                                 converted_tags.get('source_dataset'),   # source_dataset
                                 building['way_id'],                 # plateau_id
                                 polygon_wkt,                        # geometry_wkt
-                                None,                               # ref_mlit_plateau
                                 converted_tags.get('name'),         # name
-                                None,                               # addr_full
+                                addr_full,                          # addr_full
+                                converted_tags.get('addr_housenumber'), # addr_housenumber
+                                converted_tags.get('addr_street'),  # addr_street
                                 converted_tags.get('start_date'),   # start_date
-                                None,                               # survey_date
-                                None,                               # building_class
-                                converted_tags.get('amenity'),      # building_usage
+                                converted_tags.get('building_material'), # building_material
+                                converted_tags.get('roof_material'),    # roof_material
+                                converted_tags.get('roof_shape'),       # roof_shape
+                                converted_tags.get('amenity'),      # amenity
+                                converted_tags.get('shop'),         # shop
+                                converted_tags.get('tourism'),      # tourism
+                                converted_tags.get('leisure'),      # leisure
+                                converted_tags.get('landuse'),      # landuse
                                 polygon_wkt,                        # geom用WKT
                                 polygon_wkt                         # centroid用WKT
                             ))
@@ -630,12 +644,15 @@ class PlateauImporter2PostGIS:
                     """
                     INSERT INTO plateau_buildings
                     (osm_id, building, height, ele, building_levels, building_levels_underground,
-                     source_dataset, plateau_id, geometry_wkt, ref_mlit_plateau, name, addr_full,
-                     start_date, survey_date, building_class, building_usage, geom, centroid)
+                     source_dataset, plateau_id, geometry_wkt,
+                     name, addr_full, addr_housenumber, addr_street,
+                     start_date, building_material, roof_material, roof_shape,
+                     amenity, shop, tourism, leisure, landuse,
+                     geom, centroid)
                     VALUES %s
                     """,
                     buildings_data,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
                     page_size=1000
                 )
                 logger.info("✅ 建物投入完了")

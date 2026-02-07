@@ -115,7 +115,6 @@ class OSMFJPlateauAPI:
                         b.building_levels_underground,
                         b.source_dataset,
                         b.plateau_id,
-                        b.ref_mlit_plateau,
                         b.name,
                         b.addr_full,
                         b.start_date,
@@ -142,7 +141,6 @@ class OSMFJPlateauAPI:
                     ub.building_levels_underground,
                     ub.source_dataset,
                     ub.plateau_id,
-                    ub.ref_mlit_plateau,
                     ub.name,
                     ub.addr_full,
                     ub.start_date,
@@ -166,7 +164,7 @@ class OSMFJPlateauAPI:
                 LEFT JOIN plateau_building_nodes n ON ub.id = n.building_id
                 GROUP BY ub.id, ub.osm_id, ub.building, ub.height, ub.ele, ub.building_levels,
                          ub.building_levels_underground, ub.source_dataset, ub.plateau_id,
-                         ub.ref_mlit_plateau, ub.name, ub.addr_full, ub.start_date,
+                         ub.name, ub.addr_full, ub.start_date,
                          ub.survey_date, ub.building_class, ub.building_usage, ub.geom,
                          ub.centroid, ub.geometry_wkt, ub.distance, ub.centroid_lon, ub.centroid_lat
                 ORDER BY ub.distance, ub.osm_id
@@ -295,8 +293,6 @@ class OSMFJPlateauAPI:
                     add_tag(way_elem, 'ref:plateau', building['plateau_id'])
                 if building.get('ele'):
                     add_tag(way_elem, 'ele', str(building['ele']))
-                if building.get('ref_mlit_plateau'):
-                    add_tag(way_elem, 'ref:MLIT_PLATEAU', building['ref_mlit_plateau'])
 
                 all_ways.append(way_elem)
                 processed_buildings += 1

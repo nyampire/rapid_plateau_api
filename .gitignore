@@ -1,0 +1,7 @@
+DEPLOY.md
+*.log
+__pycache__/
+*.pyc
+venv/
+.env
+plateau_data/

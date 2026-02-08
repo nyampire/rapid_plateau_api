@@ -103,84 +103,41 @@ class OSMFJPlateauAPI:
                 """
                 distinct_key = "MD5(ST_AsText(b.geom))"
 
+            # ノードをジオメトリから直接抽出（plateau_building_nodes JOIN不要）
             query = f"""
-                WITH unique_buildings AS (
-                    SELECT DISTINCT ON ({distinct_key})
-                        b.id,
-                        b.osm_id,
-                        b.building,
-                        b.height,
-                        b.ele,
-                        b.building_levels,
-                        b.name,
-                        b.addr_housenumber,
-                        b.addr_street,
-                        b.start_date,
-                        b.building_material,
-                        b.roof_material,
-                        b.roof_shape,
-                        b.amenity,
-                        b.shop,
-                        b.tourism,
-                        b.leisure,
-                        b.landuse,
-                        b.geom,
-                        b.centroid,
-                        ST_AsText(b.geom) as geometry_wkt,
-                        ST_Distance(b.centroid, ST_SetSRID(ST_Point(%s, %s), 4326)) as distance,
-                        ST_X(b.centroid) as centroid_lon,
-                        ST_Y(b.centroid) as centroid_lat
-                    FROM plateau_buildings b
-                    WHERE {spatial_condition}
-                    ORDER BY {distinct_key}, b.osm_id
-                )
                 SELECT
-                    ub.id,
-                    ub.osm_id,
-                    ub.building,
-                    ub.height,
-                    ub.ele,
-                    ub.building_levels,
-                    ub.name,
-                    ub.addr_housenumber,
-                    ub.addr_street,
-                    ub.start_date,
-                    ub.building_material,
-                    ub.roof_material,
-                    ub.roof_shape,
-                    ub.amenity,
-                    ub.shop,
-                    ub.tourism,
-                    ub.leisure,
-                    ub.landuse,
-                    ub.geometry_wkt,
-                    ub.distance,
-                    ub.centroid_lon,
-                    ub.centroid_lat,
-                    ARRAY_AGG(
+                    b.id,
+                    b.osm_id,
+                    b.building,
+                    b.height,
+                    b.ele,
+                    b.building_levels,
+                    b.name,
+                    b.addr_housenumber,
+                    b.addr_street,
+                    b.start_date,
+                    b.building_material,
+                    b.roof_material,
+                    b.roof_shape,
+                    b.amenity,
+                    b.shop,
+                    b.tourism,
+                    b.leisure,
+                    b.landuse,
+                    (SELECT json_agg(
                         json_build_object(
-                            'id', n.id,
-                            'osm_id', n.osm_id,
-                            'lat', n.lat,
-                            'lon', n.lon,
-                            'sequence_id', n.sequence_id
-                        ) ORDER BY n.sequence_id
-                    ) as nodes
-                FROM unique_buildings ub
-                LEFT JOIN plateau_building_nodes n ON ub.id = n.building_id
-                GROUP BY ub.id, ub.osm_id, ub.building, ub.height, ub.ele, ub.building_levels,
-                         ub.name, ub.addr_housenumber, ub.addr_street, ub.start_date,
-                         ub.building_material, ub.roof_material, ub.roof_shape,
-                         ub.amenity, ub.shop, ub.tourism, ub.leisure, ub.landuse,
-                         ub.geom, ub.centroid, ub.geometry_wkt, ub.distance,
-                         ub.centroid_lon, ub.centroid_lat
-                ORDER BY ub.distance, ub.osm_id
+                            'lon', ST_X(pt.geom),
+                            'lat', ST_Y(pt.geom),
+                            'seq', pt.path[2]
+                        ) ORDER BY pt.path[2]
+                    ) FROM ST_DumpPoints(b.geom) AS pt) AS nodes
+                FROM plateau_buildings b
+                WHERE {spatial_condition}
+                ORDER BY b.osm_id
                 LIMIT %s
             """
 
-            center_lon = (min_lon + max_lon) / 2
-            center_lat = (min_lat + max_lat) / 2
-            params = [center_lon, center_lat, min_lon, min_lat, max_lon, max_lat, limit]
+            params = [min_lon, min_lat, max_lon, max_lat, limit]
 
             cursor.execute(query, params)
             buildings = cursor.fetchall()
@@ -211,29 +168,31 @@ class OSMFJPlateauAPI:
         processed_buildings = 0
         total_nodes_created = 0
 
+        # ノードIDの生成用カウンタ（建物IDベースで一意に）
+        node_id_base = 0
+
         for building in buildings:
             try:
                 nodes = building.get('nodes', [])
-                if not nodes or nodes == [None] or not any(nodes):
+                if not nodes or not isinstance(nodes, list):
                     continue
 
-                # 有効なノードをフィルタ（DBのIDを保持）
+                # 有効なノードをフィルタ
                 valid_nodes = []
                 for node in nodes:
-                    if node and 'lat' in node and 'lon' in node and 'id' in node:
+                    if node and 'lat' in node and 'lon' in node:
                         try:
                             lat = float(node['lat'])
                             lon = float(node['lon'])
-                            node_db_id = int(node['id'])
                             if -90 <= lat <= 90 and -180 <= lon <= 180:
-                                valid_nodes.append({'lat': lat, 'lon': lon, 'id': node_db_id})
+                                valid_nodes.append({'lat': lat, 'lon': lon})
                         except (ValueError, TypeError):
                             continue
 
                 if len(valid_nodes) < 3:
                     continue
 
-                # ポリゴン閉鎖チェック
+                # ポリゴン閉鎖チェック（ST_DumpPointsは閉じたポリゴンの最後の点を含む）
                 first_node = valid_nodes[0]
                 last_node = valid_nodes[-1]
                 is_closed = (abs(first_node['lat'] - last_node['lat']) < 1e-7 and
@@ -241,7 +200,10 @@ class OSMFJPlateauAPI:
                 if is_closed:
                     valid_nodes = valid_nodes[:-1]
 
-                # Way要素作成（DBのIDを使用）
+                if len(valid_nodes) < 3:
+                    continue
+
+                # Way要素作成
                 building_db_id = building.get('id')
                 way_elem = ET.Element('way')
                 way_elem.set('id', str(-building_db_id))
@@ -255,11 +217,12 @@ class OSMFJPlateauAPI:
                 first_node_id = None
 
                 for i, node_data in enumerate(valid_nodes):
-                    node_db_id = -node_data['id']
+                    node_id_base -= 1
+                    node_id = node_id_base
 
                     # ノード要素作成
                     node_elem = ET.Element('node')
-                    node_elem.set('id', str(node_db_id))
+                    node_elem.set('id', str(node_id))
                     node_elem.set('visible', 'true')
                     node_elem.set('version', '1')
                     node_elem.set('changeset', '1')
@@ -272,10 +235,10 @@ class OSMFJPlateauAPI:
                     all_nodes.append(node_elem)
 
                     nd_elem = ET.SubElement(way_elem, 'nd')
-                    nd_elem.set('ref', str(node_db_id))
+                    nd_elem.set('ref', str(node_id))
 
                     if i == 0:
-                        first_node_id = node_db_id
+                        first_node_id = node_id
 
                     total_nodes_created += 1
 

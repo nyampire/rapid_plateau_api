@@ -147,15 +147,11 @@ CREATE TABLE plateau_buildings (
     source_dataset TEXT,
     plateau_id TEXT,
     geometry_wkt TEXT,
-    ref_mlit_plateau TEXT,
     name TEXT,
     addr_full TEXT,
     addr_housenumber TEXT,
     addr_street TEXT,
     start_date TEXT,
-    survey_date TEXT,
-    building_class TEXT,
-    building_usage TEXT,
     building_material TEXT,
     roof_material TEXT,
     roof_shape TEXT,
@@ -288,56 +284,9 @@ curl http://127.0.0.1:8000/health
 
 ### ローカルでビルド
 
-RapiD のソースツリー（例: `~/Desktop/Rapid/`）で作業します。
+RapiD のソースツリーで作業します。
 
-#### 4-1. OSM OAuth2 認証の設定
-
-OSM でカスタム OAuth2 アプリケーションを登録し、`dist/index.html` の `apiConnections` に自身の `client_id` / `client_secret` を設定します。
-
-1. https://www.openstreetmap.org/oauth2/applications で OAuth2 アプリを登録
-2. リダイレクト URI に `https://<YOUR_DOMAIN>/land.html` を設定
-3. `dist/index.html` の `apiConnections` を編集:
-
-```javascript
-context.apiConnections = [
-  {
-    url: 'https://www.openstreetmap.org',
-    apiUrl: 'https://api.openstreetmap.org',
-    client_id: '<YOUR_CLIENT_ID>',
-    client_secret: '<YOUR_CLIENT_SECRET>'
-  }
-];
-```
-
-> **重要**: `dist/index.html` はビルド時に上書きされないため、ビルド後に手動で設定するか、ルートの `index.html` も同様に変更しておいてください。
-
-#### 4-2. osm-auth と land.html
-
-osm-auth v3.0.0 以降が必要です（2025年7月の OSM サーバー COOP ヘッダー対応）。
-
-```bash
-# osm-auth のバージョン確認・更新
-npm install osm-auth@latest
-```
-
-`dist/land.html` は BroadcastChannel API を使用する形式である必要があります:
-
-```html
-<!DOCTYPE html>
-<html>
-  <head></head>
-  <body>
-    <script>
-      new BroadcastChannel('osm-api-auth-complete').postMessage(window.location.href);
-      window.close();
-    </script>
-  </body>
-</html>
-```
-
-> **背景**: 2025年7月に OSM サーバーが Cross-Origin Opener Policy (COOP) ヘッダーを追加したため、従来の `window.opener.authComplete()` 方式は動作しません。osm-auth v3 では BroadcastChannel を使用して認証コードを親ウィンドウに受け渡します。
-
-#### 4-3. API URL を本番用に変更
+#### 4-1. API URL を本番用に変更
 
 `modules/services/MapWithAIService.js` を編集:
 
@@ -346,43 +295,40 @@ npm install osm-auth@latest
 return `http://localhost:8000/api/mapwithai/buildings?${params.toString()}`;
 
 // 変更後
-return `https://<YOUR_DOMAIN>/api/mapwithai/buildings?${params.toString()}`;
+return `https://plateau.example.com/api/mapwithai/buildings?${params.toString()}`;
 ```
 
 `data/osmf_datasets.json` を編集:
 
 ```json
 {
-  "url": "https://<YOUR_DOMAIN>/api/mapwithai/buildings"
+  "url": "https://plateau.example.com/api/mapwithai/buildings"
 }
 ```
 
-#### 4-4. プロダクションビルド
+#### 4-2. プロダクションビルド
 
 ```bash
 cd /path/to/Rapid
 npm install
-npm run all
+npm run dist
 ```
 
 `dist/` ディレクトリに以下が生成されます:
-- `index.html` — エントリポイント（OAuth2 設定含む）
-- `land.html` — OAuth2 コールバックページ（BroadcastChannel 対応）
-- `rapid.min.js` — プロダクションバンドル（osm-auth v3 含む）
-- `rapid.legacy.min.js` — レガシーブラウザ用
+- `index.html`
+- `rapid.min.js` (プロダクションバンドル)
+- `rapid.legacy.min.js` (レガシーブラウザ用)
 - `rapid.css`
 - `img/`, `data/` 等のアセット
 
-> **注意**: ビルド後に `dist/index.html` の `client_id` / `client_secret` が正しいか確認してください。ルートの `index.html` を変更していない場合、ビルドでデフォルト値に戻る可能性があります。
-
-#### 4-5. VPS にアップロード
+#### 4-3. VPS にアップロード
 
 ```bash
-# VPS 側のディレクトリ作成（初回のみ）
-ssh plateau-vps "sudo mkdir -p /var/www/rapid && sudo chown www-data:www-data /var/www/rapid"
+# VPS 側のディレクトリ作成
+ssh user@vps "sudo mkdir -p /var/www/rapid && sudo chown www-data:www-data /var/www/rapid"
 
 # dist の中身をアップロード
-rsync -avz --delete dist/ plateau-vps:/var/www/rapid/
+rsync -avz --delete dist/ user@vps:/var/www/rapid/
 ```
 
 ---
@@ -536,6 +482,3 @@ sudo systemctl stop plateau-api      # 停止
 | RapiD で建物が表示されない | ブラウザの開発者ツール Network タブで API リクエストを確認。API URL が正しいか、CORS エラーがないか |
 | 502 Bad Gateway | uvicorn が起動しているか、ポート 8000 でリッスンしているか確認 |
 | SSL 証明書エラー | `sudo certbot renew` で更新。nginx 設定で証明書パスを確認 |
-| OSM ログインで白い画面 | `opener is null` エラーの場合、osm-auth v3.0.0 以降 + BroadcastChannel 対応の `land.html` が必要。セクション 4-2 を参照 |
-| OSM ログインで redirect_uri エラー | OSM OAuth2 アプリ設定のリダイレクト URI が `https://<YOUR_DOMAIN>/land.html` と一致しているか確認 |
-| OSM ログインで client_id エラー | `dist/index.html` の `apiConnections` に正しい `client_id` / `client_secret` が設定されているか確認 |

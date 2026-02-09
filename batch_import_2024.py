@@ -256,11 +256,11 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
             "--citycode", citycode,
             "--output-dir", str(data_dir)
         ]
-        dl_result = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=1800)
+        dl_result = subprocess.run(dl_cmd, text=True, timeout=1800)
 
         if dl_result.returncode != 0:
-            logger.error(f"❌ [{citycode}] ダウンロード失敗: {dl_result.stderr[-500:]}")
-            result["error"] = f"download_failed: {dl_result.stderr[-200:]}"
+            logger.error(f"❌ [{citycode}] ダウンロード失敗")
+            result["error"] = "download_failed"
             return result
 
         # ZIPファイルがあるか確認
@@ -281,11 +281,11 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
             "--postgres-url", postgres_url,
             "--citycode", citycode
         ]
-        import_result = subprocess.run(import_cmd, capture_output=True, text=True, timeout=3600)
+        import_result = subprocess.run(import_cmd, text=True, timeout=3600)
 
         if import_result.returncode != 0:
-            logger.error(f"❌ [{citycode}] インポート失敗: {import_result.stderr[-500:]}")
-            result["error"] = f"import_failed: {import_result.stderr[-200:]}"
+            logger.error(f"❌ [{citycode}] インポート失敗")
+            result["error"] = "import_failed"
             return result
 
         result["import_ok"] = True

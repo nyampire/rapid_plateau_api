@@ -222,12 +222,12 @@ def get_imported_citycodes(postgres_url: str) -> set:
         datasets = cursor.fetchall()
         conn.close()
 
-        # source_datasetからcitycodeを抽出（例: "12221_yachiyo-shi_2024" → "12221"）
+        # source_datasetからcitycodeを抽出（例: "plateau_03201_59413067_bldg_6697_op.osm" → "03201"）
         imported = set()
         for (dataset,) in datasets:
             if dataset:
                 import re
-                match = re.match(r'^(\d{5})', dataset)
+                match = re.search(r'(\d{5})', dataset)
                 if match:
                     imported.add(match.group(1))
         return imported

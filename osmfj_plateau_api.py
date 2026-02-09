@@ -103,6 +103,7 @@ class OSMFJPlateauAPI:
                 """
                 distinct_key = "MD5(ST_AsText(b.geom))"
 
+            # LATERAL JOINで各建物のノードを個別に集約（GROUP BY不要）
             query = f"""
                 WITH unique_buildings AS (
                     SELECT DISTINCT ON ({distinct_key})
@@ -123,16 +124,10 @@ class OSMFJPlateauAPI:
                         b.shop,
                         b.tourism,
                         b.leisure,
-                        b.landuse,
-                        b.geom,
-                        b.centroid,
-                        ST_AsText(b.geom) as geometry_wkt,
-                        ST_Distance(b.centroid, ST_SetSRID(ST_Point(%s, %s), 4326)) as distance,
-                        ST_X(b.centroid) as centroid_lon,
-                        ST_Y(b.centroid) as centroid_lat
+                        b.landuse
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
-                    ORDER BY {distinct_key}, b.osm_id
+                    ORDER BY {distinct_key}
                 )
                 SELECT
                     ub.id,
@@ -153,11 +148,10 @@ class OSMFJPlateauAPI:
                     ub.tourism,
                     ub.leisure,
                     ub.landuse,
-                    ub.geometry_wkt,
-                    ub.distance,
-                    ub.centroid_lon,
-                    ub.centroid_lat,
-                    ARRAY_AGG(
+                    bn.nodes
+                FROM unique_buildings ub
+                LEFT JOIN LATERAL (
+                    SELECT ARRAY_AGG(
                         json_build_object(
                             'id', n.id,
                             'osm_id', n.osm_id,
@@ -166,21 +160,14 @@ class OSMFJPlateauAPI:
                             'sequence_id', n.sequence_id
                         ) ORDER BY n.sequence_id
                     ) as nodes
-                FROM unique_buildings ub
-                LEFT JOIN plateau_building_nodes n ON ub.id = n.building_id
-                GROUP BY ub.id, ub.osm_id, ub.building, ub.height, ub.ele, ub.building_levels,
-                         ub.name, ub.addr_housenumber, ub.addr_street, ub.start_date,
-                         ub.building_material, ub.roof_material, ub.roof_shape,
-                         ub.amenity, ub.shop, ub.tourism, ub.leisure, ub.landuse,
-                         ub.geom, ub.centroid, ub.geometry_wkt, ub.distance,
-                         ub.centroid_lon, ub.centroid_lat
-                ORDER BY ub.distance, ub.osm_id
+                    FROM plateau_building_nodes n
+                    WHERE n.building_id = ub.id
+                ) bn ON true
+                ORDER BY ub.osm_id
                 LIMIT %s
             """
 
-            center_lon = (min_lon + max_lon) / 2
-            center_lat = (min_lat + max_lat) / 2
-            params = [center_lon, center_lat, min_lon, min_lat, max_lon, max_lat, limit]
+            params = [min_lon, min_lat, max_lon, max_lat, limit]
 
             cursor.execute(query, params)
             buildings = cursor.fetchall()

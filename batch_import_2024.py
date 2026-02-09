@@ -208,8 +208,31 @@ LARGE_CITIES = {
 }
 
 
+def get_done_dir(base_dir: Path) -> Path:
+    """完了記録ディレクトリを取得"""
+    done_dir = base_dir / ".done"
+    done_dir.mkdir(parents=True, exist_ok=True)
+    return done_dir
+
+
+def mark_city_done(base_dir: Path, citycode: str):
+    """都市のインポート完了を記録"""
+    done_file = get_done_dir(base_dir) / f"{citycode}.done"
+    done_file.write_text(datetime.now().isoformat())
+    logger.info(f"📝 [{citycode}] 完了記録: {done_file}")
+
+
+def get_done_citycodes(base_dir: Path) -> set:
+    """完了記録ファイルからインポート済み都市コードを取得"""
+    done_dir = get_done_dir(base_dir)
+    done_codes = set()
+    for f in done_dir.glob("*.done"):
+        done_codes.add(f.stem)
+    return done_codes
+
+
 def get_imported_citycodes(postgres_url: str) -> set:
-    """DBから既にインポート済みの都市コードを取得"""
+    """DBから既にインポート済みの都市コードを取得（フォールバック）"""
     try:
         import psycopg2
         conn = psycopg2.connect(postgres_url)
@@ -291,6 +314,9 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
         result["import_ok"] = True
         logger.info(f"✅ [{citycode}] インポート完了")
 
+        # インポート完了を記録
+        mark_city_done(base_dir, citycode)
+
         # Phase 3: ZIPファイル削除（ストレージ節約）
         logger.info(f"🗑️ [{citycode}] クリーンアップ...")
         try:
@@ -343,11 +369,22 @@ def main():
         target_cities = list(CITIES_2024)
 
     # 既にインポート済みの都市を除外
+    base_dir = Path(args.base_dir)
     skip_set = set(ALREADY_IMPORTED)
-    if args.skip_imported and postgres_url:
-        db_imported = get_imported_citycodes(postgres_url)
-        skip_set = skip_set | db_imported
-        logger.info(f"📊 DB内インポート済み都市: {len(db_imported)}件")
+    if args.skip_imported:
+        # .doneファイルから完了済み都市を取得（確実）
+        done_codes = get_done_citycodes(base_dir)
+        skip_set = skip_set | done_codes
+        logger.info(f"📊 完了記録済み都市: {len(done_codes)}件")
+
+        # DBからも取得（フォールバック）
+        if postgres_url:
+            db_imported = get_imported_citycodes(postgres_url)
+            new_from_db = db_imported - skip_set
+            if new_from_db:
+                logger.info(f"📊 DB内追加検出（.doneなし）: {len(new_from_db)}件 {new_from_db}")
+                logger.info(f"   ⚠️ これらは不完全インポートの可能性あり。再処理します。")
+                # .doneがない都市はスキップしない（不完全の可能性）
 
     target_cities = [c for c in target_cities if c not in skip_set]
 
@@ -370,7 +407,6 @@ def main():
         return
 
     # 処理開始
-    base_dir = Path(args.base_dir)
     base_dir.mkdir(parents=True, exist_ok=True)
 
     results = []

@@ -9,6 +9,7 @@ Plateau建物データ PostGISインポーター
 """
 
 import os
+import sys
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -892,6 +893,7 @@ def main():
         logger.error("❌ インポートに失敗しました")
         print("\n❌ インポートに問題が発生しました")
         print("📋 詳細: plateau_importer2postgis.log を確認")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

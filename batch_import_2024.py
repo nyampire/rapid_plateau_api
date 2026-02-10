@@ -311,6 +311,27 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
             result["error"] = "import_failed"
             return result
 
+        # Phase 2.5: DBにデータが実際に入ったか検証
+        try:
+            import psycopg2 as pg2
+            verify_conn = pg2.connect(postgres_url)
+            verify_cur = verify_conn.cursor()
+            verify_cur.execute(
+                "SELECT COUNT(*) FROM plateau_buildings WHERE source_dataset LIKE %s",
+                (f"%{citycode}%",)
+            )
+            db_count = verify_cur.fetchone()[0]
+            verify_conn.close()
+
+            if db_count == 0:
+                logger.error(f"❌ [{citycode}] DB検証失敗: 建物データ0件")
+                result["error"] = "import_no_data_in_db"
+                return result
+
+            logger.info(f"✅ [{citycode}] DB検証OK: {db_count}件の建物")
+        except Exception as e:
+            logger.warning(f"⚠️ [{citycode}] DB検証スキップ: {e}")
+
         result["import_ok"] = True
         logger.info(f"✅ [{citycode}] インポート完了")
 

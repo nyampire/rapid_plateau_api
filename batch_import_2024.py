@@ -259,6 +259,40 @@ def get_imported_citycodes(postgres_url: str) -> set:
         return set()
 
 
+def cleanup_orphan_nodes(postgres_url: str):
+    """孤児ノード（対応する建物がないノード）を削除"""
+    try:
+        import psycopg2 as pg2
+        conn = pg2.connect(postgres_url)
+        cursor = conn.cursor()
+
+        # 孤児ノード数を確認
+        cursor.execute("""
+            SELECT COUNT(*) FROM plateau_building_nodes n
+            WHERE NOT EXISTS (
+                SELECT 1 FROM plateau_buildings b WHERE b.id = n.building_id
+            )
+        """)
+        orphan_count = cursor.fetchone()[0]
+
+        if orphan_count > 0:
+            logger.info(f"🧹 孤児ノード検出: {orphan_count}件 — 削除中...")
+            cursor.execute("""
+                DELETE FROM plateau_building_nodes n
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM plateau_buildings b WHERE b.id = n.building_id
+                )
+            """)
+            conn.commit()
+            logger.info(f"✅ 孤児ノード {orphan_count}件を削除")
+        else:
+            logger.info(f"✅ 孤児ノードなし")
+
+        conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️ 孤児ノードクリーンアップ失敗: {e}")
+
+
 def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: str) -> dict:
     """1都市をダウンロード→インポート→クリーンアップ"""
     data_dir = base_dir / citycode
@@ -272,6 +306,9 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
     }
 
     try:
+        # Phase 0: 孤児ノードクリーンアップ
+        cleanup_orphan_nodes(postgres_url)
+
         # Phase 1: ダウンロード
         logger.info(f"📥 [{citycode}] ダウンロード開始...")
         dl_cmd = [

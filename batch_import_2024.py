@@ -306,7 +306,16 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
     }
 
     try:
-        # Phase 0: 孤児ノードクリーンアップ
+        # Phase 0: ディスク残量チェック & 孤児ノードクリーンアップ
+        disk_usage = shutil.disk_usage(str(base_dir))
+        free_gb = disk_usage.free / (1024**3)
+        logger.info(f"💿 ディスク残量: {free_gb:.1f} GB")
+
+        if free_gb < 5.0:
+            logger.error(f"❌ [{citycode}] ディスク残量不足 ({free_gb:.1f} GB < 5 GB) — 中断")
+            result["error"] = f"disk_full ({free_gb:.1f}GB free)"
+            return result
+
         cleanup_orphan_nodes(postgres_url)
 
         # Phase 1: ダウンロード
@@ -375,21 +384,22 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
         # インポート完了を記録
         mark_city_done(base_dir, citycode)
 
-        # Phase 3: ZIPファイル削除（ストレージ節約）
-        logger.info(f"🗑️ [{citycode}] クリーンアップ...")
-        try:
-            shutil.rmtree(data_dir)
-            result["cleanup_ok"] = True
-            logger.info(f"✅ [{citycode}] クリーンアップ完了")
-        except Exception as e:
-            logger.warning(f"⚠️ [{citycode}] クリーンアップ失敗: {e}")
-
     except subprocess.TimeoutExpired:
         result["error"] = "timeout"
         logger.error(f"❌ [{citycode}] タイムアウト")
     except Exception as e:
         result["error"] = str(e)
         logger.error(f"❌ [{citycode}] エラー: {e}")
+    finally:
+        # ZIPファイル削除（成功・失敗を問わず必ず実行）
+        if data_dir.exists():
+            logger.info(f"🗑️ [{citycode}] クリーンアップ...")
+            try:
+                shutil.rmtree(data_dir)
+                result["cleanup_ok"] = True
+                logger.info(f"✅ [{citycode}] クリーンアップ完了")
+            except Exception as e:
+                logger.warning(f"⚠️ [{citycode}] クリーンアップ失敗: {e}")
 
     result["end_time"] = datetime.now().isoformat()
     return result

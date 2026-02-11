@@ -329,11 +329,19 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
                 "--citycode", citycode,
                 "--output-dir", str(data_dir)
             ]
-            dl_result = subprocess.run(dl_cmd, text=True, timeout=1800)
+            dl_result = subprocess.run(dl_cmd, text=True, timeout=1800,
+                                       stderr=subprocess.PIPE)
 
             if dl_result.returncode != 0:
-                logger.error(f"❌ [{citycode}] ダウンロード失敗")
+                stderr_msg = (dl_result.stderr or "").strip()
+                if stderr_msg:
+                    stderr_tail = stderr_msg[-2000:] if len(stderr_msg) > 2000 else stderr_msg
+                    logger.error(f"❌ [{citycode}] ダウンロード失敗 (returncode={dl_result.returncode})")
+                    logger.error(f"   stderr: {stderr_tail}")
+                else:
+                    logger.error(f"❌ [{citycode}] ダウンロード失敗 (returncode={dl_result.returncode}, stderr空)")
                 result["error"] = "download_failed"
+                result["stderr"] = stderr_msg[-500:] if stderr_msg else ""
                 return result
 
             existing_zips = list(data_dir.glob("*.zip"))
@@ -354,11 +362,20 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
             "--postgres-url", postgres_url,
             "--citycode", citycode
         ]
-        import_result = subprocess.run(import_cmd, text=True, timeout=3600)
+        import_result = subprocess.run(import_cmd, text=True, timeout=3600,
+                                       stderr=subprocess.PIPE)
 
         if import_result.returncode != 0:
-            logger.error(f"❌ [{citycode}] インポート失敗")
+            stderr_msg = (import_result.stderr or "").strip()
+            # stderrの末尾を記録（長すぎる場合は末尾2000文字）
+            if stderr_msg:
+                stderr_tail = stderr_msg[-2000:] if len(stderr_msg) > 2000 else stderr_msg
+                logger.error(f"❌ [{citycode}] インポート失敗 (returncode={import_result.returncode})")
+                logger.error(f"   stderr: {stderr_tail}")
+            else:
+                logger.error(f"❌ [{citycode}] インポート失敗 (returncode={import_result.returncode}, stderr空)")
             result["error"] = "import_failed"
+            result["stderr"] = stderr_msg[-500:] if stderr_msg else ""
             return result
 
         # Phase 2.5: DBにデータが実際に入ったか検証

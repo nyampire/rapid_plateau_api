@@ -623,6 +623,11 @@ class PlateauImporter2PostGIS:
                                 "area": area,
                                 "coords": coords[:5],
                                 "tags": {k: v for k, v in tags.items() if k in ('building', 'height', 'name', 'addr:full')},
+                                "probable_cause": "CityGML",
+                                "probable_cause_detail": "元CityGMLのgml:posList座標値の問題。"
+                                    "座標が重複・近接しているか、EPSG変換時の精度損失により"
+                                    "面積がほぼゼロになっている。OSM変換ツールは座標をそのまま"
+                                    "変換するため、.osmファイル側の問題ではない。",
                                 "diagnosis": "ポリゴンの面積が極小 (< 0.000001度^2, 約0.01m^2)。"
                                     "頂点座標が同一地点に集中しているか、CityGMLのLOD0フットプリントが正しく生成されていない可能性。",
                                 "citygml_check": "元CityGMLのbldg:lod0FootPrint (またはbldg:lod0RoofEdge) 内の"
@@ -641,12 +646,14 @@ class PlateauImporter2PostGIS:
                             "num_coords": len(coords),
                             "coords": coords,
                             "tags": {k: v for k, v in tags.items() if k in ('building', 'height', 'name', 'addr:full')},
+                            "probable_cause": "CityGML or OSM変換",
+                            "probable_cause_detail": "元CityGMLの座標数不足、またはCityGML→OSM変換時の"
+                                "頂点欠落のいずれか。CityGMLのgml:posListに十分な座標ペアがあるなら"
+                                ".osm変換ツール側の問題、なければCityGML側の問題。",
                             "diagnosis": f"ポリゴン閉鎖後の頂点数が{len(coords)}点。"
-                                "有効なポリゴンには最低4点 (3頂点+閉鎖点) が必要。"
-                                "CityGML→OSM変換時にノードが欠落した可能性。",
+                                "有効なポリゴンには最低4点 (3頂点+閉鎖点) が必要。",
                             "citygml_check": "元CityGMLで当該gml:idのbldg:lod0FootPrint内gml:posListの"
-                                "座標ペア数が3組以上あるか確認。"
-                                "変換ツール側でnd refが正しく出力されているかも要確認。",
+                                "座標ペア数が3組以上あるか確認。",
                             "qgis_check": "元CityGMLをQGISで読み込み、当該建物のジオメトリが"
                                 "正常にレンダリングされるか確認。表示されない場合はCityGML側のデータ不備。",
                         })
@@ -661,13 +668,17 @@ class PlateauImporter2PostGIS:
                         "num_node_refs": len(node_refs),
                         "node_refs_sample": node_refs[:10],
                         "tags": {k: v for k, v in tags.items() if k in ('building', 'height', 'name', 'addr:full')},
+                        "probable_cause": "OSM変換",
+                        "probable_cause_detail": "OSM変換ツール側の問題の可能性が高い。"
+                            "way要素がnd refでノードを参照しているが、対応するnode要素が"
+                            ".osmファイル内に出力されていない。CityGML側には座標データが"
+                            "存在するはずなので、変換時のノード出力漏れが原因。"
+                            "ファイル分割境界でのノード欠落が典型的なパターン。",
                         "diagnosis": f"way要素はnd refを{len(node_refs)}件参照していますが、"
                             f"座標解決できたノードは{len(coords)}点のみ。"
-                            "OSMファイル内のnode定義が欠落しているか、"
-                            "nd refが存在しないノードIDを参照している。",
-                        "citygml_check": "CityGML→OSM変換ツールが複数ファイルにノードを分割出力する場合、"
-                            "ファイル境界でノード欠落が発生することがある。"
-                            "変換ツールのログでエラーや警告が出ていないか確認。",
+                            "OSMファイル内のnode定義が欠落している。",
+                        "citygml_check": "元CityGMLで当該gml:idの建物に座標データが存在するか確認。"
+                            "存在する場合は変換ツール側の不具合。",
                         "qgis_check": "OSMファイルをQGISで読み込み (QuickOSMプラグイン等)、"
                             "当該way_idがポリゴンとして表示されるか確認。"
                             "表示されない場合はノード参照の不整合が原因。",
@@ -682,6 +693,10 @@ class PlateauImporter2PostGIS:
                     "way_id": building.get('way_id', 'unknown'),
                     "source_file": building.get('source_file', 'unknown'),
                     "error_message": str(e),
+                    "probable_cause": "OSM変換 or インポーター",
+                    "probable_cause_detail": "タグ値や座標値に不正なデータが含まれている場合は"
+                        ".osmファイル (変換ツール) 側の問題。パース処理自体のバグであれば"
+                        "本インポーターの問題。error_messageの内容で切り分け可能。",
                     "diagnosis": "建物データの解析中に予期しないエラーが発生。"
                         "タグ値に不正な文字列が含まれているか、座標値が数値として解析できない可能性。",
                     "citygml_check": "エラーメッセージを元に、当該建物のタグや座標値に"

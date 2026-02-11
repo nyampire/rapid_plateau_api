@@ -681,40 +681,39 @@ class PlateauImporter2PostGIS:
                 )
                 logger.info("✅ 建物投入完了")
 
-            # ノード投入（重複回避）
+            # ノード投入
             if nodes_data:
                 logger.info("📍 ノードデータ投入中...")
 
-                # 既存ノードIDを取得
-                cursor.execute("SELECT osm_id FROM plateau_building_nodes")
-                existing_node_ids = set(row[0] for row in cursor.fetchall())
-                logger.info(f"   既存ノードID: {len(existing_node_ids):,}件")
+                # 今回投入するbuilding_idの集合を取得（直前にINSERTした建物のみ）
+                cursor.execute(
+                    "SELECT id FROM plateau_buildings WHERE source_dataset LIKE %s",
+                    (f"%{self.citycode}%",)
+                )
+                current_building_ids = set(row[0] for row in cursor.fetchall())
+                logger.info(f"   今回の建物ID: {len(current_building_ids):,}件")
 
-                # 既存building_idを取得（foreign key検証用）
-                cursor.execute("SELECT id FROM plateau_buildings")
-                existing_building_ids = set(row[0] for row in cursor.fetchall())
-                logger.info(f"   既存建物ID: {len(existing_building_ids):,}件")
-
-                # 重複しない & building_idが存在するノードのみをフィルタリング
+                # 今回の建物に属するノードのみフィルタ & データ内重複除去
                 unique_nodes_data = []
+                seen_node_ids = set()
                 skipped_count = 0
                 orphan_count = 0
 
                 for node_data in nodes_data:
                     node_id = node_data[0]  # osm_id
                     building_id = node_data[1]  # building_id
-                    if node_id in existing_node_ids:
+                    if node_id in seen_node_ids:
                         skipped_count += 1
-                    elif building_id not in existing_building_ids:
+                    elif building_id not in current_building_ids:
                         orphan_count += 1
                     else:
                         unique_nodes_data.append(node_data)
-                        existing_node_ids.add(node_id)  # 今回追加分も記録
+                        seen_node_ids.add(node_id)
 
                 if orphan_count > 0:
                     logger.warning(f"   ⚠️ 建物なしノード除外: {orphan_count:,}件")
 
-                logger.info(f"   ユニークノード: {len(unique_nodes_data):,}件")
+                logger.info(f"   投入ノード: {len(unique_nodes_data):,}件")
                 logger.info(f"   重複スキップ: {skipped_count:,}件")
 
                 if unique_nodes_data:

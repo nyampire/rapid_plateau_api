@@ -637,6 +637,29 @@ class PlateauImporter2PostGIS:
             cursor = conn.cursor()
 
             # 建物投入
+            # 不完全インポートの既存データを先に削除（citycode指定時）
+            if self.citycode and self.citycode != "unknown":
+                cursor.execute(
+                    "SELECT COUNT(*) FROM plateau_buildings WHERE source_dataset LIKE %s",
+                    (f"%{self.citycode}%",)
+                )
+                existing_count = cursor.fetchone()[0]
+                if existing_count > 0:
+                    logger.info(f"🧹 既存データ検出: {self.citycode} ({existing_count}件) — 削除して再インポート")
+                    # ノードを先に削除（foreign key制約）
+                    cursor.execute("""
+                        DELETE FROM plateau_building_nodes
+                        WHERE building_id IN (
+                            SELECT id FROM plateau_buildings WHERE source_dataset LIKE %s
+                        )
+                    """, (f"%{self.citycode}%",))
+                    cursor.execute(
+                        "DELETE FROM plateau_buildings WHERE source_dataset LIKE %s",
+                        (f"%{self.citycode}%",)
+                    )
+                    conn.commit()
+                    logger.info(f"✅ 既存データ削除完了")
+
             if buildings_data:
                 logger.info("🏢 建物データ投入中...")
 

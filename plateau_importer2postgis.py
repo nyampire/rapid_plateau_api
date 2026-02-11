@@ -495,6 +495,12 @@ class PlateauImporter2PostGIS:
         processed_count = 0
         skipped_count = 0
         duplicate_count = 0
+        skip_reasons = {
+            "too_few_coords": 0,    # 座標3点未満（ポリゴン形成不可）
+            "too_few_points": 0,    # 閉鎖後4点未満
+            "tiny_area": 0,         # 極小面積
+            "error": 0,             # 例外発生
+        }
 
         for i, building in enumerate(all_buildings, 1):
             try:
@@ -607,20 +613,34 @@ class PlateauImporter2PostGIS:
                             processed_count += 1
                         else:
                             skipped_count += 1
+                            skip_reasons["tiny_area"] += 1
                     else:
                         skipped_count += 1
+                        skip_reasons["too_few_points"] += 1
                 else:
                     skipped_count += 1
+                    skip_reasons["too_few_coords"] += 1
 
             except Exception as e:
                 logger.warning(f"⚠️ 建物処理エラー {i}: {e}")
                 skipped_count += 1
+                skip_reasons["error"] += 1
                 continue
 
         logger.info(f"📊 建物処理結果:")
         logger.info(f"   成功: {processed_count:,}件")
         logger.info(f"   重複除去: {duplicate_count:,}件")
         logger.info(f"   スキップ: {skipped_count:,}件")
+        if skipped_count > 0:
+            for reason, count in skip_reasons.items():
+                if count > 0:
+                    reason_labels = {
+                        "too_few_coords": "座標3点未満（ポリゴン形成不可）",
+                        "too_few_points": "閉鎖後4点未満",
+                        "tiny_area": "極小面積",
+                        "error": "処理エラー",
+                    }
+                    logger.info(f"     - {reason_labels.get(reason, reason)}: {count:,}件")
         logger.info(f"   総ノード: {len(nodes_data):,}件")
 
         return buildings_data, nodes_data

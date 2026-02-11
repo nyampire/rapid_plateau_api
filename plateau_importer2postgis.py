@@ -744,6 +744,100 @@ class PlateauImporter2PostGIS:
 
         return buildings_data, nodes_data
 
+    def insert_to_database_batch(self, buildings_data: List, nodes_data: List) -> bool:
+        """バッチ単位のDB投入（事前削除なし・run_complete_importのバッチ処理用）"""
+        logger.info(f"💾 バッチDB投入中...")
+        logger.info(f"   建物: {len(buildings_data):,}件")
+        logger.info(f"   ノード: {len(nodes_data):,}件")
+
+        conn = psycopg2.connect(self.postgres_url)
+
+        try:
+            cursor = conn.cursor()
+
+            if buildings_data:
+                logger.info("🏢 建物データ投入中...")
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO plateau_buildings
+                    (osm_id, building, height, ele, building_levels, building_levels_underground,
+                     source_dataset, plateau_id, geometry_wkt,
+                     name, addr_full, addr_housenumber, addr_street,
+                     start_date, building_material, roof_material, roof_shape,
+                     amenity, shop, tourism, leisure, landuse,
+                     geom, centroid)
+                    VALUES %s
+                    """,
+                    buildings_data,
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
+                    page_size=1000
+                )
+                logger.info("✅ 建物投入完了")
+
+            if nodes_data:
+                logger.info("📍 ノードデータ投入中...")
+
+                # 今回のバッチで投入した建物の osm_id → DB id マッピング
+                # バッチ内の建物のosm_idリストを作成
+                batch_osm_ids = [b[0] for b in buildings_data]  # buildings_data[0] = osm_id
+                # IN句で一括取得（バッチ単位なので件数は限定的）
+                cursor.execute(
+                    "SELECT osm_id, id FROM plateau_buildings WHERE osm_id = ANY(%s)",
+                    (batch_osm_ids,)
+                )
+                osm_id_to_db_id = dict(cursor.fetchall())
+                logger.info(f"   建物IDマッピング: {len(osm_id_to_db_id):,}件")
+
+                mapped_nodes_data = []
+                seen_node_ids = set()
+                skipped_count = 0
+                orphan_count = 0
+
+                for node_data in nodes_data:
+                    node_id = node_data[0]
+                    osm_building_id = node_data[1]
+                    if node_id in seen_node_ids:
+                        skipped_count += 1
+                    elif osm_building_id not in osm_id_to_db_id:
+                        orphan_count += 1
+                    else:
+                        db_building_id = osm_id_to_db_id[osm_building_id]
+                        mapped_node = (node_data[0], db_building_id, node_data[2],
+                                       node_data[3], node_data[4], node_data[5], node_data[6])
+                        mapped_nodes_data.append(mapped_node)
+                        seen_node_ids.add(node_id)
+
+                if orphan_count > 0:
+                    logger.warning(f"   ⚠️ 建物なしノード除外: {orphan_count:,}件")
+                logger.info(f"   投入ノード: {len(mapped_nodes_data):,}件")
+                if skipped_count > 0:
+                    logger.info(f"   重複スキップ: {skipped_count:,}件")
+
+                if mapped_nodes_data:
+                    execute_values(
+                        cursor,
+                        """
+                        INSERT INTO plateau_building_nodes (osm_id, building_id, sequence_id, lat, lon, geom)
+                        VALUES %s
+                        """,
+                        mapped_nodes_data,
+                        template="(%s, %s, %s, %s, %s, ST_Point(%s, %s))",
+                        page_size=5000
+                    )
+                logger.info("✅ ノード投入完了")
+
+            conn.commit()
+            logger.info(f"✅ バッチコミット完了")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ バッチDB投入失敗: {e}")
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def insert_to_database_safe(self, buildings_data: List, nodes_data: List) -> bool:
         """データベース安全投入（トランザクション管理・重複回避）"""
         logger.info(f"💾 データベースに安全投入中...")
@@ -918,7 +1012,7 @@ class PlateauImporter2PostGIS:
         logger.info(f"📋 インポートレポート作成: {report_file}")
 
     def run_complete_import(self):
-        """完全インポート実行"""
+        """完全インポート実行（バッチ分割対応・大規模都市OOM対策）"""
         logger.info("🚀 Plateau建物データ PostGISインポート開始")
         logger.info("=" * 60)
 
@@ -944,62 +1038,105 @@ class PlateauImporter2PostGIS:
                 logger.error("❌ OSMファイルが見つかりません")
                 return False
 
-            # Phase 4: OSM解析
-            logger.info("\n📖 Phase 4: OSM解析・統合")
-            all_nodes = {}
-            all_buildings = []
+            # 既存データの事前削除（バッチ処理前に1回だけ実行）
+            if self.citycode and self.citycode != "unknown":
+                import psycopg2 as pg2
+                conn = pg2.connect(self.postgres_url)
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT COUNT(*) FROM plateau_buildings WHERE source_dataset LIKE %s",
+                    (f"%{self.citycode}%",)
+                )
+                existing_count = cursor.fetchone()[0]
+                if existing_count > 0:
+                    logger.info(f"🧹 既存データ検出: {self.citycode} ({existing_count}件) — 削除して再インポート")
+                    cursor.execute("""
+                        DELETE FROM plateau_building_nodes
+                        WHERE building_id IN (
+                            SELECT id FROM plateau_buildings WHERE source_dataset LIKE %s
+                        )
+                    """, (f"%{self.citycode}%",))
+                    cursor.execute(
+                        "DELETE FROM plateau_buildings WHERE source_dataset LIKE %s",
+                        (f"%{self.citycode}%",)
+                    )
+                    conn.commit()
+                    logger.info(f"✅ 既存データ削除完了")
+                conn.close()
 
-            for i, osm_file in enumerate(osm_files, 1):
-                logger.info(f"📖 [{i:3d}/{len(osm_files)}] 解析中: {osm_file.name}")
+            # バッチサイズ決定（ファイル数に応じて分割）
+            BATCH_SIZE = 10  # 10ファイルずつ処理
+            num_batches = (len(osm_files) + BATCH_SIZE - 1) // BATCH_SIZE
+            logger.info(f"📦 バッチ分割: {len(osm_files)}ファイル → {num_batches}バッチ (各{BATCH_SIZE}ファイル)")
 
-                nodes, buildings = self.parse_osm_file_safe(osm_file)
+            total_buildings_count = 0
+            total_nodes_count = 0
 
-                # ノード統合（重複座標は同一IDに）
-                for original_id, node_data in nodes.items():
-                    file_specific_key = f"{osm_file.name}:{original_id}"
-                    all_nodes[file_specific_key] = node_data
+            for batch_idx in range(num_batches):
+                batch_start = batch_idx * BATCH_SIZE
+                batch_end = min(batch_start + BATCH_SIZE, len(osm_files))
+                batch_files = osm_files[batch_start:batch_end]
 
-                # 建物統合
-                for building in buildings:
-                    # ノード参照をファイル固有キーに変更
-                    building['node_refs'] = [f"{osm_file.name}:{ref}" for ref in building['node_refs']]
-                    all_buildings.append(building)
+                logger.info(f"\n{'='*40}")
+                logger.info(f"📦 バッチ {batch_idx+1}/{num_batches} ({len(batch_files)}ファイル)")
+                logger.info(f"{'='*40}")
 
-                logger.info(f"     結果: {len(nodes):,}ノード, {len(buildings):,}建物")
+                # Phase 4: OSM解析（バッチ単位）
+                all_nodes = {}
+                all_buildings = []
 
-            logger.info(f"📊 統合結果: {len(all_nodes):,}ノード, {len(all_buildings):,}建物")
-            logger.info(f"🆔 ユニーク座標: {len(self.node_coordinate_map):,}箇所")
+                for i, osm_file in enumerate(batch_files, 1):
+                    file_num = batch_start + i
+                    logger.info(f"📖 [{file_num:3d}/{len(osm_files)}] 解析中: {osm_file.name}")
 
-            # Phase 5: 建物処理
-            logger.info("\n🏗️ Phase 5: 建物データ処理")
-            buildings_data, nodes_data = self.process_buildings_safe(all_nodes, all_buildings)
+                    nodes, buildings = self.parse_osm_file_safe(osm_file)
 
-            if not buildings_data:
-                logger.error("❌ 処理可能な建物データがありません")
-                return False
+                    for original_id, node_data in nodes.items():
+                        file_specific_key = f"{osm_file.name}:{original_id}"
+                        all_nodes[file_specific_key] = node_data
 
-            # Phase 6: データベース投入
-            logger.info("\n💾 Phase 6: データベース投入")
-            success = self.insert_to_database_safe(buildings_data, nodes_data)
+                    for building in buildings:
+                        building['node_refs'] = [f"{osm_file.name}:{ref}" for ref in building['node_refs']]
+                        all_buildings.append(building)
 
-            if not success:
-                return False
+                    logger.info(f"     結果: {len(nodes):,}ノード, {len(buildings):,}建物")
+
+                logger.info(f"📊 バッチ統合: {len(all_nodes):,}ノード, {len(all_buildings):,}建物")
+
+                # Phase 5: 建物処理（バッチ単位）
+                buildings_data, nodes_data = self.process_buildings_safe(all_nodes, all_buildings)
+
+                if buildings_data:
+                    # Phase 6: データベース投入（バッチ単位、事前削除なし）
+                    logger.info(f"💾 バッチ {batch_idx+1} DB投入中...")
+                    success = self.insert_to_database_batch(buildings_data, nodes_data)
+                    if not success:
+                        logger.error(f"❌ バッチ {batch_idx+1} DB投入失敗")
+                        return False
+
+                    total_buildings_count += len(buildings_data)
+                    total_nodes_count += len(nodes_data)
+
+                # メモリ解放
+                del all_nodes, all_buildings, buildings_data, nodes_data
+                import gc
+                gc.collect()
+                logger.info(f"🧹 メモリ解放完了")
 
             # Phase 7: レポート作成
             logger.info("\n📋 Phase 7: インポートレポート作成")
             self.create_import_report(
                 start_analysis, len(zip_files), len(osm_files),
-                len(buildings_data), len(nodes_data)
+                total_buildings_count, total_nodes_count
             )
 
-            # 完了時間
             elapsed_time = time.time() - start_time
 
             logger.info("=" * 60)
             logger.info("🎉 Plateau建物データ PostGISインポート成功!")
             logger.info(f"⏱️ 処理時間: {elapsed_time/60:.1f}分")
-            logger.info(f"🏢 新規建物: {len(buildings_data):,}件")
-            logger.info(f"📍 新規ノード: {len(nodes_data):,}件")
+            logger.info(f"🏢 新規建物: {total_buildings_count:,}件")
+            logger.info(f"📍 新規ノード: {total_nodes_count:,}件")
             logger.info("✅ 次のステップ:")
             logger.info("   1. API動作確認")
             logger.info("   2. RapiD Editor表示テスト")

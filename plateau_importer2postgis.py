@@ -501,6 +501,7 @@ class PlateauImporter2PostGIS:
             "tiny_area": 0,         # 極小面積
             "error": 0,             # 例外発生
         }
+        skipped_buildings = []  # スキップした建物の詳細記録
 
         for i, building in enumerate(all_buildings, 1):
             try:
@@ -614,17 +615,50 @@ class PlateauImporter2PostGIS:
                         else:
                             skipped_count += 1
                             skip_reasons["tiny_area"] += 1
+                            skipped_buildings.append({
+                                "reason": "tiny_area",
+                                "way_id": building.get('way_id'),
+                                "source_file": source_file,
+                                "num_coords": len(coords),
+                                "area": area,
+                                "coords": coords[:5],  # 先頭5点のみ
+                                "tags": {k: v for k, v in tags.items() if k in ('building', 'height', 'name', 'addr:full')},
+                            })
                     else:
                         skipped_count += 1
                         skip_reasons["too_few_points"] += 1
+                        skipped_buildings.append({
+                            "reason": "too_few_points",
+                            "way_id": building.get('way_id'),
+                            "source_file": source_file,
+                            "num_coords": len(coords),
+                            "coords": coords,
+                            "tags": {k: v for k, v in tags.items() if k in ('building', 'height', 'name', 'addr:full')},
+                        })
                 else:
                     skipped_count += 1
                     skip_reasons["too_few_coords"] += 1
+                    # coordsはこの時点で不完全なので、node_refsの情報を記録
+                    skipped_buildings.append({
+                        "reason": "too_few_coords",
+                        "way_id": building.get('way_id'),
+                        "source_file": source_file,
+                        "num_coords": len(coords),
+                        "num_node_refs": len(node_refs),
+                        "node_refs_sample": node_refs[:10],
+                        "tags": {k: v for k, v in tags.items() if k in ('building', 'height', 'name', 'addr:full')},
+                    })
 
             except Exception as e:
                 logger.warning(f"⚠️ 建物処理エラー {i}: {e}")
                 skipped_count += 1
                 skip_reasons["error"] += 1
+                skipped_buildings.append({
+                    "reason": "error",
+                    "way_id": building.get('way_id', 'unknown'),
+                    "source_file": building.get('source_file', 'unknown'),
+                    "error_message": str(e),
+                })
                 continue
 
         logger.info(f"📊 建物処理結果:")
@@ -642,6 +676,26 @@ class PlateauImporter2PostGIS:
                     }
                     logger.info(f"     - {reason_labels.get(reason, reason)}: {count:,}件")
         logger.info(f"   総ノード: {len(nodes_data):,}件")
+
+        # スキップした建物の詳細をJSONファイルに出力
+        if skipped_buildings:
+            skip_report_file = f"skipped_buildings_{self.citycode}.json"
+            try:
+                import json
+                report_data = {
+                    "citycode": self.citycode,
+                    "total_buildings": len(all_buildings),
+                    "processed": processed_count,
+                    "skipped": skipped_count,
+                    "duplicates": duplicate_count,
+                    "skip_summary": {k: v for k, v in skip_reasons.items() if v > 0},
+                    "skipped_buildings": skipped_buildings,
+                }
+                with open(skip_report_file, 'w', encoding='utf-8') as f:
+                    json.dump(report_data, f, ensure_ascii=False, indent=2)
+                logger.info(f"📋 スキップ詳細レポート: {skip_report_file}")
+            except Exception as e:
+                logger.warning(f"⚠️ スキップレポート保存失敗: {e}")
 
         return buildings_data, nodes_data
 

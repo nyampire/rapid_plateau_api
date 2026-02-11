@@ -390,19 +390,28 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
     except Exception as e:
         result["error"] = str(e)
         logger.error(f"❌ [{citycode}] エラー: {e}")
-    finally:
-        # ZIPファイル削除（成功・失敗を問わず必ず実行）
-        if data_dir.exists():
-            logger.info(f"🗑️ [{citycode}] クリーンアップ...")
-            try:
-                shutil.rmtree(data_dir)
-                result["cleanup_ok"] = True
-                logger.info(f"✅ [{citycode}] クリーンアップ完了")
-            except Exception as e:
-                logger.warning(f"⚠️ [{citycode}] クリーンアップ失敗: {e}")
+
+    # ZIPファイルの削除はメインループ側で管理（keep_zip_count分保持）
 
     result["end_time"] = datetime.now().isoformat()
     return result
+
+
+def cleanup_old_data_dirs(base_dir: Path, keep_zip_count: int = 3):
+    """古いデータディレクトリを削除し、直近keep_zip_count件は保持する"""
+    data_dirs = sorted(
+        [d for d in base_dir.iterdir() if d.is_dir() and d.name != ".done"],
+        key=lambda d: d.stat().st_mtime
+    )
+    if len(data_dirs) <= keep_zip_count:
+        return
+    to_remove = data_dirs[:len(data_dirs) - keep_zip_count]
+    for d in to_remove:
+        try:
+            shutil.rmtree(d)
+            logger.info(f"🗑️ 古いデータ削除: {d.name}")
+        except Exception as e:
+            logger.warning(f"⚠️ データ削除失敗: {d.name}: {e}")
 
 
 def main():
@@ -502,6 +511,9 @@ def main():
                 fail_count += 1
                 logger.warning(f"❌ [{i}/{total}] {citycode} 失敗: {result.get('error', 'unknown')}")
 
+            # 古いデータディレクトリを削除（直近3都市分は保持）
+            cleanup_old_data_dirs(base_dir, keep_zip_count=3)
+
             # 都市間インターバル
             if i < total:
                 logger.info(f"⏱️ {args.city_interval}秒待機...")
@@ -523,6 +535,9 @@ def main():
         for r in results:
             if not r["import_ok"]:
                 logger.warning(f"     {r['citycode']}: {r.get('error', 'unknown')}")
+
+    # 残ったデータディレクトリを全削除
+    cleanup_old_data_dirs(base_dir, keep_zip_count=0)
 
     # レポートをJSONに保存
     report_file = f"batch_import_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"

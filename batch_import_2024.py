@@ -318,29 +318,33 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
 
         cleanup_orphan_nodes(postgres_url)
 
-        # Phase 1: ダウンロード
-        logger.info(f"📥 [{citycode}] ダウンロード開始...")
-        dl_cmd = [
-            python_cmd, "plateau_downloader.py",
-            "--citycode", citycode,
-            "--output-dir", str(data_dir)
-        ]
-        dl_result = subprocess.run(dl_cmd, text=True, timeout=1800)
+        # Phase 1: ダウンロード（既存ZIPがあればスキップ）
+        existing_zips = list(data_dir.glob("*.zip")) if data_dir.exists() else []
+        if existing_zips:
+            logger.info(f"📦 [{citycode}] 既存ZIP検出: {len(existing_zips)}ファイル — ダウンロードスキップ")
+        else:
+            logger.info(f"📥 [{citycode}] ダウンロード開始...")
+            dl_cmd = [
+                python_cmd, "plateau_downloader.py",
+                "--citycode", citycode,
+                "--output-dir", str(data_dir)
+            ]
+            dl_result = subprocess.run(dl_cmd, text=True, timeout=1800)
 
-        if dl_result.returncode != 0:
-            logger.error(f"❌ [{citycode}] ダウンロード失敗")
-            result["error"] = "download_failed"
-            return result
+            if dl_result.returncode != 0:
+                logger.error(f"❌ [{citycode}] ダウンロード失敗")
+                result["error"] = "download_failed"
+                return result
 
-        # ZIPファイルがあるか確認
-        zip_files = list(data_dir.glob("*.zip"))
-        if not zip_files:
+            existing_zips = list(data_dir.glob("*.zip"))
+
+        if not existing_zips:
             logger.warning(f"⚠️ [{citycode}] ZIPファイルなし — スキップ")
             result["error"] = "no_zip_files"
             return result
 
         result["download_ok"] = True
-        logger.info(f"✅ [{citycode}] ダウンロード完了: {len(zip_files)}ファイル")
+        logger.info(f"✅ [{citycode}] ZIP準備完了: {len(existing_zips)}ファイル")
 
         # Phase 2: インポート
         logger.info(f"📦 [{citycode}] インポート開始...")

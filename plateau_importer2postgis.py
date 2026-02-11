@@ -621,8 +621,15 @@ class PlateauImporter2PostGIS:
                                 "source_file": source_file,
                                 "num_coords": len(coords),
                                 "area": area,
-                                "coords": coords[:5],  # 先頭5点のみ
+                                "coords": coords[:5],
                                 "tags": {k: v for k, v in tags.items() if k in ('building', 'height', 'name', 'addr:full')},
+                                "diagnosis": "ポリゴンの面積が極小 (< 0.000001度^2, 約0.01m^2)。"
+                                    "頂点座標が同一地点に集中しているか、CityGMLのLOD0フットプリントが正しく生成されていない可能性。",
+                                "citygml_check": "元CityGMLのbldg:lod0FootPrint (またはbldg:lod0RoofEdge) 内の"
+                                    "gml:posList座標値に重複や極端な近接がないか確認。"
+                                    "EPSG変換時の精度損失も要確認。",
+                                "qgis_check": "QGISで当該座標付近を表示し、ジオメトリの妥当性チェック"
+                                    " (ベクタ > ジオメトリツール > 妥当性チェック) を実行。",
                             })
                     else:
                         skipped_count += 1
@@ -634,11 +641,18 @@ class PlateauImporter2PostGIS:
                             "num_coords": len(coords),
                             "coords": coords,
                             "tags": {k: v for k, v in tags.items() if k in ('building', 'height', 'name', 'addr:full')},
+                            "diagnosis": f"ポリゴン閉鎖後の頂点数が{len(coords)}点。"
+                                "有効なポリゴンには最低4点 (3頂点+閉鎖点) が必要。"
+                                "CityGML→OSM変換時にノードが欠落した可能性。",
+                            "citygml_check": "元CityGMLで当該gml:idのbldg:lod0FootPrint内gml:posListの"
+                                "座標ペア数が3組以上あるか確認。"
+                                "変換ツール側でnd refが正しく出力されているかも要確認。",
+                            "qgis_check": "元CityGMLをQGISで読み込み、当該建物のジオメトリが"
+                                "正常にレンダリングされるか確認。表示されない場合はCityGML側のデータ不備。",
                         })
                 else:
                     skipped_count += 1
                     skip_reasons["too_few_coords"] += 1
-                    # coordsはこの時点で不完全なので、node_refsの情報を記録
                     skipped_buildings.append({
                         "reason": "too_few_coords",
                         "way_id": building.get('way_id'),
@@ -647,6 +661,16 @@ class PlateauImporter2PostGIS:
                         "num_node_refs": len(node_refs),
                         "node_refs_sample": node_refs[:10],
                         "tags": {k: v for k, v in tags.items() if k in ('building', 'height', 'name', 'addr:full')},
+                        "diagnosis": f"way要素はnd refを{len(node_refs)}件参照していますが、"
+                            f"座標解決できたノードは{len(coords)}点のみ。"
+                            "OSMファイル内のnode定義が欠落しているか、"
+                            "nd refが存在しないノードIDを参照している。",
+                        "citygml_check": "CityGML→OSM変換ツールが複数ファイルにノードを分割出力する場合、"
+                            "ファイル境界でノード欠落が発生することがある。"
+                            "変換ツールのログでエラーや警告が出ていないか確認。",
+                        "qgis_check": "OSMファイルをQGISで読み込み (QuickOSMプラグイン等)、"
+                            "当該way_idがポリゴンとして表示されるか確認。"
+                            "表示されない場合はノード参照の不整合が原因。",
                     })
 
             except Exception as e:
@@ -658,6 +682,12 @@ class PlateauImporter2PostGIS:
                     "way_id": building.get('way_id', 'unknown'),
                     "source_file": building.get('source_file', 'unknown'),
                     "error_message": str(e),
+                    "diagnosis": "建物データの解析中に予期しないエラーが発生。"
+                        "タグ値に不正な文字列が含まれているか、座標値が数値として解析できない可能性。",
+                    "citygml_check": "エラーメッセージを元に、当該建物のタグや座標値に"
+                        "不正な値 (NaN, 空文字, 不正なUTF-8等) が含まれていないか確認。",
+                    "qgis_check": "元CityGMLをQGISで読み込み、当該gml:idの建物が"
+                        "正常にレンダリングされるか確認。属性テーブルで不正値の有無も確認。",
                 })
                 continue
 

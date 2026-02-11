@@ -685,45 +685,51 @@ class PlateauImporter2PostGIS:
             if nodes_data:
                 logger.info("📍 ノードデータ投入中...")
 
-                # 今回投入するbuilding_idの集合を取得（直前にINSERTした建物のみ）
+                # osm_id → auto increment id のマッピングを取得
+                # ノードのbuilding_idにはosm_id（building_id_counter）が入っているが、
+                # foreign keyはplateau_buildings.id（auto increment）を参照する
                 cursor.execute(
-                    "SELECT id FROM plateau_buildings WHERE source_dataset LIKE %s",
+                    "SELECT osm_id, id FROM plateau_buildings WHERE source_dataset LIKE %s",
                     (f"%{self.citycode}%",)
                 )
-                current_building_ids = set(row[0] for row in cursor.fetchall())
-                logger.info(f"   今回の建物ID: {len(current_building_ids):,}件")
+                osm_id_to_db_id = dict(cursor.fetchall())
+                logger.info(f"   建物IDマッピング: {len(osm_id_to_db_id):,}件")
 
-                # 今回の建物に属するノードのみフィルタ & データ内重複除去
-                unique_nodes_data = []
+                # building_idをDB上のidに差し替え & データ内重複除去
+                mapped_nodes_data = []
                 seen_node_ids = set()
                 skipped_count = 0
                 orphan_count = 0
 
                 for node_data in nodes_data:
-                    node_id = node_data[0]  # osm_id
-                    building_id = node_data[1]  # building_id
+                    node_id = node_data[0]       # osm_id
+                    osm_building_id = node_data[1]  # building_id (= building_id_counter = osm_id)
                     if node_id in seen_node_ids:
                         skipped_count += 1
-                    elif building_id not in current_building_ids:
+                    elif osm_building_id not in osm_id_to_db_id:
                         orphan_count += 1
                     else:
-                        unique_nodes_data.append(node_data)
+                        # building_idをDB上の自動採番idに差し替え
+                        db_building_id = osm_id_to_db_id[osm_building_id]
+                        mapped_node = (node_data[0], db_building_id, node_data[2],
+                                       node_data[3], node_data[4], node_data[5], node_data[6])
+                        mapped_nodes_data.append(mapped_node)
                         seen_node_ids.add(node_id)
 
                 if orphan_count > 0:
                     logger.warning(f"   ⚠️ 建物なしノード除外: {orphan_count:,}件")
 
-                logger.info(f"   投入ノード: {len(unique_nodes_data):,}件")
+                logger.info(f"   投入ノード: {len(mapped_nodes_data):,}件")
                 logger.info(f"   重複スキップ: {skipped_count:,}件")
 
-                if unique_nodes_data:
+                if mapped_nodes_data:
                     execute_values(
                         cursor,
                         """
                         INSERT INTO plateau_building_nodes (osm_id, building_id, sequence_id, lat, lon, geom)
                         VALUES %s
                         """,
-                        unique_nodes_data,
+                        mapped_nodes_data,
                         template="(%s, %s, %s, %s, %s, ST_Point(%s, %s))",
                         page_size=5000
                     )

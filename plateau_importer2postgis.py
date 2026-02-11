@@ -667,17 +667,29 @@ class PlateauImporter2PostGIS:
                 existing_node_ids = set(row[0] for row in cursor.fetchall())
                 logger.info(f"   既存ノードID: {len(existing_node_ids):,}件")
 
-                # 重複しないノードデータのみをフィルタリング
+                # 既存building_idを取得（foreign key検証用）
+                cursor.execute("SELECT id FROM plateau_buildings")
+                existing_building_ids = set(row[0] for row in cursor.fetchall())
+                logger.info(f"   既存建物ID: {len(existing_building_ids):,}件")
+
+                # 重複しない & building_idが存在するノードのみをフィルタリング
                 unique_nodes_data = []
                 skipped_count = 0
+                orphan_count = 0
 
                 for node_data in nodes_data:
                     node_id = node_data[0]  # osm_id
-                    if node_id not in existing_node_ids:
+                    building_id = node_data[1]  # building_id
+                    if node_id in existing_node_ids:
+                        skipped_count += 1
+                    elif building_id not in existing_building_ids:
+                        orphan_count += 1
+                    else:
                         unique_nodes_data.append(node_data)
                         existing_node_ids.add(node_id)  # 今回追加分も記録
-                    else:
-                        skipped_count += 1
+
+                if orphan_count > 0:
+                    logger.warning(f"   ⚠️ 建物なしノード除外: {orphan_count:,}件")
 
                 logger.info(f"   ユニークノード: {len(unique_nodes_data):,}件")
                 logger.info(f"   重複スキップ: {skipped_count:,}件")

@@ -92,23 +92,15 @@ class PlateauImporter2PostGIS:
             # 既存の最小値よりさらに小さい値から開始
             self.node_id_counter = min(min_node_id - 1, -1)
 
-            # 既存のノード座標をマップに読み込み（同一座標は同一IDを保証）
-            cursor.execute("""
-                SELECT osm_id, lat, lon 
-                FROM plateau_building_nodes 
-                WHERE osm_id IS NOT NULL
-            """)
-            existing_nodes = cursor.fetchall()
-            for osm_id, lat, lon in existing_nodes:
-                coord_key = f"{lat:.7f},{lon:.7f}"
-                self.node_coordinate_map[coord_key] = osm_id
+            # 既存ノード座標マップは読み込まない（OOM対策）
+            # 都市ごとにIDが独立しているため全テーブルのマップは不要
+            # node_coordinate_map はインポート中にインクリメンタルに構築される
 
             conn.close()
 
             logger.info(f"🔢 ID初期化完了:")
             logger.info(f"   建物IDカウンター: {self.building_id_counter} から開始")
             logger.info(f"   ノードIDカウンター: {self.node_id_counter} から開始")
-            logger.info(f"   既存ノード座標マップ: {len(self.node_coordinate_map):,} 件読み込み")
 
         except Exception as e:
             logger.warning(f"⚠️ ID初期化でエラー（デフォルト値を使用）: {e}")

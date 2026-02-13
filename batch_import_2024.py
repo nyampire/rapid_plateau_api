@@ -311,8 +311,10 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
         free_gb = disk_usage.free / (1024**3)
         logger.info(f"💿 ディスク残量: {free_gb:.1f} GB")
 
-        if free_gb < 5.0:
-            logger.error(f"❌ [{citycode}] ディスク残量不足 ({free_gb:.1f} GB < 5 GB) — 中断")
+        # 大規模都市はDB投入で数GB使うため閾値を高く設定
+        min_free_gb = 15.0 if citycode in LARGE_CITIES else 8.0
+        if free_gb < min_free_gb:
+            logger.error(f"❌ [{citycode}] ディスク残量不足 ({free_gb:.1f} GB < {min_free_gb} GB) — 中断")
             result["error"] = f"disk_full ({free_gb:.1f}GB free)"
             return result
 

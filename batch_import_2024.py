@@ -331,7 +331,9 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
                 "--citycode", citycode,
                 "--output-dir", str(data_dir)
             ]
-            dl_result = subprocess.run(dl_cmd, text=True, timeout=1800,
+            # 大規模都市はファイル数が多くダウンロードに時間がかかる
+            dl_timeout = 7200 if citycode in LARGE_CITIES else 1800
+            dl_result = subprocess.run(dl_cmd, text=True, timeout=dl_timeout,
                                        stderr=subprocess.PIPE)
 
             if dl_result.returncode != 0:
@@ -364,7 +366,8 @@ def process_city(citycode: str, base_dir: Path, postgres_url: str, python_cmd: s
             "--postgres-url", postgres_url,
             "--citycode", citycode
         ]
-        import_result = subprocess.run(import_cmd, text=True, timeout=3600,
+        import_timeout = 10800 if citycode in LARGE_CITIES else 3600
+        import_result = subprocess.run(import_cmd, text=True, timeout=import_timeout,
                                        stderr=subprocess.PIPE)
 
         if import_result.returncode != 0:

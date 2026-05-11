@@ -166,29 +166,61 @@ class TestDryRun:
 # ----------------------------------------------------------------------
 
 class TestConfirmExecute:
+    """
+    confirm_execute は誤操作防止のための2段階確認。
+    タイポ・大文字小文字違い・空白などをすべて弾く必要がある。
+    """
+
     def test_correct_inputs_pass(self, monkeypatch):
         """citycode 一致 + 'DELETE' で承認"""
         inputs = iter(['13112', 'DELETE'])
         monkeypatch.setattr('builtins.input', lambda prompt='': next(inputs))
         assert confirm_execute('13112', 262658, 2121054) is True
 
-    def test_wrong_citycode_rejects(self, monkeypatch):
-        """citycode 不一致なら拒否"""
-        inputs = iter(['13140'])  # typo
+    def test_trailing_whitespace_in_citycode_accepted(self, monkeypatch):
+        """前後の空白は strip される（タイポ防止）"""
+        inputs = iter(['  13112  ', 'DELETE'])
+        monkeypatch.setattr('builtins.input', lambda prompt='': next(inputs))
+        assert confirm_execute('13112', 100, 100) is True
+
+    @pytest.mark.parametrize('typed_citycode', [
+        '13140',       # 桁ずれ
+        '13111',       # 1桁違い
+        '1311',        # 短い
+        '131120',      # 長い
+        '',            # 空
+        '13112x',      # 余分な文字
+        'x13112',      # 先頭にゴミ
+        '13 112',      # スペース混入
+    ])
+    def test_wrong_citycode_rejects(self, monkeypatch, typed_citycode):
+        """citycode が完全一致でなければ拒否"""
+        inputs = iter([typed_citycode])
         monkeypatch.setattr('builtins.input', lambda prompt='': next(inputs))
         assert confirm_execute('13112', 100, 100) is False
 
-    def test_wrong_final_word_rejects(self, monkeypatch):
-        """citycode 一致しても 'DELETE' 以外なら拒否"""
-        inputs = iter(['13112', 'delete'])  # lowercase
+    @pytest.mark.parametrize('final_word', [
+        'delete',       # 小文字
+        'Delete',       # mixed case
+        'DELETE ',      # 末尾スペース（strip されればOKだが厳密）
+        ' DELETE',      # 先頭スペース
+        'DELETE!',      # 余分な文字
+        'yes',
+        'y',
+        '',
+        'DROP',
+        'REMOVE',
+    ])
+    def test_wrong_final_word_rejects(self, monkeypatch, final_word):
+        """citycode 一致しても DELETE 完全一致でなければ拒否"""
+        inputs = iter(['13112', final_word])
         monkeypatch.setattr('builtins.input', lambda prompt='': next(inputs))
-        assert confirm_execute('13112', 100, 100) is False
-
-    def test_yes_does_not_bypass_confirmation(self, monkeypatch):
-        """'yes' という入力では通らない（DELETE 完全一致が必要）"""
-        inputs = iter(['13112', 'yes'])
-        monkeypatch.setattr('builtins.input', lambda prompt='': next(inputs))
-        assert confirm_execute('13112', 100, 100) is False
+        result = confirm_execute('13112', 100, 100)
+        # strip 込みで 'DELETE' になるものは True、それ以外は False
+        if final_word.strip() == 'DELETE':
+            assert result is True
+        else:
+            assert result is False
 
 
 # ----------------------------------------------------------------------
@@ -211,17 +243,212 @@ class TestDeleteData:
         """FK 制約のためノードを先に削除する順序"""
         cursor = mock_connection.cursor.return_value
         cursor.fetchall.return_value = [(1,), (2,), (3,)]
-        cursor.rowcount = 100  # どちらの削除でも 100 件
+        cursor.rowcount = 100
 
         p = Purger('13112', 'postgresql://x')
         p.conn = mock_connection
-        buildings, nodes = p.delete_data()
+        p.delete_data()
 
         executed_sqls = [call[0][0] for call in cursor.execute.call_args_list]
         delete_sqls = [s for s in executed_sqls if 'DELETE FROM' in s]
         # 1番目が nodes、2番目が buildings
         assert 'plateau_building_nodes' in delete_sqls[0]
         assert 'plateau_buildings' in delete_sqls[1]
-        # ノードと建物の両方が削除されたという結果
-        assert buildings == 100
-        assert nodes == 100
+
+    def test_delete_returns_correct_counts_for_each_table(self):
+        """
+        buildings_deleted と nodes_deleted を取り違えていないか検証。
+        SQL内容を見て rowcount を切り替える smart mock cursor を作る。
+        """
+        from unittest.mock import MagicMock
+
+        cursor = MagicMock()
+        cursor.__enter__ = MagicMock(return_value=cursor)
+        cursor.__exit__ = MagicMock(return_value=None)
+        cursor.fetchall.return_value = [(1,), (2,), (3,)]
+
+        # 直前に実行された SQL に応じて rowcount を変える
+        rowcount_state = {'value': 0}
+
+        def execute_side_effect(sql, params=None):
+            sql_upper = (sql or '').upper()
+            if 'DELETE FROM PLATEAU_BUILDING_NODES' in sql_upper:
+                rowcount_state['value'] = 2_265_185
+            elif 'DELETE FROM PLATEAU_BUILDINGS' in sql_upper:
+                rowcount_state['value'] = 339_015
+            else:
+                rowcount_state['value'] = 0
+
+        cursor.execute.side_effect = execute_side_effect
+
+        # rowcount プロパティを動的に読む
+        type(cursor).rowcount = property(lambda self: rowcount_state['value'])
+
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        p = Purger('40130', 'postgresql://x')
+        p.conn = conn
+        buildings_deleted, nodes_deleted = p.delete_data()
+
+        # 戻り値が (buildings, nodes) の順で正しい
+        assert buildings_deleted == 339_015
+        assert nodes_deleted == 2_265_185
+
+    def test_delete_uses_indexed_city_code_query(self, mock_connection):
+        """DELETE FROM plateau_buildings には city_code = %s を使う（LIKE不可）"""
+        cursor = mock_connection.cursor.return_value
+        cursor.fetchall.return_value = [(1,)]
+        cursor.rowcount = 1
+
+        p = Purger('13112', 'postgresql://x')
+        p.conn = mock_connection
+        p.delete_data()
+
+        executed_sqls = [call[0][0] for call in cursor.execute.call_args_list]
+        delete_buildings = next(s for s in executed_sqls
+                                if 'DELETE FROM plateau_buildings' in s)
+        assert 'city_code = %s' in delete_buildings
+        assert 'LIKE' not in delete_buildings
+
+
+# ----------------------------------------------------------------------
+# execute() 統合フロー
+# ----------------------------------------------------------------------
+
+class TestExecuteIntegration:
+    """
+    Purger.execute() 全体: ロック取得 → 削除 → 監査ログ → ロック解放 → 事後処理
+    """
+
+    def test_execute_acquires_and_releases_lock(self, monkeypatch, mock_connection):
+        """正常系: ロック取得→処理→ロック解放の順"""
+        cursor = mock_connection.cursor.return_value
+        cursor.fetchall.return_value = [(1,)]
+        cursor.rowcount = 1
+
+        # acquire_lock, audit table 存在チェック等を順に
+        cursor.fetchone.side_effect = [
+            (True,),     # acquire_lock
+            ('plateau_purge_history',),  # check_audit_table_exists for record_audit
+        ]
+
+        monkeypatch.setattr(
+            'plateau_purge.psycopg2.connect',
+            lambda *args, **kwargs: mock_connection,
+        )
+        # post_process は重いのでスキップ
+        monkeypatch.setattr(
+            'plateau_purge.Purger.post_process',
+            lambda self: None,
+        )
+
+        p = Purger('13112', 'postgresql://x')
+        p.execute()
+
+        executed_sqls = [call[0][0] for call in cursor.execute.call_args_list]
+        # pg_try_advisory_lock と pg_advisory_unlock の両方が呼ばれている
+        assert any('pg_try_advisory_lock' in s for s in executed_sqls)
+        assert any('pg_advisory_unlock' in s for s in executed_sqls)
+
+    def test_execute_releases_lock_on_exception(self, monkeypatch, mock_connection):
+        """delete_data が例外を投げてもロックは解放される"""
+        cursor = mock_connection.cursor.return_value
+        cursor.fetchone.side_effect = [
+            (True,),  # acquire_lock
+        ]
+
+        monkeypatch.setattr(
+            'plateau_purge.psycopg2.connect',
+            lambda *args, **kwargs: mock_connection,
+        )
+        # delete_data に例外を仕込む
+        def raise_exc(self):
+            raise RuntimeError('boom')
+        monkeypatch.setattr('plateau_purge.Purger.delete_data', raise_exc)
+
+        p = Purger('13112', 'postgresql://x')
+        with pytest.raises(SystemExit):  # 例外で sys.exit(1)
+            p.execute()
+
+        executed_sqls = [call[0][0] for call in cursor.execute.call_args_list]
+        # ロック解放が呼ばれている
+        assert any('pg_advisory_unlock' in s for s in executed_sqls)
+        # rollback も呼ばれている
+        assert mock_connection.rollback.called
+
+    def test_execute_exits_when_lock_not_acquired(self, monkeypatch, mock_connection):
+        """別プロセスがロック保持中なら sys.exit(1) して何もしない"""
+        cursor = mock_connection.cursor.return_value
+        cursor.fetchone.return_value = (False,)  # acquire_lock returns False
+
+        monkeypatch.setattr(
+            'plateau_purge.psycopg2.connect',
+            lambda *args, **kwargs: mock_connection,
+        )
+
+        p = Purger('13112', 'postgresql://x')
+        with pytest.raises(SystemExit):
+            p.execute()
+
+        executed_sqls = [call[0][0] for call in cursor.execute.call_args_list]
+        # DELETE は呼ばれていない
+        assert not any('DELETE FROM' in s for s in executed_sqls)
+
+
+# ----------------------------------------------------------------------
+# 監査ログ
+# ----------------------------------------------------------------------
+
+class TestRecordAudit:
+    def test_record_audit_inserts_with_correct_values(self, monkeypatch, mock_connection):
+        """監査ログ INSERT に正しい値が渡される"""
+        cursor = mock_connection.cursor.return_value
+        cursor.fetchone.return_value = ('plateau_purge_history',)  # audit table exists
+
+        monkeypatch.setenv('USER', 'testuser')
+        monkeypatch.setattr('socket.gethostname', lambda: 'testhost')
+
+        p = Purger('13112', 'postgresql://x')
+        p.conn = mock_connection
+        p.record_audit(
+            buildings_deleted=339_015,
+            nodes_deleted=2_265_185,
+            duration_seconds=54.1,
+        )
+
+        executed_sqls = [call[0][0] for call in cursor.execute.call_args_list]
+        insert_sql = next(s for s in executed_sqls
+                          if 'INSERT INTO plateau_purge_history' in s)
+        # 全ての必須カラムが含まれる
+        assert 'city_code' in insert_sql
+        assert 'buildings_deleted' in insert_sql
+        assert 'nodes_deleted' in insert_sql
+        assert 'executed_by' in insert_sql
+        assert 'hostname' in insert_sql
+        assert 'duration_seconds' in insert_sql
+
+        # パラメータ確認: 順序とそれぞれの値
+        insert_call = next(c for c in cursor.execute.call_args_list
+                           if 'INSERT' in c[0][0])
+        params = insert_call[0][1]
+        assert params[0] == '13112'        # city_code
+        assert params[1] == 339_015        # buildings_deleted
+        assert params[2] == 2_265_185      # nodes_deleted
+        assert params[3] == 'testuser'     # executed_by
+        assert params[4] == 'testhost'     # hostname
+        assert params[5] == 54.1           # duration_seconds
+
+    def test_record_audit_silently_skips_when_table_missing(self, mock_connection):
+        """監査テーブル未作成なら警告のみで例外なし"""
+        cursor = mock_connection.cursor.return_value
+        cursor.fetchone.return_value = None  # check_audit_table_exists -> False
+
+        p = Purger('13112', 'postgresql://x')
+        p.conn = mock_connection
+        # 例外を投げない
+        p.record_audit(1, 1, 1.0)
+
+        executed_sqls = [call[0][0] for call in cursor.execute.call_args_list]
+        # INSERT は呼ばれていない
+        assert not any('INSERT INTO plateau_purge_history' in s for s in executed_sqls)

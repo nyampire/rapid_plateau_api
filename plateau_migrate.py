@@ -59,7 +59,8 @@ logger = logging.getLogger(__name__)
 
 # city_code 抽出用の正規表現
 # 例: plateau_13112_53393438_bldg_6697_op.osm → 13112
-CITY_CODE_PATTERN = re.compile(r'plateau_(\d{5})_')
+# re.ASCII を付けることで `\d` がASCIIの 0-9 のみにマッチ（全角数字を除外）
+CITY_CODE_PATTERN = re.compile(r'plateau_(\d{5})_', re.ASCII)
 
 # Step 2 の見積もり用定数
 ROW_SIZE_BYTES = 641  # plateau_buildings の平均行サイズ

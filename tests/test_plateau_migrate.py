@@ -44,23 +44,68 @@ class TestConstants:
 # ----------------------------------------------------------------------
 
 class TestCityCodePattern:
-    def test_extracts_5_digit_code(self):
-        m = CITY_CODE_PATTERN.search('plateau_13112_53393438_bldg_6697_op.osm')
-        assert m is not None
-        assert m.group(1) == '13112'
+    """
+    CITY_CODE_PATTERN は `plateau_(\\d{5})_` で抽出する。
+    境界・負例を網羅し、誤抽出を防ぐ。
+    """
 
-    def test_does_not_match_invalid_format(self):
-        assert CITY_CODE_PATTERN.search('random_text') is None
-        assert CITY_CODE_PATTERN.search('plateau_abc_xyz') is None
+    @pytest.mark.parametrize('source,expected', [
+        # 正例: 実データ各種
+        ('plateau_03201_59413067_bldg_6697_op.osm', '03201'),  # 盛岡市
+        ('plateau_14100_67890_bldg_6697_op.osm', '14100'),     # 横浜市
+        ('plateau_40130_99999_bldg_6697_op.osm', '40130'),     # 福岡市
+        ('plateau_13112_53393438_bldg_6697_op.osm', '13112'),  # 世田谷区
+        # 各桁の境界値
+        ('plateau_00000_x', '00000'),
+        ('plateau_99999_x', '99999'),
+        # 周辺にゴミ
+        ('prefix_plateau_12345_suffix', '12345'),
+        ('  plateau_12345_  ', '12345'),
+    ])
+    def test_positive_matches(self, source, expected):
+        m = CITY_CODE_PATTERN.search(source)
+        assert m is not None, f'Should match: {source!r}'
+        assert m.group(1) == expected
 
-    def test_matches_various_real_examples(self):
-        cases = [
-            ('plateau_03201_59413067_bldg_6697_op.osm', '03201'),  # 盛岡市
-            ('plateau_14100_67890_bldg_6697_op.osm', '14100'),     # 横浜市
-            ('plateau_40130_99999_bldg_6697_op.osm', '40130'),     # 福岡市
-        ]
-        for source_dataset, expected in cases:
-            assert CITY_CODE_PATTERN.search(source_dataset).group(1) == expected
+    @pytest.mark.parametrize('source', [
+        # 桁数違い
+        'plateau_1234_x',          # 4桁
+        'plateau_123456_x',        # 6桁
+        'plateau_1_x',             # 1桁
+        # 数字以外
+        'plateau_ABCDE_x',
+        'plateau_1234a_x',
+        'plateau_a1234_x',
+        # 末尾アンダースコアなし
+        'plateau_12345',
+        'plateau_12345.osm',
+        # 接頭辞なし
+        '12345_data.osm',
+        'PLATEAU_12345_x',         # 大文字違い
+        # 空・None系
+        '',
+        '_____',
+        'plateau__12345_x',        # アンダースコア2連で plateau_ の直後
+    ])
+    def test_negative_matches(self, source):
+        """マッチしないべきパターン"""
+        m = CITY_CODE_PATTERN.search(source)
+        assert m is None, f'Should NOT match: {source!r}'
+
+    def test_extracts_first_occurrence_only(self):
+        """複数候補があれば最初の1つを返す"""
+        m = CITY_CODE_PATTERN.search('plateau_11111_xxx_plateau_22222_yyy')
+        assert m.group(1) == '11111'
+
+    def test_rejects_fullwidth_digits(self):
+        """全角数字 (０-９) はマッチしない（re.ASCII フラグで保護）"""
+        m = CITY_CODE_PATTERN.search('plateau_１２３４５_x')
+        assert m is None
+
+    def test_rejects_arabic_indic_digits(self):
+        """アラビア数字以外の数字（例: アラビア・インド数字）もマッチしない"""
+        m = CITY_CODE_PATTERN.search('plateau_٠١٢٣٤_x')
+        assert m is None
 
 
 # ----------------------------------------------------------------------
@@ -207,32 +252,76 @@ class TestCityCodeDistribution:
 # ----------------------------------------------------------------------
 
 class TestCompareWithCities2024:
-    def test_no_unexpected_no_missing(self):
-        m = Migrator('postgresql://x')
-        # CITIES_2024 + ALREADY_IMPORTED の和集合を完全に再現
-        from batch_import_2024 import CITIES_2024, ALREADY_IMPORTED
-        expected = sorted(set(CITIES_2024) | set(ALREADY_IMPORTED))
+    """
+    `compare_with_cities_2024` のセマンティクス検証。
+    実装と同じ集合演算で answer を作ると tautology になるため、
+    既知の小さなケースで挙動を固定する。
+    """
 
-        distribution = [{'city_code': code, 'row_count': 100} for code in expected]
+    def test_unexpected_contains_only_extras_not_missing(self, monkeypatch):
+        """unexpected と missing の方向を明示的に検証（取り違え検知用）"""
+        # 期待値を意図的にハードコードして注入
+        monkeypatch.setattr(plateau_migrate, 'CITIES_2024', ['11111', '22222', '33333'])
+        monkeypatch.setattr(plateau_migrate, 'ALREADY_IMPORTED', {'44444'})
+
+        m = Migrator('postgresql://x')
+        # DB には 22222, 33333, 44444, 55555 がある
+        # → unexpected: {55555}（リスト外）
+        # → missing: {11111}（リストにあるがDBにない）
+        distribution = [
+            {'city_code': '22222', 'row_count': 1},
+            {'city_code': '33333', 'row_count': 1},
+            {'city_code': '44444', 'row_count': 1},
+            {'city_code': '55555', 'row_count': 1},
+        ]
         result = m.compare_with_cities_2024(distribution)
 
+        assert result['unexpected'] == ['55555']
+        assert result['missing'] == ['11111']
+
+    def test_empty_distribution_makes_all_expected_missing(self, monkeypatch):
+        """distribution が空 → 全期待都市が missing、unexpected は空"""
+        monkeypatch.setattr(plateau_migrate, 'CITIES_2024', ['11111', '22222'])
+        monkeypatch.setattr(plateau_migrate, 'ALREADY_IMPORTED', set())
+
+        m = Migrator('postgresql://x')
+        result = m.compare_with_cities_2024([])
+        assert sorted(result['missing']) == ['11111', '22222']
         assert result['unexpected'] == []
-        assert result['missing'] == []
-        assert result['expected_count'] == len(expected)
-        assert result['found_count'] == len(expected)
 
-    def test_detects_unexpected_cities(self):
-        m = Migrator('postgresql://x')
-        distribution = [{'city_code': '99999', 'row_count': 100}]
-        result = m.compare_with_cities_2024(distribution)
-        assert '99999' in result['unexpected']
+    def test_returns_sorted_lists(self, monkeypatch):
+        """unexpected と missing はソートされた順序で返る（出力安定性）"""
+        monkeypatch.setattr(plateau_migrate, 'CITIES_2024', ['33333', '11111', '22222'])
+        monkeypatch.setattr(plateau_migrate, 'ALREADY_IMPORTED', set())
 
-    def test_detects_missing_cities(self):
-        """期待都市がDBにない場合、missing に含まれる"""
         m = Migrator('postgresql://x')
-        distribution = []  # 何も検出されない
+        distribution = [
+            {'city_code': '99999', 'row_count': 1},
+            {'city_code': '88888', 'row_count': 1},
+        ]
         result = m.compare_with_cities_2024(distribution)
-        assert len(result['missing']) > 0  # CITIES_2024 が空でなければ
+        assert result['unexpected'] == sorted(result['unexpected'])
+        assert result['missing'] == sorted(result['missing'])
+
+    def test_count_fields_are_accurate(self, monkeypatch):
+        monkeypatch.setattr(plateau_migrate, 'CITIES_2024', ['11111', '22222'])
+        monkeypatch.setattr(plateau_migrate, 'ALREADY_IMPORTED', {'33333'})
+
+        m = Migrator('postgresql://x')
+        distribution = [
+            {'city_code': '11111', 'row_count': 1},
+            {'city_code': '99999', 'row_count': 1},
+        ]
+        result = m.compare_with_cities_2024(distribution)
+        assert result['expected_count'] == 3  # 11111, 22222, 33333
+        assert result['found_count'] == 2     # 11111, 99999
+
+    def test_skipped_when_cities_2024_unavailable(self, monkeypatch):
+        """CITIES_2024 が空（import失敗想定）なら skipped を返す"""
+        monkeypatch.setattr(plateau_migrate, 'CITIES_2024', [])
+        m = Migrator('postgresql://x')
+        result = m.compare_with_cities_2024([{'city_code': '12345', 'row_count': 1}])
+        assert result.get('skipped') is True
 
 
 # ----------------------------------------------------------------------
@@ -240,6 +329,12 @@ class TestCompareWithCities2024:
 # ----------------------------------------------------------------------
 
 class TestEstimateMigration:
+    """
+    安全性判定の境界値を狙う。
+    ミューテーション `>` vs `>=` などを検知できるように、
+    判定境界の前後 ±0.01GB をテストする。
+    """
+
     def test_batch_safe_when_disk_sufficient(self):
         m = Migrator('postgresql://x')
         result = m.estimate_migration(
@@ -247,11 +342,9 @@ class TestEstimateMigration:
             extractable=12_761_402,
             free_gb=15.0,
         )
-        # バッチ方式は安全（ピーク ~1.2GB << 15GB）
         assert result['safe_batch'] is True
 
     def test_full_unsafe_when_disk_tight(self):
-        """ディスクが10GB未満なら一括方式は危険"""
         m = Migrator('postgresql://x')
         result = m.estimate_migration(
             total_rows=12_761_402,
@@ -259,18 +352,58 @@ class TestEstimateMigration:
             free_gb=10.0,
         )
         assert result['safe_full'] is False
-        # バッチ方式はまだ安全（10GB > 1.19GB + 1.0GB マージン）
         assert result['safe_batch'] is True
 
-    def test_batch_count_matches_extractable(self):
+    @pytest.mark.parametrize('extractable,expected_batches', [
+        # 100万行ずつのバッチサイズ
+        (1, 1),                  # 最小: 1行 → 1バッチ
+        (1_000_000, 1),          # ちょうど1バッチ
+        (1_000_001, 2),          # +1 で2バッチ
+        (2_000_000, 2),          # ちょうど2バッチ
+        (2_000_001, 3),          # +1 で3バッチ
+        (12_500_000, 13),        # 13バッチ
+        (13_000_000, 13),        # ちょうど13バッチ
+        (13_000_001, 14),        # +1 で14バッチ
+    ])
+    def test_batch_count_boundary(self, extractable, expected_batches):
+        """バッチ数計算の境界値（ceil 計算ミス検知）"""
         m = Migrator('postgresql://x')
         result = m.estimate_migration(
-            total_rows=2_500_000,
-            extractable=2_500_000,
-            free_gb=20.0,
+            total_rows=extractable,
+            extractable=extractable,
+            free_gb=100.0,
         )
-        # 100万行ずつ → 3バッチ
-        assert result['batch_count'] == 3
+        assert result['batch_count'] == expected_batches
+
+    def test_safe_batch_boundary_around_threshold(self):
+        """バッチ方式の安全判定: 「peak_bloat_gb + 1.0GB」が境界"""
+        m = Migrator('postgresql://x')
+        peak = m.estimate_migration(0, 0, 100.0)['peak_bloat_gb_batch']
+        threshold = peak + 1.0  # 実装が要求する最小空き
+
+        # 境界の少し下は危険判定
+        result_below = m.estimate_migration(12_000_000, 12_000_000, threshold - 0.01)
+        assert result_below['safe_batch'] is False
+
+        # 境界の少し上は安全判定
+        result_above = m.estimate_migration(12_000_000, 12_000_000, threshold + 0.01)
+        assert result_above['safe_batch'] is True
+
+    def test_safe_full_scales_with_extractable(self):
+        """一括方式は extractable に比例して大きな空きが必要"""
+        m = Migrator('postgresql://x')
+        small = m.estimate_migration(1_000_000, 1_000_000, 5.0)
+        large = m.estimate_migration(12_761_402, 12_761_402, 5.0)
+        # 100万行なら safe、1270万行なら unsafe
+        assert small['safe_full'] is True
+        assert large['safe_full'] is False
+
+    def test_peak_bloat_gb_full_proportional_to_extractable(self):
+        """peak_bloat_gb_full は extractable × ROW_SIZE_BYTES × 2"""
+        m = Migrator('postgresql://x')
+        result = m.estimate_migration(1_000_000, 1_000_000, 100.0)
+        expected_gb = (1_000_000 * ROW_SIZE_BYTES * 2) / (1024 ** 3)
+        assert abs(result['peak_bloat_gb_full'] - round(expected_gb, 2)) < 0.01
 
 
 # ----------------------------------------------------------------------

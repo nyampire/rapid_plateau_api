@@ -22,6 +22,8 @@ from datetime import datetime
 import re
 import hashlib
 
+from plateau_coverage import CoverageManager
+
 # ログ設定
 logging.basicConfig(
     level=logging.INFO,
@@ -428,6 +430,44 @@ async def options_buildings():
             "Access-Control-Max-Age": "86400",
         }
     )
+
+
+@app.get("/api/mapwithai/coverage")
+async def get_coverage():
+    """
+    Plateau対応エリアのGeoJSON FeatureCollection を返す
+
+    マテリアライズドビュー plateau_coverage から
+    都市単位の凸包ポリゴンを取得して返却。
+
+    Returns:
+        FeatureCollection (各Featureは1都市の凸包ポリゴン)
+            properties: city_code, building_count
+
+    キャッシュ:
+        データはマテリアライズドビュー化済みのため高速。
+        コンテンツは都市の追加・パージ時のみ変化する。
+    """
+    try:
+        mgr = CoverageManager(api.database_url)
+        geojson = mgr.get_coverage_geojson()
+        return Response(
+            content=__import__('json').dumps(geojson, ensure_ascii=False),
+            media_type="application/json",
+            headers={
+                # クライアント側で長期キャッシュ（コンテンツ変化はまれ）
+                "Cache-Control": "public, max-age=3600",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+    except psycopg2.errors.UndefinedTable:
+        raise HTTPException(
+            status_code=503,
+            detail="plateau_coverage view not initialized. Run: python plateau_coverage.py --init"
+        )
+    except Exception as e:
+        logger.error(f"Coverage endpoint error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/mapwithai/buildings")

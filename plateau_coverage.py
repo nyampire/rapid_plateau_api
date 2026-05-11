@@ -43,12 +43,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Concave Hull の target_percent (0=最も凹型、1=凸包と同等)
+# 0.5 で十分な凹型表現を得つつ頂点数を抑えられる (横浜市 868K建物 → 57頂点)
+CONCAVE_HULL_PERCENT = 0.5
+
 # マテリアライズドビュー作成SQL
-MATERIALIZED_VIEW_DDL = """
+# 各都市の建物centroidからConcaveHullを生成。
+# 点数不足等でConcaveHullが失敗した場合はConvexHullにフォールバック。
+MATERIALIZED_VIEW_DDL = f"""
 CREATE MATERIALIZED VIEW IF NOT EXISTS plateau_coverage AS
 SELECT
     city_code,
-    ST_ConvexHull(ST_Collect(centroid)) AS geom,
+    COALESCE(
+        ST_ConcaveHull(ST_Collect(centroid), {CONCAVE_HULL_PERCENT}),
+        ST_ConvexHull(ST_Collect(centroid))
+    ) AS geom,
     count(*) AS building_count
 FROM plateau_buildings
 WHERE city_code IS NOT NULL
@@ -170,6 +179,25 @@ class CoverageManager:
         finally:
             conn.close()
 
+    def drop_view(self) -> None:
+        """マテリアライズドビューを削除（定義変更時に使用）"""
+        logger.info("🗑️  plateau_coverage マテリアライズドビューを削除中...")
+        conn = self.get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DROP MATERIALIZED VIEW IF EXISTS plateau_coverage CASCADE")
+            conn.commit()
+            logger.info("✅ ビュー削除完了")
+        finally:
+            conn.close()
+
+    def reinit_view(self) -> None:
+        """ビュー定義を更新（DROP → CREATE → REFRESH）"""
+        logger.info("🔄 plateau_coverage ビューを再構築中...")
+        self.drop_view()
+        self.init_view()
+        self.refresh(concurrent=False)  # 初回扱い
+
     def refresh(self, concurrent: bool = True) -> Dict[str, Any]:
         """ビューをリフレッシュ"""
         conn = self.get_connection()
@@ -248,6 +276,11 @@ def main() -> None:
         help='マテリアライズドビューを作成（初回のみ、冪等）',
     )
     group.add_argument(
+        '--reinit',
+        action='store_true',
+        help='ビュー定義を更新（DROP → CREATE → REFRESH、定義変更時に使用）',
+    )
+    group.add_argument(
         '--refresh',
         action='store_true',
         help='ビューをリフレッシュ（インポート・パージ後に実行）',
@@ -280,6 +313,8 @@ def main() -> None:
         mgr.init_view()
         logger.info("")
         mgr.refresh(concurrent=False)  # 初回は CONCURRENTLY 不可
+    elif args.reinit:
+        mgr.reinit_view()
     elif args.refresh:
         mgr.refresh(concurrent=not args.no_concurrent)
     elif args.status:

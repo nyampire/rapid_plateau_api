@@ -387,7 +387,8 @@ class PlateauImporter2PostGIS:
             'tourism': None,
             'leisure': None,
             'landuse': None,
-            'source_dataset': f"plateau_{self.citycode}_{source_info}"
+            'source_dataset': f"plateau_{self.citycode}_{source_info}",
+            'city_code': self.citycode if self.citycode and self.citycode != "unknown" else None,
         }
 
         # 基本建物タイプ
@@ -597,6 +598,7 @@ class PlateauImporter2PostGIS:
                                 converted_tags.get('tourism'),      # tourism
                                 converted_tags.get('leisure'),      # leisure
                                 converted_tags.get('landuse'),      # landuse
+                                converted_tags.get('city_code'),    # city_code
                                 polygon_wkt,                        # geom用WKT
                                 polygon_wkt                         # centroid用WKT
                             ))
@@ -758,11 +760,12 @@ class PlateauImporter2PostGIS:
                      name, addr_full, addr_housenumber, addr_street,
                      start_date, building_material, roof_material, roof_shape,
                      amenity, shop, tourism, leisure, landuse,
+                     city_code,
                      geom, centroid)
                     VALUES %s
                     """,
                     buildings_data,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
                     page_size=1000
                 )
                 logger.info("✅ 建物投入完了")
@@ -845,8 +848,8 @@ class PlateauImporter2PostGIS:
             # 不完全インポートの既存データを先に削除（citycode指定時）
             if self.citycode and self.citycode != "unknown":
                 cursor.execute(
-                    "SELECT COUNT(*) FROM plateau_buildings WHERE source_dataset LIKE %s",
-                    (f"%{self.citycode}%",)
+                    "SELECT COUNT(*) FROM plateau_buildings WHERE city_code = %s",
+                    (self.citycode,)
                 )
                 existing_count = cursor.fetchone()[0]
                 if existing_count > 0:
@@ -855,12 +858,12 @@ class PlateauImporter2PostGIS:
                     cursor.execute("""
                         DELETE FROM plateau_building_nodes
                         WHERE building_id IN (
-                            SELECT id FROM plateau_buildings WHERE source_dataset LIKE %s
+                            SELECT id FROM plateau_buildings WHERE city_code = %s
                         )
-                    """, (f"%{self.citycode}%",))
+                    """, (self.citycode,))
                     cursor.execute(
-                        "DELETE FROM plateau_buildings WHERE source_dataset LIKE %s",
-                        (f"%{self.citycode}%",)
+                        "DELETE FROM plateau_buildings WHERE city_code = %s",
+                        (self.citycode,)
                     )
                     conn.commit()
                     logger.info(f"✅ 既存データ削除完了")
@@ -877,11 +880,12 @@ class PlateauImporter2PostGIS:
                      name, addr_full, addr_housenumber, addr_street,
                      start_date, building_material, roof_material, roof_shape,
                      amenity, shop, tourism, leisure, landuse,
+                     city_code,
                      geom, centroid)
                     VALUES %s
                     """,
                     buildings_data,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
                     page_size=1000
                 )
                 logger.info("✅ 建物投入完了")
@@ -894,8 +898,8 @@ class PlateauImporter2PostGIS:
                 # ノードのbuilding_idにはosm_id（building_id_counter）が入っているが、
                 # foreign keyはplateau_buildings.id（auto increment）を参照する
                 cursor.execute(
-                    "SELECT osm_id, id FROM plateau_buildings WHERE source_dataset LIKE %s",
-                    (f"%{self.citycode}%",)
+                    "SELECT osm_id, id FROM plateau_buildings WHERE city_code = %s",
+                    (self.citycode,)
                 )
                 osm_id_to_db_id = dict(cursor.fetchall())
                 logger.info(f"   建物IDマッピング: {len(osm_id_to_db_id):,}件")
@@ -1036,8 +1040,8 @@ class PlateauImporter2PostGIS:
                 conn = pg2.connect(self.postgres_url)
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT COUNT(*) FROM plateau_buildings WHERE source_dataset LIKE %s",
-                    (f"%{self.citycode}%",)
+                    "SELECT COUNT(*) FROM plateau_buildings WHERE city_code = %s",
+                    (self.citycode,)
                 )
                 existing_count = cursor.fetchone()[0]
                 if existing_count > 0:
@@ -1045,12 +1049,12 @@ class PlateauImporter2PostGIS:
                     cursor.execute("""
                         DELETE FROM plateau_building_nodes
                         WHERE building_id IN (
-                            SELECT id FROM plateau_buildings WHERE source_dataset LIKE %s
+                            SELECT id FROM plateau_buildings WHERE city_code = %s
                         )
-                    """, (f"%{self.citycode}%",))
+                    """, (self.citycode,))
                     cursor.execute(
-                        "DELETE FROM plateau_buildings WHERE source_dataset LIKE %s",
-                        (f"%{self.citycode}%",)
+                        "DELETE FROM plateau_buildings WHERE city_code = %s",
+                        (self.citycode,)
                     )
                     conn.commit()
                     logger.info(f"✅ 既存データ削除完了")

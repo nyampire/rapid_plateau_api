@@ -364,7 +364,7 @@ class Purger:
         logger.info(f"📋 監査ログ記録完了 (by {executed_by}@{hostname})")
 
     def post_process(self) -> None:
-        """事後処理: VACUUM + ANALYZE"""
+        """事後処理: VACUUM + ANALYZE + カバレッジビューREFRESH"""
         # VACUUM はトランザクション外で実行する必要がある
         # 新規接続で実行（plateau_migrate.py と同様のパターン）
         logger.info("🧹 VACUUM + ANALYZE 実行中...")
@@ -380,7 +380,34 @@ class Purger:
                 logger.info(f"   ✅ plateau_building_nodes ({time.time() - t0:.1f}s)")
         finally:
             new_conn.close()
-        logger.info("✅ 事後処理完了")
+        logger.info("✅ VACUUM ANALYZE 完了")
+
+        # plateau_coverage ビューを更新（存在する場合のみ）
+        self._refresh_coverage_view()
+
+    def _refresh_coverage_view(self) -> None:
+        """plateau_coverage マテリアライズドビューをリフレッシュ（存在する場合のみ）"""
+        try:
+            from plateau_coverage import CoverageManager
+        except ImportError:
+            logger.warning("⚠️ plateau_coverage モジュールが見つかりません。ビュー更新をスキップ")
+            return
+
+        mgr = CoverageManager(self.postgres_url)
+        try:
+            conn = mgr.get_connection()
+            try:
+                if not mgr.view_exists(conn):
+                    logger.info("ℹ️ plateau_coverage ビューは未作成のためREFRESHをスキップ")
+                    return
+            finally:
+                conn.close()
+
+            logger.info("🔄 plateau_coverage ビューをREFRESH...")
+            mgr.refresh(concurrent=True)
+        except Exception as e:
+            # カバレッジREFRESH失敗は致命的ではない（パージ自体は成功している）
+            logger.warning(f"⚠️ plateau_coverage REFRESH 失敗（パージは成功済み）: {e}")
 
     def execute(self) -> None:
         """本番パージ実行"""

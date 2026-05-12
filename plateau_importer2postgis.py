@@ -738,6 +738,39 @@ class PlateauImporter2PostGIS:
 
         return buildings_data, nodes_data
 
+    @staticmethod
+    def _dedupe_and_remap_nodes(nodes_data: List, osm_id_to_db_id: Dict) -> Tuple[List, int, int]:
+        """投入用ノード行に対し、building内クロージャ重複の除去とbuilding_idの差し替えを行う。
+
+        重複排除キーは ``(osm_building_id, osm_id)`` のペア。
+        - 同一buildingで refs[0] == refs[-1] の閉路重複は1件にまとめる
+        - 異なるbuildingが共有するコーナーノードは双方に保持する
+          （``plateau_building_nodes`` には osm_id への UNIQUE 制約がなく、
+           同じ osm_id が複数の building_id に紐付くのが正しい設計）
+
+        Returns:
+            (mapped_nodes_data, skipped_count, orphan_count)
+        """
+        mapped = []
+        seen = set()
+        skipped = 0
+        orphan = 0
+        for node_data in nodes_data:
+            node_osm_id = node_data[0]
+            osm_building_id = node_data[1]
+            if osm_building_id not in osm_id_to_db_id:
+                orphan += 1
+                continue
+            key = (osm_building_id, node_osm_id)
+            if key in seen:
+                skipped += 1
+                continue
+            seen.add(key)
+            db_building_id = osm_id_to_db_id[osm_building_id]
+            mapped.append((node_data[0], db_building_id, node_data[2],
+                           node_data[3], node_data[4], node_data[5], node_data[6]))
+        return mapped, skipped, orphan
+
     def insert_to_database_batch(self, buildings_data: List, nodes_data: List) -> bool:
         """バッチ単位のDB投入（事前削除なし・run_complete_importのバッチ処理用）"""
         logger.info(f"💾 バッチDB投入中...")
@@ -784,24 +817,9 @@ class PlateauImporter2PostGIS:
                 osm_id_to_db_id = dict(cursor.fetchall())
                 logger.info(f"   建物IDマッピング: {len(osm_id_to_db_id):,}件")
 
-                mapped_nodes_data = []
-                seen_node_ids = set()
-                skipped_count = 0
-                orphan_count = 0
-
-                for node_data in nodes_data:
-                    node_id = node_data[0]
-                    osm_building_id = node_data[1]
-                    if node_id in seen_node_ids:
-                        skipped_count += 1
-                    elif osm_building_id not in osm_id_to_db_id:
-                        orphan_count += 1
-                    else:
-                        db_building_id = osm_id_to_db_id[osm_building_id]
-                        mapped_node = (node_data[0], db_building_id, node_data[2],
-                                       node_data[3], node_data[4], node_data[5], node_data[6])
-                        mapped_nodes_data.append(mapped_node)
-                        seen_node_ids.add(node_id)
+                mapped_nodes_data, skipped_count, orphan_count = self._dedupe_and_remap_nodes(
+                    nodes_data, osm_id_to_db_id
+                )
 
                 if orphan_count > 0:
                     logger.warning(f"   ⚠️ 建物なしノード除外: {orphan_count:,}件")
@@ -904,26 +922,9 @@ class PlateauImporter2PostGIS:
                 osm_id_to_db_id = dict(cursor.fetchall())
                 logger.info(f"   建物IDマッピング: {len(osm_id_to_db_id):,}件")
 
-                # building_idをDB上のidに差し替え & データ内重複除去
-                mapped_nodes_data = []
-                seen_node_ids = set()
-                skipped_count = 0
-                orphan_count = 0
-
-                for node_data in nodes_data:
-                    node_id = node_data[0]       # osm_id
-                    osm_building_id = node_data[1]  # building_id (= building_id_counter = osm_id)
-                    if node_id in seen_node_ids:
-                        skipped_count += 1
-                    elif osm_building_id not in osm_id_to_db_id:
-                        orphan_count += 1
-                    else:
-                        # building_idをDB上の自動採番idに差し替え
-                        db_building_id = osm_id_to_db_id[osm_building_id]
-                        mapped_node = (node_data[0], db_building_id, node_data[2],
-                                       node_data[3], node_data[4], node_data[5], node_data[6])
-                        mapped_nodes_data.append(mapped_node)
-                        seen_node_ids.add(node_id)
+                mapped_nodes_data, skipped_count, orphan_count = self._dedupe_and_remap_nodes(
+                    nodes_data, osm_id_to_db_id
+                )
 
                 if orphan_count > 0:
                     logger.warning(f"   ⚠️ 建物なしノード除外: {orphan_count:,}件")

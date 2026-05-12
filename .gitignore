@@ -7,3 +7,4 @@ plateau_data/
 .coverage
 .pytest_cache/
 htmlcov/
+CLAUDE.md

@@ -289,6 +289,87 @@ class TestBuildingsToOsmXml:
         assert not re.search(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', body)
 
 
+class TestGetBuildingsInBboxQuery:
+    """get_buildings_in_bbox の SQL クエリ構造を検証 (Phase 2 拡張)"""
+
+    def _setup_api_with_mock_cursor(self, api):
+        """api.get_connection() が返す cursor をモックし、execute された SQL を捕捉"""
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = ('3.4',)
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        # context manager protocol も
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=None)
+        return conn, cursor
+
+    def test_query_uses_ctes_for_outlines_parts_orphans(self, api):
+        """SQL に bbox_outlines / related_parts / orphan_parts の CTE が含まれている"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        # 最後に execute された SQL を取得
+        assert cursor.execute.called
+        sql = cursor.execute.call_args[0][0]
+        assert 'bbox_outlines' in sql
+        assert 'related_parts' in sql
+        assert 'orphan_parts' in sql
+
+    def test_query_filters_outlines_with_building_part_is_null(self, api):
+        """outline CTE は building_part IS NULL でフィルタする"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        sql = cursor.execute.call_args[0][0]
+        assert 'building_part IS NULL' in sql
+
+    def test_query_joins_parts_via_parent_building_id(self, api):
+        """related_parts は parent_building_id 経由で結合"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        sql = cursor.execute.call_args[0][0]
+        assert 'parent_building_id IN' in sql or 'parent_building_id in' in sql.lower()
+
+    def test_query_selects_building_part_and_parent_columns(self, api):
+        """SELECT に building_part / parent_building_id が含まれる"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        sql = cursor.execute.call_args[0][0]
+        # ub.building_part, ub.parent_building_id 等の参照があること
+        assert 'building_part' in sql
+        assert 'parent_building_id' in sql
+
+    def test_query_params_count_and_order(self, api):
+        """params は 9 個 (bbox×2 + limit) で正しい順序"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        params = cursor.execute.call_args[0][1]
+        # 9 個: bbox_outlines spatial(4) + LIMIT(1) + orphan_parts spatial(4)
+        assert len(params) == 9
+        # bbox_outlines: min_lon, min_lat, max_lon, max_lat
+        assert params[0:4] == [139.7, 35.7, 139.8, 35.8]
+        # limit
+        assert params[4] == 10
+        # orphan_parts: 同じ bbox を再度
+        assert params[5:9] == [139.7, 35.7, 139.8, 35.8]
+
+    def test_query_placeholder_count_matches_params(self, api):
+        """SQL の %s プレースホルダ数 = params 数 (psycopg2 が hard fail する条件)"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        sql = cursor.execute.call_args[0][0]
+        params = cursor.execute.call_args[0][1]
+        placeholder_count = sql.count('%s')
+        assert placeholder_count == len(params), (
+            f"%s placeholders ({placeholder_count}) != params ({len(params)})"
+        )
+
+
 def _make_part(part_id, parent_id, **tags):
     """テスト用 part dict のヘルパー。building_part='yes' と parent_building_id を設定。"""
     nodes = [

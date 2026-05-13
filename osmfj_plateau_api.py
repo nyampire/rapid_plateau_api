@@ -105,54 +105,67 @@ class OSMFJPlateauAPI:
                 """
                 distinct_key = "MD5(ST_AsText(b.geom))"
 
-            # LATERAL JOINで各建物のノードを個別に集約（GROUP BY不要）
+            # Phase 2: bbox 内の outline / simple を取得後、それらの parts も追加で取得。
+            # さらに bbox 内の orphan part (relation 無しの building:part) も併せて返す。
+            # LATERAL JOIN で各 building のノードを個別に集約（GROUP BY 不要）。
             query = f"""
-                WITH unique_buildings AS (
+                WITH bbox_outlines AS (
+                    -- bbox 内の outline / simple (building_part IS NULL)
                     SELECT DISTINCT ON ({distinct_key})
-                        b.id,
-                        b.osm_id,
-                        b.building,
-                        b.height,
-                        b.ele,
-                        b.building_levels,
-                        b.name,
-                        b.addr_housenumber,
-                        b.addr_street,
-                        b.start_date,
-                        b.building_material,
-                        b.roof_material,
-                        b.roof_shape,
-                        b.amenity,
-                        b.shop,
-                        b.tourism,
-                        b.leisure,
-                        b.landuse
+                        b.id, b.osm_id, b.building, b.height, b.ele,
+                        b.building_levels, b.name, b.addr_housenumber,
+                        b.addr_street, b.start_date, b.building_material,
+                        b.roof_material, b.roof_shape, b.amenity, b.shop,
+                        b.tourism, b.leisure, b.landuse, b.building_part,
+                        b.parent_building_id
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
-                      AND b.building_part IS NULL  -- Phase 1: outline/simple のみ返す
+                      AND b.building_part IS NULL
                     ORDER BY {distinct_key}
+                    LIMIT %s
+                ),
+                related_parts AS (
+                    -- 上記 outline に紐づく part (bbox 内外を問わず全て)
+                    SELECT
+                        b.id, b.osm_id, b.building, b.height, b.ele,
+                        b.building_levels, b.name, b.addr_housenumber,
+                        b.addr_street, b.start_date, b.building_material,
+                        b.roof_material, b.roof_shape, b.amenity, b.shop,
+                        b.tourism, b.leisure, b.landuse, b.building_part,
+                        b.parent_building_id
+                    FROM plateau_buildings b
+                    WHERE b.parent_building_id IN (SELECT id FROM bbox_outlines)
+                ),
+                orphan_parts AS (
+                    -- bbox 内で relation 無しの building:part
+                    SELECT
+                        b.id, b.osm_id, b.building, b.height, b.ele,
+                        b.building_levels, b.name, b.addr_housenumber,
+                        b.addr_street, b.start_date, b.building_material,
+                        b.roof_material, b.roof_shape, b.amenity, b.shop,
+                        b.tourism, b.leisure, b.landuse, b.building_part,
+                        b.parent_building_id
+                    FROM plateau_buildings b
+                    WHERE b.building_part = 'yes'
+                      AND b.parent_building_id IS NULL
+                      AND {spatial_condition}
+                ),
+                all_buildings AS (
+                    SELECT * FROM bbox_outlines
+                    UNION
+                    SELECT * FROM related_parts
+                    UNION
+                    SELECT * FROM orphan_parts
                 )
                 SELECT
-                    ub.id,
-                    ub.osm_id,
-                    ub.building,
-                    ub.height,
-                    ub.ele,
-                    ub.building_levels,
-                    ub.name,
-                    ub.addr_housenumber,
-                    ub.addr_street,
-                    ub.start_date,
-                    ub.building_material,
-                    ub.roof_material,
-                    ub.roof_shape,
-                    ub.amenity,
-                    ub.shop,
-                    ub.tourism,
-                    ub.leisure,
-                    ub.landuse,
+                    ub.id, ub.osm_id, ub.building, ub.height, ub.ele,
+                    ub.building_levels, ub.name, ub.addr_housenumber,
+                    ub.addr_street, ub.start_date, ub.building_material,
+                    ub.roof_material, ub.roof_shape, ub.amenity, ub.shop,
+                    ub.tourism, ub.leisure, ub.landuse, ub.building_part,
+                    ub.parent_building_id,
                     bn.nodes
-                FROM unique_buildings ub
+                FROM all_buildings ub
                 LEFT JOIN LATERAL (
                     SELECT ARRAY_AGG(
                         json_build_object(
@@ -167,10 +180,10 @@ class OSMFJPlateauAPI:
                     WHERE n.building_id = ub.id
                 ) bn ON true
                 ORDER BY ub.osm_id
-                LIMIT %s
             """
 
-            params = [min_lon, min_lat, max_lon, max_lat, limit]
+            params = [min_lon, min_lat, max_lon, max_lat, limit,
+                      min_lon, min_lat, max_lon, max_lat]
 
             cursor.execute(query, params)
             buildings = cursor.fetchall()
@@ -185,8 +198,68 @@ class OSMFJPlateauAPI:
         finally:
             conn.close()
 
+    # OSM XML 上での relation ID の生成オフセット。
+    # building の DB id は正値、way の出力 id は -building_db_id なので、
+    # relation の id は更に -1_000_000 でオフセットして衝突を避ける。
+    RELATION_ID_OFFSET = -1_000_000
+
+    def _emit_building_tags(self, parent_elem, building: Dict, is_part: bool):
+        """way / relation 共通のタグを追加するヘルパー。
+
+        is_part=True の場合は `building:part=yes`、それ以外は `building=*`。
+        どちらでも height / ele / building:levels / name / addr / 等を出力。
+        """
+        def add_tag(key, value):
+            if value is not None and str(value).strip():
+                tag_elem = ET.SubElement(parent_elem, 'tag')
+                tag_elem.set('k', key)
+                tag_elem.set('v', str(value))
+
+        if is_part:
+            add_tag('building:part', 'yes')
+        else:
+            add_tag('building', building.get('building', 'yes'))
+
+        if building.get('height'):
+            add_tag('height', str(building['height']))
+        if building.get('ele'):
+            add_tag('ele', str(building['ele']))
+        if building.get('building_levels'):
+            add_tag('building:levels', str(building['building_levels']))
+        if building.get('name'):
+            add_tag('name', building['name'])
+        if building.get('addr_housenumber'):
+            add_tag('addr:housenumber', building['addr_housenumber'])
+        if building.get('addr_street'):
+            add_tag('addr:street', building['addr_street'])
+        if building.get('start_date'):
+            add_tag('start_date', building['start_date'])
+        if building.get('building_material'):
+            add_tag('building:material', building['building_material'])
+        if building.get('roof_material'):
+            add_tag('roof:material', building['roof_material'])
+        if building.get('roof_shape'):
+            add_tag('roof:shape', building['roof_shape'])
+        if building.get('amenity'):
+            add_tag('amenity', building['amenity'])
+        if building.get('shop'):
+            add_tag('shop', building['shop'])
+        if building.get('tourism'):
+            add_tag('tourism', building['tourism'])
+        if building.get('leisure'):
+            add_tag('leisure', building['leisure'])
+        if building.get('landuse'):
+            add_tag('landuse', building['landuse'])
+
     def buildings_to_osm_xml(self, buildings: List[Dict]) -> str:
-        """建物データをOSM XML形式に変換"""
+        """建物データを OSM XML 形式に変換 (Phase 2: relation 出力対応)
+
+        - outline / simple building: <way building=*> を従来通り出力
+        - part: <way building:part=yes> を出力 (PLATEAU LOD2 慣習)
+        - outline が parts を持つ場合: <relation type=building> を生成し、
+          outline のタグを duplicate (OSM Simple 3D Buildings 慣習・流派 A)
+        - orphan part (parent 無し): <way> 単独で出力 (relation 無し)
+        """
         osm = ET.Element('osm')
         osm.set('version', '0.6')
         osm.set('generator', 'osmfj-plateau-api')
@@ -198,6 +271,14 @@ class OSMFJPlateauAPI:
 
         all_nodes = []
         all_ways = []
+        all_relations = []
+        # parent_db_id → list of (way_id of part) — 後で relation を組むのに使う
+        parts_by_parent_db_id: Dict[int, List[int]] = {}
+        # parent_db_id → outline の building dict (タグ duplicate のため)
+        outline_by_db_id: Dict[int, Dict] = {}
+        # DB id of buildings that successfully emitted a way (失敗除外)
+        emitted_db_ids = set()
+
         processed_buildings = 0
         total_nodes_created = 0
 
@@ -233,8 +314,12 @@ class OSMFJPlateauAPI:
 
                 # Way要素作成（DBのIDを使用）
                 building_db_id = building.get('id')
+                way_id = -building_db_id
+                is_part = (building.get('building_part') == 'yes')
+                parent_id = building.get('parent_building_id')
+
                 way_elem = ET.Element('way')
-                way_elem.set('id', str(-building_db_id))
+                way_elem.set('id', str(way_id))
                 way_elem.set('visible', 'true')
                 way_elem.set('version', '1')
                 way_elem.set('changeset', '1')
@@ -273,59 +358,70 @@ class OSMFJPlateauAPI:
                 nd_elem = ET.SubElement(way_elem, 'nd')
                 nd_elem.set('ref', str(first_node_id))
 
-                # タグ追加
-                def add_tag(parent, key, value):
-                    if value is not None and str(value).strip():
-                        tag_elem = ET.SubElement(parent, 'tag')
-                        tag_elem.set('k', key)
-                        tag_elem.set('v', str(value))
-
-                add_tag(way_elem, 'building', building.get('building', 'yes'))
-                if building.get('height'):
-                    add_tag(way_elem, 'height', str(building['height']))
-                if building.get('ele'):
-                    add_tag(way_elem, 'ele', str(building['ele']))
-                if building.get('building_levels'):
-                    add_tag(way_elem, 'building:levels', str(building['building_levels']))
-                if building.get('name'):
-                    add_tag(way_elem, 'name', building['name'])
-                if building.get('addr_housenumber'):
-                    add_tag(way_elem, 'addr:housenumber', building['addr_housenumber'])
-                if building.get('addr_street'):
-                    add_tag(way_elem, 'addr:street', building['addr_street'])
-                if building.get('start_date'):
-                    add_tag(way_elem, 'start_date', building['start_date'])
-                if building.get('building_material'):
-                    add_tag(way_elem, 'building:material', building['building_material'])
-                if building.get('roof_material'):
-                    add_tag(way_elem, 'roof:material', building['roof_material'])
-                if building.get('roof_shape'):
-                    add_tag(way_elem, 'roof:shape', building['roof_shape'])
-                if building.get('amenity'):
-                    add_tag(way_elem, 'amenity', building['amenity'])
-                if building.get('shop'):
-                    add_tag(way_elem, 'shop', building['shop'])
-                if building.get('tourism'):
-                    add_tag(way_elem, 'tourism', building['tourism'])
-                if building.get('leisure'):
-                    add_tag(way_elem, 'leisure', building['leisure'])
-                if building.get('landuse'):
-                    add_tag(way_elem, 'landuse', building['landuse'])
+                # タグ追加 (outline/simple vs part で異なる)
+                self._emit_building_tags(way_elem, building, is_part)
 
                 all_ways.append(way_elem)
+                emitted_db_ids.add(building_db_id)
+                # relation 構築の準備
+                if is_part and parent_id is not None:
+                    parts_by_parent_db_id.setdefault(parent_id, []).append(way_id)
+                elif not is_part:
+                    outline_by_db_id[building_db_id] = building
+
                 processed_buildings += 1
 
             except Exception as e:
                 logger.warning(f"建物処理エラー {building.get('id', 'unknown')}: {e}")
                 continue
 
-        # OSM順序で要素追加: ノード → ウェイ
+        # relation 生成: parts を持つ outline 1件 = 1 relation
+        for parent_db_id, part_way_ids in parts_by_parent_db_id.items():
+            outline = outline_by_db_id.get(parent_db_id)
+            if outline is None:
+                # outline が同じバッチに含まれていない (bbox 外などで除外された場合)
+                # → relation を作らず、parts は単独 way として残す
+                continue
+            rel_elem = ET.Element('relation')
+            rel_elem.set('id', str(self.RELATION_ID_OFFSET - parent_db_id))
+            rel_elem.set('visible', 'true')
+            rel_elem.set('version', '1')
+            rel_elem.set('changeset', '1')
+            rel_elem.set('timestamp', timestamp)
+            rel_elem.set('user', 'osmfj-plateau')
+            rel_elem.set('uid', '1')
+            # outline メンバー
+            outline_way_id = -parent_db_id
+            m = ET.SubElement(rel_elem, 'member')
+            m.set('type', 'way')
+            m.set('ref', str(outline_way_id))
+            m.set('role', 'outline')
+            # part メンバー
+            for part_way_id in sorted(part_way_ids, reverse=True):  # 出力安定化のためソート
+                m = ET.SubElement(rel_elem, 'member')
+                m.set('type', 'way')
+                m.set('ref', str(part_way_id))
+                m.set('role', 'part')
+            # タグ: type=building + outline のタグを duplicate
+            type_tag = ET.SubElement(rel_elem, 'tag')
+            type_tag.set('k', 'type')
+            type_tag.set('v', 'building')
+            self._emit_building_tags(rel_elem, outline, is_part=False)
+
+            all_relations.append(rel_elem)
+
+        # OSM 順序で要素追加: node → way → relation
         for node in all_nodes:
             osm.append(node)
         for way in all_ways:
             osm.append(way)
+        for rel in all_relations:
+            osm.append(rel)
 
-        logger.info(f"XML生成完了: {processed_buildings}件, {total_nodes_created}ノード")
+        logger.info(
+            f"XML生成完了: {processed_buildings}件 (way: {len(all_ways)}, "
+            f"relation: {len(all_relations)}), {total_nodes_created}ノード"
+        )
 
         try:
             xml_string = ET.tostring(osm, encoding='unicode', method='xml')

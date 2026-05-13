@@ -287,3 +287,213 @@ class TestBuildingsToOsmXml:
         # レスポンスXMLから制御文字（タブ・改行・キャリッジリターン除く）が除かれている
         body = response.text
         assert not re.search(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', body)
+
+
+class TestGetBuildingsInBboxQuery:
+    """get_buildings_in_bbox の SQL クエリ構造を検証 (Phase 2 拡張)"""
+
+    def _setup_api_with_mock_cursor(self, api):
+        """api.get_connection() が返す cursor をモックし、execute された SQL を捕捉"""
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = ('3.4',)
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        # context manager protocol も
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=None)
+        return conn, cursor
+
+    def test_query_uses_ctes_for_outlines_parts_orphans(self, api):
+        """SQL に bbox_outlines / related_parts / orphan_parts の CTE が含まれている"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        # 最後に execute された SQL を取得
+        assert cursor.execute.called
+        sql = cursor.execute.call_args[0][0]
+        assert 'bbox_outlines' in sql
+        assert 'related_parts' in sql
+        assert 'orphan_parts' in sql
+
+    def test_query_filters_outlines_with_building_part_is_null(self, api):
+        """outline CTE は building_part IS NULL でフィルタする"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        sql = cursor.execute.call_args[0][0]
+        assert 'building_part IS NULL' in sql
+
+    def test_query_joins_parts_via_parent_building_id(self, api):
+        """related_parts は parent_building_id 経由で結合"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        sql = cursor.execute.call_args[0][0]
+        assert 'parent_building_id IN' in sql or 'parent_building_id in' in sql.lower()
+
+    def test_query_selects_building_part_and_parent_columns(self, api):
+        """SELECT に building_part / parent_building_id が含まれる"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        sql = cursor.execute.call_args[0][0]
+        # ub.building_part, ub.parent_building_id 等の参照があること
+        assert 'building_part' in sql
+        assert 'parent_building_id' in sql
+
+    def test_query_params_count_and_order(self, api):
+        """params は 9 個 (bbox×2 + limit) で正しい順序"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        params = cursor.execute.call_args[0][1]
+        # 9 個: bbox_outlines spatial(4) + LIMIT(1) + orphan_parts spatial(4)
+        assert len(params) == 9
+        # bbox_outlines: min_lon, min_lat, max_lon, max_lat
+        assert params[0:4] == [139.7, 35.7, 139.8, 35.8]
+        # limit
+        assert params[4] == 10
+        # orphan_parts: 同じ bbox を再度
+        assert params[5:9] == [139.7, 35.7, 139.8, 35.8]
+
+    def test_query_placeholder_count_matches_params(self, api):
+        """SQL の %s プレースホルダ数 = params 数 (psycopg2 が hard fail する条件)"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        sql = cursor.execute.call_args[0][0]
+        params = cursor.execute.call_args[0][1]
+        placeholder_count = sql.count('%s')
+        assert placeholder_count == len(params), (
+            f"%s placeholders ({placeholder_count}) != params ({len(params)})"
+        )
+
+
+def _make_part(part_id, parent_id, **tags):
+    """テスト用 part dict のヘルパー。building_part='yes' と parent_building_id を設定。"""
+    nodes = [
+        {'id': 100 + part_id, 'lat': 35.705, 'lon': 139.705},
+        {'id': 101 + part_id, 'lat': 35.705, 'lon': 139.706},
+        {'id': 102 + part_id, 'lat': 35.706, 'lon': 139.706},
+        {'id': 103 + part_id, 'lat': 35.706, 'lon': 139.705},
+    ]
+    d = {
+        'id': part_id,
+        'nodes': nodes,
+        'building_part': 'yes',
+        'parent_building_id': parent_id,
+    }
+    d.update(tags)
+    return d
+
+
+class TestBuildingsToOsmXmlRelations:
+    """Phase 2: building:part way と type=building relation の生成テスト"""
+
+    def test_part_emits_building_part_tag_not_building(self, api):
+        """part 単体: way に building:part=yes が乗り、building タグは出ない"""
+        part = _make_part(part_id=10, parent_id=None, height=5.4, ele=3)
+        xml_str = api.buildings_to_osm_xml([part])
+        root = ET.fromstring(xml_str)
+        way = root.find('way')
+        tags = {t.get('k'): t.get('v') for t in way.findall('tag')}
+        assert tags.get('building:part') == 'yes'
+        assert 'building' not in tags
+        assert tags.get('height') == '5.4'
+        assert tags.get('ele') == '3'
+
+    def test_orphan_part_emits_no_relation(self, api):
+        """parent_building_id=None の part は way のみ、relation 出力なし"""
+        orphan = _make_part(part_id=20, parent_id=None, height=3)
+        xml_str = api.buildings_to_osm_xml([orphan])
+        root = ET.fromstring(xml_str)
+        assert len(root.findall('way')) == 1
+        assert len(root.findall('relation')) == 0
+
+    def test_simple_building_no_relation(self, api):
+        """普通の building (parts 無し) は way のみ、relation 出力なし"""
+        b = _make_building(building_id=1, building='yes', height=7)
+        xml_str = api.buildings_to_osm_xml([b])
+        root = ET.fromstring(xml_str)
+        assert len(root.findall('way')) == 1
+        assert len(root.findall('relation')) == 0
+
+    def test_outline_with_parts_generates_relation(self, api):
+        """outline + part(s) が同じバッチに含まれていれば relation が生成される"""
+        outline = _make_building(building_id=1, building='yes', height=8.4, ele=2.7)
+        p1 = _make_part(part_id=2, parent_id=1, height=5.4, ele=3)
+        p2 = _make_part(part_id=3, parent_id=1, height=6.1, ele=3)
+        xml_str = api.buildings_to_osm_xml([outline, p1, p2])
+        root = ET.fromstring(xml_str)
+
+        # way 3つ (outline 1 + parts 2)
+        assert len(root.findall('way')) == 3
+        # relation 1つ
+        rels = root.findall('relation')
+        assert len(rels) == 1
+        rel = rels[0]
+
+        # relation の member 構成
+        members = rel.findall('member')
+        roles = [(m.get('type'), m.get('ref'), m.get('role')) for m in members]
+        # outline メンバー
+        assert ('way', '-1', 'outline') in roles
+        # part メンバー
+        assert ('way', '-2', 'part') in roles
+        assert ('way', '-3', 'part') in roles
+
+    def test_relation_tags_duplicate_outline_tags(self, api):
+        """relation には type=building と outline のタグを duplicate"""
+        outline = _make_building(building_id=1, building='yes', height=10, ele=4)
+        p1 = _make_part(part_id=2, parent_id=1, height=8, ele=4)
+        xml_str = api.buildings_to_osm_xml([outline, p1])
+        root = ET.fromstring(xml_str)
+        rel = root.find('relation')
+        tags = {t.get('k'): t.get('v') for t in rel.findall('tag')}
+        assert tags.get('type') == 'building'
+        assert tags.get('building') == 'yes'
+        assert tags.get('height') == '10'
+        assert tags.get('ele') == '4'
+        # building:part は relation には出ない (outline 由来なので)
+        assert 'building:part' not in tags
+
+    def test_relation_id_negative_and_distinct_from_ways(self, api):
+        """relation の id は -1_000_000 - outline_db_id で way と衝突しない"""
+        outline = _make_building(building_id=42)
+        p = _make_part(part_id=100, parent_id=42)
+        xml_str = api.buildings_to_osm_xml([outline, p])
+        root = ET.fromstring(xml_str)
+        rel = root.find('relation')
+        rel_id = int(rel.get('id'))
+        # way id は -outline_db_id, -part_db_id
+        way_ids = {int(w.get('id')) for w in root.findall('way')}
+        assert rel_id not in way_ids
+        assert rel_id < -1_000_000  # オフセット適用済み
+
+    def test_part_without_outline_in_batch_emits_part_only(self, api):
+        """parent が同じバッチに含まれない場合、part は単独 way、relation 無し"""
+        # outline (id=1) は含めず、part (id=2, parent_id=1) のみ
+        p = _make_part(part_id=2, parent_id=1)
+        xml_str = api.buildings_to_osm_xml([p])
+        root = ET.fromstring(xml_str)
+        assert len(root.findall('way')) == 1
+        assert len(root.findall('relation')) == 0  # outline 未提供 → relation 組まない
+
+    def test_multiple_outlines_each_with_parts(self, api):
+        """複数の outline それぞれの parts は別 relation"""
+        o1 = _make_building(building_id=1)
+        p1 = _make_part(part_id=2, parent_id=1)
+        o2 = _make_building(building_id=10)
+        p2 = _make_part(part_id=11, parent_id=10)
+        xml_str = api.buildings_to_osm_xml([o1, p1, o2, p2])
+        root = ET.fromstring(xml_str)
+        rels = root.findall('relation')
+        assert len(rels) == 2
+        # 各 relation の outline メンバーが正しい
+        outline_refs = set()
+        for r in rels:
+            for m in r.findall('member'):
+                if m.get('role') == 'outline':
+                    outline_refs.add(m.get('ref'))
+        assert outline_refs == {'-1', '-10'}

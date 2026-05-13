@@ -61,6 +61,7 @@ SELECT
     count(*) AS building_count
 FROM plateau_buildings
 WHERE city_code IS NOT NULL
+  AND building_part IS NULL  -- outline/simple のみカウント (building:part を含めると重複)
 GROUP BY city_code
 WITH NO DATA;
 """

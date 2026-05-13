@@ -16,7 +16,7 @@ from pathlib import Path
 import psycopg2
 from psycopg2.extras import execute_values
 import logging
-from typing import List, Dict, Tuple, Set
+from typing import List, Dict, Tuple, Set, Optional
 import time
 import hashlib
 import re
@@ -104,6 +104,49 @@ class PlateauImporter2PostGIS:
 
         except Exception as e:
             logger.warning(f"⚠️ ID初期化でエラー（デフォルト値を使用）: {e}")
+
+        # building:part 対応のスキーマ拡張をべき等に適用
+        self._ensure_schema()
+
+    def _ensure_schema(self):
+        """plateau_buildings に building:part 対応カラムを idempotent に追加。
+
+        - building_part TEXT: building:part タグの値 (typically 'yes')、それ以外は NULL
+        - parent_building_id INTEGER: part の場合の outline 親 building.id (ON DELETE CASCADE)
+        """
+        try:
+            conn = psycopg2.connect(self.postgres_url)
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name='plateau_buildings'
+                      AND column_name IN ('building_part', 'parent_building_id')
+                """)
+                existing = {row[0] for row in cur.fetchall()}
+                added = []
+                if 'building_part' not in existing:
+                    cur.execute("ALTER TABLE plateau_buildings ADD COLUMN building_part TEXT")
+                    added.append('building_part')
+                if 'parent_building_id' not in existing:
+                    cur.execute(
+                        "ALTER TABLE plateau_buildings "
+                        "ADD COLUMN parent_building_id INTEGER "
+                        "REFERENCES plateau_buildings(id) ON DELETE CASCADE"
+                    )
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_buildings_parent_building_id "
+                        "ON plateau_buildings(parent_building_id) "
+                        "WHERE parent_building_id IS NOT NULL"
+                    )
+                    added.append('parent_building_id')
+                if added:
+                    conn.commit()
+                    logger.info(f"🗂️ スキーマ拡張: {', '.join(added)} を追加")
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"⚠️ スキーマ拡張でエラー（既存のままで継続）: {e}")
 
     def _test_connection(self):
         """PostgreSQL接続テスト"""
@@ -290,7 +333,14 @@ class PlateauImporter2PostGIS:
         return osm_files
 
     def parse_osm_file_safe(self, osm_file: Path) -> Tuple[Dict, List]:
-        """安全なOSMファイル解析（修復済み技術）"""
+        """安全なOSMファイル解析（修復済み技術）
+
+        building:part 対応:
+        - <relation type=building> をパースし、role=outline/role=part の way を識別
+        - building タグを持つ way は単純な building、または relation の outline
+        - building:part タグを持つ way は part (relation 経由でも単独でも対応)
+        - 各 building/part に対し building_part フラグと parent_outline_way_id を付与
+        """
         try:
             tree = ET.parse(osm_file)
             root = tree.getroot()
@@ -301,6 +351,33 @@ class PlateauImporter2PostGIS:
         file_prefix = osm_file.stem
         nodes = {}
         buildings = []
+
+        # relation 解析: type=building の relation から
+        # part_way_id → parent_outline_way_id のマップを構築
+        part_to_outline = {}
+        for rel_elem in root.findall('relation'):
+            rel_tags = {}
+            for tag_elem in rel_elem.findall('tag'):
+                k = tag_elem.get('k')
+                v = tag_elem.get('v')
+                if k and v:
+                    rel_tags[k] = v
+            if rel_tags.get('type') != 'building':
+                continue
+            outline_way_id = None
+            part_way_ids = []
+            for m in rel_elem.findall('member'):
+                if m.get('type') != 'way':
+                    continue
+                role = m.get('role')
+                ref = m.get('ref')
+                if role == 'outline':
+                    outline_way_id = ref
+                elif role == 'part':
+                    part_way_ids.append(ref)
+            if outline_way_id:
+                for pwid in part_way_ids:
+                    part_to_outline[pwid] = outline_way_id
 
         # ノード収集（座標検証付き）
         for node_elem in root.findall('node'):
@@ -337,7 +414,7 @@ class PlateauImporter2PostGIS:
             except (ValueError, TypeError):
                 continue
 
-        # 建物ウェイ収集
+        # 建物ウェイ収集 (building または building:part を持つ way が対象)
         for way_elem in root.findall('way'):
             tags = {}
             for tag_elem in way_elem.findall('tag'):
@@ -346,25 +423,33 @@ class PlateauImporter2PostGIS:
                 if key and value:
                     tags[key] = value
 
-            # 建物判定
-            if tags.get('building'):
-                way_id = way_elem.get('id')
-                nd_refs = []
+            # 建物判定: building または building:part のいずれかがあれば対象
+            is_building = bool(tags.get('building'))
+            is_part = bool(tags.get('building:part'))
+            if not (is_building or is_part):
+                continue
 
-                for nd_elem in way_elem.findall('nd'):
-                    nd_ref = nd_elem.get('ref')
-                    if nd_ref in nodes:
-                        nd_refs.append(nd_ref)
+            way_id = way_elem.get('id')
+            nd_refs = []
 
-                # 最低3点でポリゴン形成
-                if len(nd_refs) >= 3:
-                    buildings.append({
-                        'way_id': way_id,
-                        'tags': tags,
-                        'node_refs': nd_refs,
-                        'source_file': osm_file.name,
-                        'file_prefix': file_prefix
-                    })
+            for nd_elem in way_elem.findall('nd'):
+                nd_ref = nd_elem.get('ref')
+                if nd_ref in nodes:
+                    nd_refs.append(nd_ref)
+
+            # 最低3点でポリゴン形成
+            if len(nd_refs) >= 3:
+                # part の場合は parent_outline_way_id を解決
+                parent_outline_way_id = part_to_outline.get(way_id) if is_part else None
+                buildings.append({
+                    'way_id': way_id,
+                    'tags': tags,
+                    'node_refs': nd_refs,
+                    'source_file': osm_file.name,
+                    'file_prefix': file_prefix,
+                    'is_part': is_part and not is_building,  # building:part のみで building タグ無し
+                    'parent_outline_way_id': parent_outline_way_id,
+                })
 
         return nodes, buildings
 
@@ -479,12 +564,22 @@ class PlateauImporter2PostGIS:
 
         return hashlib.md5(coord_str.encode()).hexdigest()
 
-    def process_buildings_safe(self, all_nodes: Dict, all_buildings: List) -> Tuple[List, List]:
-        """建物処理（安全版・重複除去付き）"""
+    def process_buildings_safe(self, all_nodes: Dict, all_buildings: List) -> Tuple[List, List, List]:
+        """建物処理（安全版・重複除去付き）
+
+        Returns:
+            (buildings_data, nodes_data, parts_parent_map)
+            parts_parent_map: List[Tuple[part_osm_id, parent_outline_osm_id]]
+        """
         logger.info(f"🏗️ {len(all_buildings):,}建物を安全処理中...")
+
+        # outline / simple を先に処理して、part の parent_osm_id 解決を容易にする
+        all_buildings = sorted(all_buildings, key=lambda b: 1 if b.get('is_part') else 0)
 
         buildings_data = []
         nodes_data = []
+        parts_parent_map = []  # [(part_osm_id, parent_outline_osm_id), ...]
+        way_id_to_osm_id = {}  # source way_id → assigned building_id_counter
         processed_count = 0
         skipped_count = 0
         duplicate_count = 0
@@ -574,10 +669,20 @@ class PlateauImporter2PostGIS:
                                 addr_parts.append(converted_tags['addr_housenumber'])
                             addr_full = ' '.join(addr_parts) if addr_parts else None
 
+                            # building:part 判定 (parse_osm_file_safe 由来)
+                            is_part = bool(building.get('is_part'))
+                            building_part_value = 'yes' if is_part else None
+                            # building タグ: part の場合は building タグ無しなので None
+                            building_value = (
+                                converted_tags.get('building', 'yes')
+                                if not is_part
+                                else tags.get('building')  # 通常 None
+                            )
+
                             # 建物データ（plateau_buildingsテーブル構造に合わせる）
                             buildings_data.append((
                                 self.building_id_counter,           # osm_id
-                                converted_tags.get('building', 'yes'),  # building
+                                building_value,                     # building (part の場合 None)
                                 converted_tags.get('height'),       # height
                                 converted_tags.get('ele'),          # ele
                                 converted_tags.get('building_levels'),  # building_levels
@@ -599,9 +704,22 @@ class PlateauImporter2PostGIS:
                                 converted_tags.get('leisure'),      # leisure
                                 converted_tags.get('landuse'),      # landuse
                                 converted_tags.get('city_code'),    # city_code
+                                building_part_value,                # building_part
                                 polygon_wkt,                        # geom用WKT
                                 polygon_wkt                         # centroid用WKT
                             ))
+
+                            # way_id → osm_id を記録 (part の parent 解決に使う)
+                            way_id_to_osm_id[building['way_id']] = self.building_id_counter
+
+                            # part の場合は parent_outline_way_id 経由で parent_osm_id を解決
+                            if is_part and building.get('parent_outline_way_id'):
+                                parent_way_id = building['parent_outline_way_id']
+                                parent_osm_id = way_id_to_osm_id.get(parent_way_id)
+                                if parent_osm_id is not None:
+                                    parts_parent_map.append(
+                                        (self.building_id_counter, parent_osm_id)
+                                    )
 
                             nodes_data.extend(building_nodes)
                             self.building_id_counter += 1
@@ -702,6 +820,7 @@ class PlateauImporter2PostGIS:
 
         logger.info(f"📊 建物処理結果:")
         logger.info(f"   成功: {processed_count:,}件")
+        logger.info(f"   うち building:part: {len(parts_parent_map):,}件 (parent 解決済)")
         logger.info(f"   重複除去: {duplicate_count:,}件")
         logger.info(f"   スキップ: {skipped_count:,}件")
         if skipped_count > 0:
@@ -736,7 +855,7 @@ class PlateauImporter2PostGIS:
             except Exception as e:
                 logger.warning(f"⚠️ スキップレポート保存失敗: {e}")
 
-        return buildings_data, nodes_data
+        return buildings_data, nodes_data, parts_parent_map
 
     @staticmethod
     def _dedupe_and_remap_nodes(nodes_data: List, osm_id_to_db_id: Dict) -> Tuple[List, int, int]:
@@ -771,11 +890,18 @@ class PlateauImporter2PostGIS:
                            node_data[3], node_data[4], node_data[5], node_data[6]))
         return mapped, skipped, orphan
 
-    def insert_to_database_batch(self, buildings_data: List, nodes_data: List) -> bool:
-        """バッチ単位のDB投入（事前削除なし・run_complete_importのバッチ処理用）"""
+    def insert_to_database_batch(self, buildings_data: List, nodes_data: List,
+                                  parts_parent_map: Optional[List[Tuple[int, int]]] = None) -> bool:
+        """バッチ単位のDB投入（事前削除なし・run_complete_importのバッチ処理用）
+
+        parts_parent_map: building:part の (part_osm_id, parent_outline_osm_id) リスト。
+            INSERT 完了後、osm_id → db_id を解決して parent_building_id を UPDATE する。
+        """
         logger.info(f"💾 バッチDB投入中...")
         logger.info(f"   建物: {len(buildings_data):,}件")
         logger.info(f"   ノード: {len(nodes_data):,}件")
+        if parts_parent_map:
+            logger.info(f"   building:part: {len(parts_parent_map):,}件")
 
         conn = psycopg2.connect(self.postgres_url)
 
@@ -794,11 +920,12 @@ class PlateauImporter2PostGIS:
                      start_date, building_material, roof_material, roof_shape,
                      amenity, shop, tourism, leisure, landuse,
                      city_code,
+                     building_part,
                      geom, centroid)
                     VALUES %s
                     """,
                     buildings_data,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
                     page_size=1000
                 )
                 logger.info("✅ 建物投入完了")
@@ -840,6 +967,10 @@ class PlateauImporter2PostGIS:
                     )
                 logger.info("✅ ノード投入完了")
 
+            # building:part の parent_building_id 解決
+            if parts_parent_map:
+                self._resolve_part_parents(cursor, parts_parent_map)
+
             conn.commit()
             logger.info(f"✅ バッチコミット完了")
             return True
@@ -851,7 +982,75 @@ class PlateauImporter2PostGIS:
         finally:
             conn.close()
 
-    def insert_to_database_safe(self, buildings_data: List, nodes_data: List) -> bool:
+    @staticmethod
+    def _build_part_parent_updates(parts_parent_map: List[Tuple[int, int]],
+                                   osm_to_db: Dict[int, int]) -> Tuple[List[Tuple[int, int]], int]:
+        """parts_parent_map と osm_id→db_id マッピングから UPDATE 用ペアを構築する pure 関数。
+
+        Args:
+            parts_parent_map: List[(part_osm_id, parent_outline_osm_id)]
+            osm_to_db: {osm_id: db_id} の辞書
+
+        Returns:
+            (updates, unresolved_count)
+            updates: List[(child_db_id, parent_db_id)] - UPDATE 対象
+            unresolved_count: child または parent が未解決でスキップされた数
+        """
+        updates = []
+        unresolved = 0
+        for part_osm, parent_osm in parts_parent_map:
+            child_db = osm_to_db.get(part_osm)
+            parent_db = osm_to_db.get(parent_osm)
+            if child_db is None or parent_db is None:
+                unresolved += 1
+                continue
+            updates.append((child_db, parent_db))
+        return updates, unresolved
+
+    @staticmethod
+    def _resolve_part_parents(cursor, parts_parent_map: List[Tuple[int, int]]) -> int:
+        """building:part の parent_building_id を解決する。
+
+        Args:
+            cursor: psycopg2 cursor (オープン中のトランザクション)
+            parts_parent_map: List[(part_osm_id, parent_outline_osm_id)]
+
+        Returns:
+            UPDATE 成功した part 行数
+        """
+        if not parts_parent_map:
+            return 0
+        # 必要な osm_id 一式 (part と parent 両方)
+        all_osm_ids = list({osm_id for pair in parts_parent_map for osm_id in pair})
+        cursor.execute(
+            "SELECT osm_id, id FROM plateau_buildings WHERE osm_id = ANY(%s)",
+            (all_osm_ids,)
+        )
+        osm_to_db = dict(cursor.fetchall())
+
+        updates, unresolved = PlateauImporter2PostGIS._build_part_parent_updates(
+            parts_parent_map, osm_to_db
+        )
+
+        if updates:
+            execute_values(
+                cursor,
+                """
+                UPDATE plateau_buildings AS pb
+                SET parent_building_id = data.parent_id
+                FROM (VALUES %s) AS data(child_id, parent_id)
+                WHERE pb.id = data.child_id
+                """,
+                updates,
+                template="(%s, %s)",
+                page_size=5000
+            )
+
+        logger.info(f"🔗 building:part parent 解決: {len(updates):,}件 (未解決 {unresolved})")
+        return len(updates)
+
+    def insert_to_database_safe(self, buildings_data: List, nodes_data: List,
+                                 parts_parent_map: Optional[List[Tuple[int, int]]] = None) -> bool:
         """データベース安全投入（トランザクション管理・重複回避）"""
         logger.info(f"💾 データベースに安全投入中...")
         logger.info(f"   建物: {len(buildings_data):,}件")
@@ -899,11 +1098,12 @@ class PlateauImporter2PostGIS:
                      start_date, building_material, roof_material, roof_shape,
                      amenity, shop, tourism, leisure, landuse,
                      city_code,
+                     building_part,
                      geom, centroid)
                     VALUES %s
                     """,
                     buildings_data,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
                     page_size=1000
                 )
                 logger.info("✅ 建物投入完了")
@@ -944,6 +1144,10 @@ class PlateauImporter2PostGIS:
                         page_size=5000
                     )
                 logger.info("✅ ノード投入完了")
+
+            # building:part の parent_building_id 解決
+            if parts_parent_map:
+                self._resolve_part_parents(cursor, parts_parent_map)
 
             # コミット
             conn.commit()
@@ -1101,12 +1305,12 @@ class PlateauImporter2PostGIS:
                 logger.info(f"📊 バッチ統合: {len(all_nodes):,}ノード, {len(all_buildings):,}建物")
 
                 # Phase 5: 建物処理（バッチ単位）
-                buildings_data, nodes_data = self.process_buildings_safe(all_nodes, all_buildings)
+                buildings_data, nodes_data, parts_parent_map = self.process_buildings_safe(all_nodes, all_buildings)
 
                 if buildings_data:
                     # Phase 6: データベース投入（バッチ単位、事前削除なし）
                     logger.info(f"💾 バッチ {batch_idx+1} DB投入中...")
-                    success = self.insert_to_database_batch(buildings_data, nodes_data)
+                    success = self.insert_to_database_batch(buildings_data, nodes_data, parts_parent_map)
                     if not success:
                         logger.error(f"❌ バッチ {batch_idx+1} DB投入失敗")
                         return False
@@ -1115,7 +1319,7 @@ class PlateauImporter2PostGIS:
                     total_nodes_count += len(nodes_data)
 
                 # メモリ解放
-                del all_nodes, all_buildings, buildings_data, nodes_data
+                del all_nodes, all_buildings, buildings_data, nodes_data, parts_parent_map
                 import gc
                 gc.collect()
                 logger.info(f"🧹 メモリ解放完了")

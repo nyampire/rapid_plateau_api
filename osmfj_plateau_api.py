@@ -129,6 +129,7 @@ class OSMFJPlateauAPI:
                         b.landuse
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
+                      AND b.building_part IS NULL  -- Phase 1: outline/simple のみ返す
                     ORDER BY {distinct_key}
                 )
                 SELECT
@@ -348,6 +349,7 @@ class OSMFJPlateauAPI:
                     AVG(height) as avg_height,
                     MAX(height) as max_height
                 FROM plateau_buildings
+                WHERE building_part IS NULL  -- outline/simple のみ集計
             """)
             building_stats = cursor.fetchone()
 

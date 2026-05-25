@@ -485,6 +485,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Plateau 進捗ダッシュボード API (read-only /api/dashboard/*) を相乗りマウント ---
+# 実体は rapid_plateau_dashboard の api/dashboard_api.py（同ディレクトリに配置してデプロイ）。
+# 未配置でも本体APIは起動できるよう try/except。
+try:
+    from dashboard_api import router as dashboard_router
+    app.include_router(dashboard_router)
+    logging.info("mounted dashboard router at /api/dashboard")
+except Exception as e:
+    logging.warning(f"dashboard router not mounted: {e}")
+
 # APIインスタンス
 api = OSMFJPlateauAPI()
 

@@ -497,3 +497,75 @@ class TestBuildingsToOsmXmlRelations:
                 if m.get('role') == 'outline':
                     outline_refs.add(m.get('ref'))
         assert outline_refs == {'-1', '-10'}
+
+
+class TestBuildingsToOsmXmlNodeSharing:
+    """Rapid#33: outline と parts で同一座標のノードは共有されること"""
+
+    def test_outline_part_share_corner_nodes(self, api):
+        """outline と part が同座標を持つとき、両ウェイの <nd ref> が同じ id を指す"""
+        # outline: 4 corners around a small square
+        outline_nodes = [
+            {'id': 10, 'lat': 35.7000000, 'lon': 139.7000000},
+            {'id': 11, 'lat': 35.7000000, 'lon': 139.7010000},
+            {'id': 12, 'lat': 35.7010000, 'lon': 139.7010000},
+            {'id': 13, 'lat': 35.7010000, 'lon': 139.7000000},
+        ]
+        # part: shares 2 corners with outline (NE and NW), 2 unique inside
+        part_nodes = [
+            {'id': 20, 'lat': 35.7000000, 'lon': 139.7010000},  # = outline id=11
+            {'id': 21, 'lat': 35.7005000, 'lon': 139.7010000},  # unique
+            {'id': 22, 'lat': 35.7005000, 'lon': 139.7005000},  # unique
+            {'id': 23, 'lat': 35.7000000, 'lon': 139.7000000},  # = outline id=10
+        ]
+        outline = _make_building(building_id=1, nodes=outline_nodes, building='yes')
+        part = _make_part(part_id=2, parent_id=1)
+        part['nodes'] = part_nodes
+
+        xml_str = api.buildings_to_osm_xml([outline, part])
+        root = ET.fromstring(xml_str)
+
+        # Build id → (lat, lon) map for emitted <node> elements
+        emitted = {n.get('id'): (n.get('lat'), n.get('lon')) for n in root.findall('node')}
+
+        # The two shared corners should appear ONCE each in <node> output
+        # (4 outline + 2 unique part = 6, not 8)
+        shared_coords = [
+            ('35.7000000', '139.7010000'),
+            ('35.7000000', '139.7000000'),
+        ]
+        for lat, lon in shared_coords:
+            matches = [nid for nid, (la, lo) in emitted.items() if (la, lo) == (lat, lon)]
+            assert len(matches) == 1, f"shared coord ({lat},{lon}) emitted {len(matches)} times: {matches}"
+
+        # Both outline and part should reference the SAME node id at each shared coord
+        outline_way = next(w for w in root.findall('way') if w.get('id') == '-1')
+        part_way = next(w for w in root.findall('way') if w.get('id') == '-2')
+        outline_refs = [nd.get('ref') for nd in outline_way.findall('nd')]
+        part_refs = [nd.get('ref') for nd in part_way.findall('nd')]
+
+        # Find the ref for shared coord (35.7,139.701) in both ways
+        for lat, lon in shared_coords:
+            canonical = next(nid for nid, (la, lo) in emitted.items() if (la, lo) == (lat, lon))
+            assert canonical in outline_refs, f"outline missing canonical ref {canonical} for ({lat},{lon})"
+            assert canonical in part_refs, f"part missing canonical ref {canonical} for ({lat},{lon})"
+
+    def test_separate_relations_do_not_share_nodes(self, api):
+        """別 relation の outline 同士は同座標でも共有しない (importer 側 Phase 1 の責務)"""
+        shared = {'id': 10, 'lat': 35.7000000, 'lon': 139.7000000}
+        o1_nodes = [shared,
+                    {'id': 11, 'lat': 35.7000000, 'lon': 139.7010000},
+                    {'id': 12, 'lat': 35.7010000, 'lon': 139.7010000}]
+        o2_nodes = [{'id': 20, 'lat': 35.7000000, 'lon': 139.7000000},  # same coord as shared
+                    {'id': 21, 'lat': 35.7000000, 'lon': 139.7020000},
+                    {'id': 22, 'lat': 35.7020000, 'lon': 139.7020000}]
+        o1 = _make_building(building_id=1, nodes=o1_nodes, building='yes')
+        o2 = _make_building(building_id=2, nodes=o2_nodes, building='yes')
+
+        xml_str = api.buildings_to_osm_xml([o1, o2])
+        root = ET.fromstring(xml_str)
+
+        # The (35.7, 139.7) coord should appear in TWO distinct node elements
+        emitted = [(n.get('id'), n.get('lat'), n.get('lon')) for n in root.findall('node')]
+        matches = [nid for nid, la, lo in emitted if (la, lo) == ('35.7000000', '139.7000000')]
+        assert len(matches) == 2, f"cross-relation coord should NOT dedupe, got {matches}"

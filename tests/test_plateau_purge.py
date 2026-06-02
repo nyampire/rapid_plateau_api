@@ -2,6 +2,7 @@
 plateau_purge.py のテスト
 """
 
+import sys
 from unittest.mock import MagicMock, patch
 from io import StringIO
 
@@ -109,6 +110,26 @@ class TestPurger:
         p = Purger('13112', 'postgresql://x')
         p.conn = mock_connection
         assert p.acquire_lock() is False
+
+    def test_skip_coverage_refresh_short_circuits(self, monkeypatch):
+        """`--skip-coverage-refresh` 相当の flag が立っていれば、
+        CoverageManager の import 経路に降りずに早期 return する。
+
+        Rapid#35 part C の re-import バッチで OOM の主因になっていた
+        `REFRESH MATERIALIZED VIEW CONCURRENTLY plateau_coverage` を
+        per-city ではなくバッチ末尾で 1 回だけ呼ぶ運用のための fallback。
+        """
+        # plateau_coverage モジュールを取り除いた状態で flag を効かせる。
+        # flag が無視されて import まで進めば ModuleNotFoundError が漏れて来るので
+        # 早期 return できているかが分かる。
+        monkeypatch.setitem(sys.modules, 'plateau_coverage', None)
+        p = Purger('13112', 'postgresql://x', skip_coverage_refresh=True)
+        p._refresh_coverage_view()  # 例外を出さなければ OK
+
+    def test_default_does_not_skip_coverage_refresh(self):
+        """flag 未指定時は従来挙動（refresh が走る経路）"""
+        p = Purger('13112', 'postgresql://x')
+        assert p.skip_coverage_refresh is False
 
 
 # ----------------------------------------------------------------------

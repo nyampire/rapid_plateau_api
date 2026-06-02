@@ -74,7 +74,8 @@ CREATE INDEX IF NOT EXISTS idx_purge_history_executed_at
 class Purger:
     """Plateau データパージツール"""
 
-    def __init__(self, citycode: str, postgres_url: Optional[str] = None):
+    def __init__(self, citycode: str, postgres_url: Optional[str] = None,
+                 skip_coverage_refresh: bool = False):
         self.citycode = citycode
         if postgres_url is None:
             postgres_url = os.getenv(
@@ -82,6 +83,7 @@ class Purger:
                 'postgresql://osmfj_user:secure_plateau_password@localhost:5432/osmfj_plateau'
             )
         self.postgres_url = postgres_url
+        self.skip_coverage_refresh = skip_coverage_refresh
         self.conn: Optional[psycopg2.extensions.connection] = None
 
     def connect(self, readonly: bool = True) -> None:
@@ -387,6 +389,12 @@ class Purger:
 
     def _refresh_coverage_view(self) -> None:
         """plateau_coverage マテリアライズドビューをリフレッシュ（存在する場合のみ）"""
+        if self.skip_coverage_refresh:
+            logger.info(
+                "ℹ️ --skip-coverage-refresh 指定のため REFRESH MATERIALIZED VIEW をスキップ"
+                "（バッチ運用後に手動で plateau_coverage.py --refresh）"
+            )
+            return
         try:
             from plateau_coverage import CoverageManager
         except ImportError:
@@ -520,6 +528,13 @@ def main() -> None:
         action='store_true',
         help='詳細ログ出力',
     )
+    parser.add_argument(
+        '--skip-coverage-refresh',
+        action='store_true',
+        help='REFRESH MATERIALIZED VIEW plateau_coverage をスキップ '
+             '（バッチ運用時に末尾で一括 refresh する想定。'
+             'CONCURRENTLY 実行のメモリ二重化で OOM を避ける）',
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -539,7 +554,8 @@ def main() -> None:
     if not (args.citycode.isdigit() and len(args.citycode) == 5):
         parser.error(f"citycode は5桁の数字である必要があります (指定: {args.citycode!r})")
 
-    runner = Purger(args.citycode, args.postgres_url)
+    runner = Purger(args.citycode, args.postgres_url,
+                    skip_coverage_refresh=args.skip_coverage_refresh)
 
     if args.execute:
         # 本番実行前に Dry Run で確認
@@ -563,7 +579,8 @@ def main() -> None:
             logger.info("--yes 指定のため確認プロンプトをスキップ")
 
         # 本番実行
-        runner = Purger(args.citycode, args.postgres_url)  # 新規接続
+        runner = Purger(args.citycode, args.postgres_url,
+                        skip_coverage_refresh=args.skip_coverage_refresh)  # 新規接続
         runner.execute()
     else:
         # Dry Run のみ

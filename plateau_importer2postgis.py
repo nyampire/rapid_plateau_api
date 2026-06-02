@@ -971,6 +971,9 @@ class PlateauImporter2PostGIS:
             if parts_parent_map:
                 self._resolve_part_parents(cursor, parts_parent_map)
 
+            # 行政界 N03 フィルタ (Rapid#35 part C)
+            self._apply_city_boundary_filter(cursor)
+
             conn.commit()
             logger.info(f"✅ バッチコミット完了")
             return True
@@ -981,6 +984,79 @@ class PlateauImporter2PostGIS:
             raise
         finally:
             conn.close()
+
+    @staticmethod
+    def _build_boundary_filter_select_sql() -> str:
+        """source city の N03 行政界の外にある建物 id を選ぶ SQL。
+
+        Part A (osmfj_plateau_api 側) と同じ semantics を共有する:
+        - dash_city_master.boundary_geom IS NULL の都市 (特殊データセット
+          13999 / 27999 など) は無視 → 結果が空 → pass-through。
+        - master に行が無い city_code も pass-through (JOIN で落ちる)。
+        - boundary が登録されていて centroid が外側の行のみ返す。
+
+        引数は city_code 1 個 (%s)。
+        """
+        return (
+            "SELECT b.id "
+            "FROM plateau_buildings b "
+            "JOIN dash_city_master m ON m.city_code = b.city_code "
+            "WHERE b.city_code = %s "
+            "  AND m.boundary_geom IS NOT NULL "
+            "  AND NOT ST_Contains(m.boundary_geom, b.centroid)"
+        )
+
+    def _apply_city_boundary_filter(self, cursor) -> Tuple[int, int]:
+        """source city の N03 行政界の外にある建物・ノードを削除する。
+
+        PLATEAU は都市別配布だが標準地域メッシュは複数 city にまたがる。
+        共有メッシュ内の建物は両方の都市の bundle で別レコードとして取り込まれ、
+        結果として ~13% の cross-city duplicate を生んでいた (Rapid#35)。
+        本フィルタはその根本対策として、本来 source city の行政界に属さない
+        建物 (= 重複側) を import の最終段で削除する。
+
+        plateau_building_nodes は ON DELETE CASCADE を持たないので、
+        plateau_purge.py と同じ「ノード → 建物」の順で 2 段階削除する。
+
+        Returns:
+            (buildings_deleted, nodes_deleted)
+        """
+        if not self.citycode or self.citycode == "unknown":
+            return 0, 0
+        try:
+            cursor.execute(
+                self._build_boundary_filter_select_sql(), (self.citycode,)
+            )
+            outside_ids = [row[0] for row in cursor.fetchall()]
+        except Exception as e:
+            # dash_city_master が存在しない / 接続喪失などの場合は素通り。
+            # 行政界フィルタは恒久対策の補助層であり、欠落しても import 全体を
+            # 失敗させない方が安全 (Part A の API 側フィルタが残る)。
+            logger.warning(f"⚠️ 行政界フィルタの SELECT 失敗: {e}（pass-through）")
+            return 0, 0
+
+        if not outside_ids:
+            logger.info(
+                "🌐 行政界 N03 フィルタ: 削除対象なし"
+                " (境界未登録 or 全件境界内)"
+            )
+            return 0, 0
+
+        cursor.execute(
+            "DELETE FROM plateau_building_nodes WHERE building_id = ANY(%s)",
+            (outside_ids,),
+        )
+        nodes_deleted = cursor.rowcount or 0
+        cursor.execute(
+            "DELETE FROM plateau_buildings WHERE id = ANY(%s)",
+            (outside_ids,),
+        )
+        buildings_deleted = cursor.rowcount or 0
+        logger.info(
+            f"🌐 行政界 N03 フィルタ: {buildings_deleted:,} 建物 / "
+            f"{nodes_deleted:,} ノードを境界外として削除"
+        )
+        return buildings_deleted, nodes_deleted
 
     @staticmethod
     def _build_part_parent_updates(parts_parent_map: List[Tuple[int, int]],
@@ -1148,6 +1224,9 @@ class PlateauImporter2PostGIS:
             # building:part の parent_building_id 解決
             if parts_parent_map:
                 self._resolve_part_parents(cursor, parts_parent_map)
+
+            # 行政界 N03 フィルタ (Rapid#35 part C)
+            self._apply_city_boundary_filter(cursor)
 
             # コミット
             conn.commit()

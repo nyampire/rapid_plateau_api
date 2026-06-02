@@ -302,3 +302,145 @@ class TestParseOsmFileRelations:
         # part の parent_outline_way_id は None (relation 無いので)
         assert by_way_id['-20']['is_part'] is True
         assert by_way_id['-20']['parent_outline_way_id'] is None
+
+
+# ----------------------------------------------------------------------
+# 行政界 N03 フィルタ (Rapid#35 part C)
+# ----------------------------------------------------------------------
+
+class TestCityBoundaryFilter:
+    """`_apply_city_boundary_filter` の挙動。
+
+    PLATEAU は都市別配布だが標準地域メッシュが複数 city にまたがるため、
+    共有メッシュ内の建物が両都市の bundle で重複して取り込まれる
+    (Rapid#35)。本フィルタは source city の N03 行政界
+    (dash_city_master.boundary_geom) に centroid が含まれない建物を import
+    の最終段で削除し、cross-city 重複の根本除去をする。
+
+    検証ケース:
+      1. 境界内 (within)    : 削除対象 0 件 → DELETE 発行されない
+      2. 境界外 (outside)   : 該当 ID を nodes / buildings から 2 段階で削除
+      3. NULL boundary      : SQL の `boundary_geom IS NOT NULL` 句で
+                              SELECT 結果が空になり、pass-through される
+    """
+
+    SQL = None  # 各テストで _build_boundary_filter_select_sql() を再取得
+
+    def _make_importer(self, monkeypatch, tmp_path, citycode='13203'):
+        monkeypatch.setattr(PlateauImporter2PostGIS, '_test_connection', lambda self: None)
+        monkeypatch.setattr(PlateauImporter2PostGIS, '_initialize_id_counters', lambda self: None)
+        monkeypatch.setattr(PlateauImporter2PostGIS, '_ensure_schema', lambda self: None)
+        data_dir = tmp_path / (citycode or 'unknown')
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return PlateauImporter2PostGIS(
+            data_dir=str(data_dir),
+            postgres_url='fake',
+            citycode=citycode,
+        )
+
+    def test_filter_sql_structure(self):
+        """SELECT SQL に Part A と同じ NOT EXISTS 相当の構造が含まれる。
+
+        - dash_city_master を JOIN
+        - boundary_geom IS NOT NULL → NULL boundary city は素通り
+        - NOT ST_Contains で境界外を選ぶ
+        - centroid カラムを使う (Part A と同じ)
+        """
+        sql = PlateauImporter2PostGIS._build_boundary_filter_select_sql()
+        assert 'dash_city_master' in sql
+        assert 'boundary_geom IS NOT NULL' in sql
+        assert 'NOT ST_Contains' in sql
+        assert 'b.centroid' in sql
+        # city_code でスコープされている
+        assert 'b.city_code = %s' in sql
+
+    def test_within_boundary_keeps_all(self, monkeypatch, tmp_path):
+        """全件境界内: SELECT が [] → DELETE は呼ばれない、戻り値 (0, 0)"""
+        importer = self._make_importer(monkeypatch, tmp_path)
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []  # 境界外 0 件
+
+        b, n = importer._apply_city_boundary_filter(cursor)
+
+        assert (b, n) == (0, 0)
+        # SELECT は 1 度だけ呼ばれる (フィルタ判定用)
+        assert cursor.execute.call_count == 1
+        called_sql = cursor.execute.call_args_list[0][0][0]
+        assert 'SELECT' in called_sql
+        # DELETE 系は 1 度も呼ばれない
+        assert all(
+            'DELETE' not in call.args[0]
+            for call in cursor.execute.call_args_list
+        )
+
+    def test_outside_boundary_deletes_rows(self, monkeypatch, tmp_path):
+        """境界外: SELECT が ID リスト → nodes / buildings 両方が DELETE される"""
+        importer = self._make_importer(monkeypatch, tmp_path)
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(101,), (102,), (103,)]
+        # rowcount は DELETE 直後に評価される。順序は (nodes, buildings)
+        cursor.rowcount = 42  # node 削除件数 (簡略化: nodes/buildings 同値で OK)
+
+        b, n = importer._apply_city_boundary_filter(cursor)
+
+        # 3 回 execute: SELECT, DELETE nodes, DELETE buildings
+        assert cursor.execute.call_count == 3
+        sqls = [call.args[0] for call in cursor.execute.call_args_list]
+        assert 'SELECT' in sqls[0]
+        assert 'DELETE FROM plateau_building_nodes' in sqls[1]
+        assert 'DELETE FROM plateau_buildings' in sqls[2]
+        # 削除対象 ID は SELECT 結果と一致
+        node_params = cursor.execute.call_args_list[1].args[1]
+        bldg_params = cursor.execute.call_args_list[2].args[1]
+        assert node_params == ([101, 102, 103],)
+        assert bldg_params == ([101, 102, 103],)
+        # 戻り値は rowcount に依存
+        assert b == 42 and n == 42
+
+    def test_null_boundary_passes_through(self, monkeypatch, tmp_path):
+        """NULL boundary の都市 (13999 / 27999 など): SQL の IS NOT NULL 句で
+        SELECT が空となり、DELETE は呼ばれない。
+
+        SELECT 結果のモックは「境界内」ケースと同形だが、テスト名で意図を分離する。
+        併せて SQL に IS NOT NULL があることは `test_filter_sql_structure` で保証。
+        """
+        importer = self._make_importer(monkeypatch, tmp_path, citycode='13999')
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []  # 行政界なしなので SELECT 結果も空
+
+        b, n = importer._apply_city_boundary_filter(cursor)
+
+        assert (b, n) == (0, 0)
+        # citycode が SELECT パラメータとして渡されていることを確認
+        select_params = cursor.execute.call_args_list[0].args[1]
+        assert select_params == ('13999',)
+
+    def test_unknown_citycode_skipped(self, monkeypatch, tmp_path):
+        """citycode='unknown' / None のときはフィルタを完全スキップする
+        (誤って他都市の行を巻き込まないための安全策)。
+        """
+        for i, code in enumerate(('unknown', None)):
+            importer = self._make_importer(
+                monkeypatch, tmp_path / f'case{i}', citycode='unknown'
+            )
+            importer.citycode = code  # 直接書き換えて検証対象の値にする
+            cursor = MagicMock()
+            b, n = importer._apply_city_boundary_filter(cursor)
+            assert (b, n) == (0, 0)
+            cursor.execute.assert_not_called()
+
+    def test_select_failure_falls_back_to_pass_through(self, monkeypatch, tmp_path):
+        """dash_city_master 不在等で SELECT が例外を投げても import は止めない。
+
+        本フィルタは Part A (API 側の同等フィルタ) の補助層で、欠落しても
+        重複が出るだけで重大な破壊は起きないため pass-through が安全。
+        """
+        importer = self._make_importer(monkeypatch, tmp_path)
+        cursor = MagicMock()
+        cursor.execute.side_effect = Exception('relation "dash_city_master" does not exist')
+
+        b, n = importer._apply_city_boundary_filter(cursor)
+
+        assert (b, n) == (0, 0)
+        # SELECT 1 回で諦め、DELETE は呼ばれない
+        assert cursor.execute.call_count == 1

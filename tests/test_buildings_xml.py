@@ -369,6 +369,39 @@ class TestGetBuildingsInBboxQuery:
             f"%s placeholders ({placeholder_count}) != params ({len(params)})"
         )
 
+    def test_query_filters_buildings_outside_their_city_boundary(self, api):
+        """Rapid#35: cross-city mesh duplicate 抑制のフィルタが SQL に含まれている"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        sql = cursor.execute.call_args[0][0]
+        # boundary 照合用に dash_city_master と centroid を参照していること
+        assert 'dash_city_master' in sql
+        assert 'boundary_geom' in sql
+        # boundary が定義されている city のみ厳格化（NULL は素通り）
+        assert 'boundary_geom IS NOT NULL' in sql
+        # centroid を含むかを ST_Contains で判定
+        assert 'ST_Contains' in sql and 'b.centroid' in sql
+
+    def test_city_boundary_filter_applies_to_outlines_and_orphans(self, api):
+        """フィルタは bbox_outlines と orphan_parts の両方に効いていること
+
+        related_parts は parent_building_id 経由でついてくるため、outline が
+        フィルタで生き残れば自然に連動する。orphan_parts は parent を持たない
+        ため独立にフィルタする必要がある。
+        """
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        with patch.object(api, 'get_connection', return_value=conn):
+            api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        sql = cursor.execute.call_args[0][0]
+        # dash_city_master を参照する EXISTS が SQL 全体で 2 回現れること
+        # (bbox_outlines / orphan_parts に各 1 回)
+        boundary_filter_occurrences = sql.count('FROM dash_city_master m')
+        assert boundary_filter_occurrences == 2, (
+            f"dash_city_master subquery should appear twice (outlines + orphan parts), "
+            f"got {boundary_filter_occurrences}"
+        )
+
 
 def _make_part(part_id, parent_id, **tags):
     """テスト用 part dict のヘルパー。building_part='yes' と parent_building_id を設定。"""

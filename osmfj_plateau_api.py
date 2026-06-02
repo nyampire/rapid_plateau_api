@@ -105,6 +105,28 @@ class OSMFJPlateauAPI:
                 """
                 distinct_key = "MD5(ST_AsText(b.geom))"
 
+            # Cross-city mesh duplicate guard (Rapid#35):
+            # PLATEAU は都市別配布だが標準地域メッシュは複数 city にまたがる。
+            # 共有メッシュ内の建物は両方の都市の bundle で別レコードとして取り込まれて
+            # おり、bbox クエリでそのまま両方返してしまうと、ユーザ画面に同じ建物が
+            # 微妙に違う形状・属性で 2 重に出る。
+            # ここでは「建物の centroid が source city の N03 行政界
+            # (dash_city_master.boundary_geom) に含まれるレコードだけ通す」フィルタ
+            # を CTE の WHERE 句に重ねる。
+            #   - boundary_geom IS NULL の city（特殊データセット 13999 / 27999 など）
+            #     はフィルタ対象外、従来通り全件残す。
+            #   - dash_city_master に行が無い city_code もフィルタしない（LEFT JOIN）。
+            # 根本的な dedup は importer 修正 + 再 import (#35) で別途実施するが、
+            # 当面は本フィルタが defense-in-depth として残る想定。
+            city_boundary_filter = """
+                AND NOT EXISTS (
+                    SELECT 1 FROM dash_city_master m
+                    WHERE m.city_code = b.city_code
+                      AND m.boundary_geom IS NOT NULL
+                      AND NOT ST_Contains(m.boundary_geom, b.centroid)
+                )
+            """
+
             # Phase 2: bbox 内の outline / simple を取得後、それらの parts も追加で取得。
             # さらに bbox 内の orphan part (relation 無しの building:part) も併せて返す。
             # LATERAL JOIN で各 building のノードを個別に集約（GROUP BY 不要）。
@@ -121,6 +143,7 @@ class OSMFJPlateauAPI:
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
                       AND b.building_part IS NULL
+                      {city_boundary_filter}
                     ORDER BY {distinct_key}
                     LIMIT %s
                 ),
@@ -149,6 +172,7 @@ class OSMFJPlateauAPI:
                     WHERE b.building_part = 'yes'
                       AND b.parent_building_id IS NULL
                       AND {spatial_condition}
+                      {city_boundary_filter}
                 ),
                 all_buildings AS (
                     SELECT * FROM bbox_outlines

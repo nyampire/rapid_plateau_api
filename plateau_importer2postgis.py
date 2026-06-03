@@ -1042,16 +1042,30 @@ class PlateauImporter2PostGIS:
             )
             return 0, 0
 
-        cursor.execute(
-            "DELETE FROM plateau_building_nodes WHERE building_id = ANY(%s)",
-            (outside_ids,),
-        )
-        nodes_deleted = cursor.rowcount or 0
-        cursor.execute(
-            "DELETE FROM plateau_buildings WHERE id = ANY(%s)",
-            (outside_ids,),
-        )
-        buildings_deleted = cursor.rowcount or 0
+        # SAVEPOINT で囲んで DELETE が FK 違反などで失敗しても import 本体は通す。
+        # 行政界フィルタは恒久対策の補助層なので、ここで例外を出すより重複を残して
+        # Part A の API filter で隠す方を選ぶ。
+        cursor.execute("SAVEPOINT boundary_filter")
+        try:
+            cursor.execute(
+                "DELETE FROM plateau_building_nodes WHERE building_id = ANY(%s)",
+                (outside_ids,),
+            )
+            nodes_deleted = cursor.rowcount or 0
+            cursor.execute(
+                "DELETE FROM plateau_buildings WHERE id = ANY(%s)",
+                (outside_ids,),
+            )
+            buildings_deleted = cursor.rowcount or 0
+            cursor.execute("RELEASE SAVEPOINT boundary_filter")
+        except Exception as e:
+            cursor.execute("ROLLBACK TO SAVEPOINT boundary_filter")
+            logger.warning(
+                f"⚠️ 行政界フィルタの DELETE で例外、フィルタを skip "
+                f"(outside_ids={len(outside_ids):,}件): {e}"
+            )
+            return 0, 0
+
         logger.info(
             f"🌐 行政界 N03 フィルタ: {buildings_deleted:,} 建物 / "
             f"{nodes_deleted:,} ノードを境界外として削除"

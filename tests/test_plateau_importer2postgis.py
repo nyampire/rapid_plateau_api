@@ -383,15 +383,17 @@ class TestCityBoundaryFilter:
 
         b, n = importer._apply_city_boundary_filter(cursor)
 
-        # 3 回 execute: SELECT, DELETE nodes, DELETE buildings
-        assert cursor.execute.call_count == 3
+        # 5 回 execute: SELECT, SAVEPOINT, DELETE nodes, DELETE buildings, RELEASE
+        assert cursor.execute.call_count == 5
         sqls = [call.args[0] for call in cursor.execute.call_args_list]
         assert 'SELECT' in sqls[0]
-        assert 'DELETE FROM plateau_building_nodes' in sqls[1]
-        assert 'DELETE FROM plateau_buildings' in sqls[2]
+        assert 'SAVEPOINT boundary_filter' in sqls[1]
+        assert 'DELETE FROM plateau_building_nodes' in sqls[2]
+        assert 'DELETE FROM plateau_buildings' in sqls[3]
+        assert 'RELEASE SAVEPOINT boundary_filter' in sqls[4]
         # 削除対象 ID は SELECT 結果と一致
-        node_params = cursor.execute.call_args_list[1].args[1]
-        bldg_params = cursor.execute.call_args_list[2].args[1]
+        node_params = cursor.execute.call_args_list[2].args[1]
+        bldg_params = cursor.execute.call_args_list[3].args[1]
         assert node_params == ([101, 102, 103],)
         assert bldg_params == ([101, 102, 103],)
         # 戻り値は rowcount に依存
@@ -444,3 +446,60 @@ class TestCityBoundaryFilter:
         assert (b, n) == (0, 0)
         # SELECT 1 回で諦め、DELETE は呼ばれない
         assert cursor.execute.call_count == 1
+
+    def test_delete_fk_violation_rolls_back_to_savepoint(self, monkeypatch, tmp_path):
+        """DELETE が FK 違反などで失敗したら SAVEPOINT を ROLLBACK して import 本体は通す。
+
+        本番 (Rapid#35 Part C 再 import) で `DELETE FROM plateau_buildings` が
+        `plateau_building_nodes_building_id_fkey` 違反を投げる現象を観測。
+        ここでは Phase 1 共有コーナーノード dedup と outside_ids SELECT の
+        相互作用が真因と推定されるが、根本対策が固まるまでは filter を
+        skip して import 本体を成功させる。残った重複は Part A の API 側
+        filter で隠れる。
+        """
+        importer = self._make_importer(monkeypatch, tmp_path)
+        cursor = MagicMock()
+        # 1 回目: SELECT で outside_ids 取得
+        # 2 回目: SAVEPOINT (成功)
+        # 3 回目: DELETE nodes (成功)
+        # 4 回目: DELETE buildings (FK 違反)
+        # 5 回目: ROLLBACK TO SAVEPOINT (成功)
+        cursor.fetchall.return_value = [(201,), (202,)]
+        call_count = {'n': 0}
+        def execute_side_effect(sql, *args, **kwargs):
+            call_count['n'] += 1
+            if 'DELETE FROM plateau_buildings' in sql:
+                raise Exception('foreign key constraint "plateau_building_nodes_building_id_fkey"')
+            return None
+        cursor.execute.side_effect = execute_side_effect
+
+        b, n = importer._apply_city_boundary_filter(cursor)
+
+        # filter は skip → 戻り値 (0, 0)
+        assert (b, n) == (0, 0)
+        # 呼ばれた SQL の順序: SELECT, SAVEPOINT, DELETE nodes, DELETE buildings(raise), ROLLBACK
+        sqls = [call.args[0] for call in cursor.execute.call_args_list]
+        assert 'SELECT' in sqls[0]
+        assert 'SAVEPOINT boundary_filter' in sqls[1]
+        assert 'DELETE FROM plateau_building_nodes' in sqls[2]
+        assert 'DELETE FROM plateau_buildings' in sqls[3]
+        assert 'ROLLBACK TO SAVEPOINT boundary_filter' in sqls[4]
+        # RELEASE は呼ばれていない (失敗パスなので)
+        assert not any('RELEASE' in s for s in sqls)
+
+    def test_outside_boundary_releases_savepoint_on_success(self, monkeypatch, tmp_path):
+        """成功時は RELEASE SAVEPOINT で正しく確定する。
+
+        SAVEPOINT を取って RELEASE しないと長期 transaction で resource が
+        溜まる。境界外あり (=DELETE が走る) の成功パスを確認。
+        """
+        importer = self._make_importer(monkeypatch, tmp_path)
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(301,)]
+        cursor.rowcount = 7
+
+        importer._apply_city_boundary_filter(cursor)
+
+        sqls = [call.args[0] for call in cursor.execute.call_args_list]
+        assert 'SAVEPOINT boundary_filter' in sqls[1]
+        assert 'RELEASE SAVEPOINT boundary_filter' in sqls[-1]

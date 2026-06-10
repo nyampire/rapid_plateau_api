@@ -373,31 +373,39 @@ class TestCityBoundaryFilter:
             for call in cursor.execute.call_args_list
         )
 
-    def test_outside_boundary_deletes_rows(self, monkeypatch, tmp_path):
-        """境界外: SELECT が ID リスト → nodes / buildings 両方が DELETE される"""
+    def test_outside_boundary_deletes_buildings(self, monkeypatch, tmp_path):
+        """境界外: SELECT が ID リスト → 単一の DELETE FROM plateau_buildings が発行される。
+
+        api#20: ノードと子 part の連鎖削除は ON DELETE CASCADE 任せなので、
+        importer 側は親 building の DELETE 1 文だけ走らせる。nodes_deleted は
+        CASCADE 経由で計測不能なので戻り値は (buildings_deleted, 0)。
+        """
         importer = self._make_importer(monkeypatch, tmp_path)
         cursor = MagicMock()
         cursor.fetchall.return_value = [(101,), (102,), (103,)]
-        # rowcount は DELETE 直後に評価される。順序は (nodes, buildings)
-        cursor.rowcount = 42  # node 削除件数 (簡略化: nodes/buildings 同値で OK)
+        cursor.rowcount = 3  # buildings の DELETE rowcount
 
         b, n = importer._apply_city_boundary_filter(cursor)
 
-        # 5 回 execute: SELECT, SAVEPOINT, DELETE nodes, DELETE buildings, RELEASE
-        assert cursor.execute.call_count == 5
+        # 2 回 execute: SELECT, DELETE buildings
+        assert cursor.execute.call_count == 2
         sqls = [call.args[0] for call in cursor.execute.call_args_list]
         assert 'SELECT' in sqls[0]
-        assert 'SAVEPOINT boundary_filter' in sqls[1]
-        assert 'DELETE FROM plateau_building_nodes' in sqls[2]
-        assert 'DELETE FROM plateau_buildings' in sqls[3]
-        assert 'RELEASE SAVEPOINT boundary_filter' in sqls[4]
+        assert 'DELETE FROM plateau_buildings' in sqls[1]
         # 削除対象 ID は SELECT 結果と一致
-        node_params = cursor.execute.call_args_list[2].args[1]
-        bldg_params = cursor.execute.call_args_list[3].args[1]
-        assert node_params == ([101, 102, 103],)
-        assert bldg_params == ([101, 102, 103],)
-        # 戻り値は rowcount に依存
-        assert b == 42 and n == 42
+        assert cursor.execute.call_args_list[1].args[1] == ([101, 102, 103],)
+        # ノード DELETE は importer から直接は発行されない (CASCADE)
+        assert all(
+            'DELETE FROM plateau_building_nodes' not in call.args[0]
+            for call in cursor.execute.call_args_list
+        )
+        # SAVEPOINT もない (CASCADE で FK violation が起きないため)
+        assert all(
+            'SAVEPOINT' not in call.args[0]
+            for call in cursor.execute.call_args_list
+        )
+        # 戻り値: buildings_deleted=rowcount, nodes_deleted=0 (CASCADE で計測不能)
+        assert b == 3 and n == 0
 
     def test_null_boundary_passes_through(self, monkeypatch, tmp_path):
         """NULL boundary の都市 (13999 / 27999 など): SQL の IS NOT NULL 句で
@@ -447,59 +455,23 @@ class TestCityBoundaryFilter:
         # SELECT 1 回で諦め、DELETE は呼ばれない
         assert cursor.execute.call_count == 1
 
-    def test_delete_fk_violation_rolls_back_to_savepoint(self, monkeypatch, tmp_path):
-        """DELETE が FK 違反などで失敗したら SAVEPOINT を ROLLBACK して import 本体は通す。
+    def test_no_savepoint_or_node_delete_after_cascade_migration(self, monkeypatch, tmp_path):
+        """api#20 (CASCADE 化) 後: SAVEPOINT もノード DELETE も発行されないこと。
 
-        本番 (Rapid#35 Part C 再 import) で `DELETE FROM plateau_buildings` が
-        `plateau_building_nodes_building_id_fkey` 違反を投げる現象を観測。
-        ここでは Phase 1 共有コーナーノード dedup と outside_ids SELECT の
-        相互作用が真因と推定されるが、根本対策が固まるまでは filter を
-        skip して import 本体を成功させる。残った重複は Part A の API 側
-        filter で隠れる。
+        plateau_migrate_fk_cascade.py で plateau_building_nodes.building_id を
+        ON DELETE CASCADE に揃えてあれば、DELETE FROM plateau_buildings 1 文で
+        ノードと子 part も連鎖削除される。SAVEPOINT は不要。
+        旧来の 2 段階 DELETE + SAVEPOINT パターンが回帰しないことを確認する。
         """
         importer = self._make_importer(monkeypatch, tmp_path)
         cursor = MagicMock()
-        # 1 回目: SELECT で outside_ids 取得
-        # 2 回目: SAVEPOINT (成功)
-        # 3 回目: DELETE nodes (成功)
-        # 4 回目: DELETE buildings (FK 違反)
-        # 5 回目: ROLLBACK TO SAVEPOINT (成功)
-        cursor.fetchall.return_value = [(201,), (202,)]
-        call_count = {'n': 0}
-        def execute_side_effect(sql, *args, **kwargs):
-            call_count['n'] += 1
-            if 'DELETE FROM plateau_buildings' in sql:
-                raise Exception('foreign key constraint "plateau_building_nodes_building_id_fkey"')
-            return None
-        cursor.execute.side_effect = execute_side_effect
-
-        b, n = importer._apply_city_boundary_filter(cursor)
-
-        # filter は skip → 戻り値 (0, 0)
-        assert (b, n) == (0, 0)
-        # 呼ばれた SQL の順序: SELECT, SAVEPOINT, DELETE nodes, DELETE buildings(raise), ROLLBACK
-        sqls = [call.args[0] for call in cursor.execute.call_args_list]
-        assert 'SELECT' in sqls[0]
-        assert 'SAVEPOINT boundary_filter' in sqls[1]
-        assert 'DELETE FROM plateau_building_nodes' in sqls[2]
-        assert 'DELETE FROM plateau_buildings' in sqls[3]
-        assert 'ROLLBACK TO SAVEPOINT boundary_filter' in sqls[4]
-        # RELEASE は呼ばれていない (失敗パスなので)
-        assert not any('RELEASE' in s for s in sqls)
-
-    def test_outside_boundary_releases_savepoint_on_success(self, monkeypatch, tmp_path):
-        """成功時は RELEASE SAVEPOINT で正しく確定する。
-
-        SAVEPOINT を取って RELEASE しないと長期 transaction で resource が
-        溜まる。境界外あり (=DELETE が走る) の成功パスを確認。
-        """
-        importer = self._make_importer(monkeypatch, tmp_path)
-        cursor = MagicMock()
-        cursor.fetchall.return_value = [(301,)]
-        cursor.rowcount = 7
+        cursor.fetchall.return_value = [(501,)]
+        cursor.rowcount = 1
 
         importer._apply_city_boundary_filter(cursor)
 
         sqls = [call.args[0] for call in cursor.execute.call_args_list]
-        assert 'SAVEPOINT boundary_filter' in sqls[1]
-        assert 'RELEASE SAVEPOINT boundary_filter' in sqls[-1]
+        assert not any('SAVEPOINT' in s for s in sqls), \
+            "SAVEPOINT should not appear after the CASCADE migration"
+        assert not any('DELETE FROM plateau_building_nodes' in s for s in sqls), \
+            "Nodes are now removed via CASCADE; importer should not delete them explicitly"

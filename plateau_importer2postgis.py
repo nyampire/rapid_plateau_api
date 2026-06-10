@@ -1007,7 +1007,7 @@ class PlateauImporter2PostGIS:
         )
 
     def _apply_city_boundary_filter(self, cursor) -> Tuple[int, int]:
-        """source city の N03 行政界の外にある建物・ノードを削除する。
+        """source city の N03 行政界の外にある建物を削除する。
 
         PLATEAU は都市別配布だが標準地域メッシュは複数 city にまたがる。
         共有メッシュ内の建物は両方の都市の bundle で別レコードとして取り込まれ、
@@ -1015,11 +1015,16 @@ class PlateauImporter2PostGIS:
         本フィルタはその根本対策として、本来 source city の行政界に属さない
         建物 (= 重複側) を import の最終段で削除する。
 
-        plateau_building_nodes は ON DELETE CASCADE を持たないので、
-        plateau_purge.py と同じ「ノード → 建物」の順で 2 段階削除する。
+        api#20: 関連ノードと子 part の片付けは外部キーの ON DELETE CASCADE
+        に任せる。事前に plateau_migrate_fk_cascade.py で
+        plateau_building_nodes.building_id を CASCADE に揃えておくこと。
+        親 outline と子 part のどちらか片方しか outside_ids に入っていない
+        場合でも、parent_building_id ON DELETE CASCADE と組み合わさって
+        ノードを残さず連鎖削除される。
 
         Returns:
-            (buildings_deleted, nodes_deleted)
+            (buildings_deleted, 0)
+            nodes は CASCADE 経由で消えるので rowcount を取らない。
         """
         if not self.citycode or self.citycode == "unknown":
             return 0, 0
@@ -1042,35 +1047,16 @@ class PlateauImporter2PostGIS:
             )
             return 0, 0
 
-        # SAVEPOINT で囲んで DELETE が FK 違反などで失敗しても import 本体は通す。
-        # 行政界フィルタは恒久対策の補助層なので、ここで例外を出すより重複を残して
-        # Part A の API filter で隠す方を選ぶ。
-        cursor.execute("SAVEPOINT boundary_filter")
-        try:
-            cursor.execute(
-                "DELETE FROM plateau_building_nodes WHERE building_id = ANY(%s)",
-                (outside_ids,),
-            )
-            nodes_deleted = cursor.rowcount or 0
-            cursor.execute(
-                "DELETE FROM plateau_buildings WHERE id = ANY(%s)",
-                (outside_ids,),
-            )
-            buildings_deleted = cursor.rowcount or 0
-            cursor.execute("RELEASE SAVEPOINT boundary_filter")
-        except Exception as e:
-            cursor.execute("ROLLBACK TO SAVEPOINT boundary_filter")
-            logger.warning(
-                f"⚠️ 行政界フィルタの DELETE で例外、フィルタを skip "
-                f"(outside_ids={len(outside_ids):,}件): {e}"
-            )
-            return 0, 0
-
-        logger.info(
-            f"🌐 行政界 N03 フィルタ: {buildings_deleted:,} 建物 / "
-            f"{nodes_deleted:,} ノードを境界外として削除"
+        cursor.execute(
+            "DELETE FROM plateau_buildings WHERE id = ANY(%s)",
+            (outside_ids,),
         )
-        return buildings_deleted, nodes_deleted
+        buildings_deleted = cursor.rowcount or 0
+        logger.info(
+            f"🌐 行政界 N03 フィルタ: {buildings_deleted:,} 建物を境界外として削除 "
+            f"(関連ノード・子 part は CASCADE 削除)"
+        )
+        return buildings_deleted, 0
 
     @staticmethod
     def _build_part_parent_updates(parts_parent_map: List[Tuple[int, int]],

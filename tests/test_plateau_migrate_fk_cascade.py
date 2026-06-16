@@ -104,3 +104,70 @@ class TestSqlContents:
         assert "plateau_building_nodes" in mig.ADD_SQL
         assert "REFERENCES plateau_buildings(id)" in mig.ADD_SQL
         assert "ON DELETE CASCADE" in mig.ADD_SQL
+
+
+# Integration: closes #23. The mock-based tests above only check fetch sequences
+# and DDL text; this one runs the migration against a real PostgreSQL and then
+# exercises the boundary-filter scenario (parent DELETE while the parts/nodes
+# rows were never explicitly removed) to confirm CASCADE fires end-to-end.
+@pytest.mark.integration
+class TestMigrateIntegration:
+    def test_parent_delete_cascades_through_parts_and_nodes(
+        self, integration_db_url, fresh_plateau_schema
+    ):
+        conn = fresh_plateau_schema
+
+        # Pre-state sanity: the freshly-created nodes FK should be NO ACTION ('a').
+        with conn.cursor() as cur:
+            assert mig.check_constraint_state(cur) == "a"
+
+        # Apply the migration end-to-end against the real DB.
+        rc = mig.migrate(integration_db_url, execute=True)
+        assert rc == 0
+
+        with conn.cursor() as cur:
+            assert mig.check_constraint_state(cur) == "c"
+
+            # Build the boundary-filter shape that #20 fixed:
+            #   one parent outline whose part lives in the same set,
+            #   with several nodes attached to each.
+            cur.execute(
+                "INSERT INTO plateau_buildings(building_part) VALUES (NULL) RETURNING id"
+            )
+            parent_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO plateau_buildings(building_part, parent_building_id) "
+                "VALUES ('yes', %s) RETURNING id",
+                (parent_id,),
+            )
+            child_id = cur.fetchone()[0]
+            cur.executemany(
+                "INSERT INTO plateau_building_nodes(building_id) VALUES (%s)",
+                [(parent_id,), (parent_id,), (child_id,), (child_id,)],
+            )
+
+            cur.execute("SELECT count(*) FROM plateau_buildings")
+            assert cur.fetchone()[0] == 2
+            cur.execute("SELECT count(*) FROM plateau_building_nodes")
+            assert cur.fetchone()[0] == 4
+
+            # Delete only the parent — without the new CASCADE this would raise
+            # plateau_building_nodes_building_id_fkey when the part's nodes are
+            # left dangling by parent_building_id's own CASCADE.
+            cur.execute("DELETE FROM plateau_buildings WHERE id = %s", (parent_id,))
+
+            cur.execute("SELECT count(*) FROM plateau_buildings")
+            assert cur.fetchone()[0] == 0, \
+                "child part should cascade-delete via parent_building_id"
+            cur.execute("SELECT count(*) FROM plateau_building_nodes")
+            assert cur.fetchone()[0] == 0, \
+                "nodes for both parent and child should cascade via the migrated FK"
+
+    def test_migrate_is_idempotent_on_already_migrated_db(
+        self, integration_db_url, fresh_plateau_schema
+    ):
+        # Apply twice; the second call must early-return rc=0 without touching DDL.
+        assert mig.migrate(integration_db_url, execute=True) == 0
+        assert mig.migrate(integration_db_url, execute=True) == 0
+        with fresh_plateau_schema.cursor() as cur:
+            assert mig.check_constraint_state(cur) == "c"

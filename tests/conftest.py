@@ -4,6 +4,7 @@ pytest 共通フィクスチャ
 DB接続をモック化するヘルパーと、統合テスト用のフィクスチャを提供。
 """
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -31,6 +32,57 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if 'integration' in item.keywords:
             item.add_marker(skip_integration)
+
+
+@pytest.fixture(scope='session')
+def integration_db_url():
+    """統合テスト用 PostgreSQL の接続 URL。
+
+    `PLATEAU_TEST_DATABASE_URL` が未設定なら統合テストを skip する。
+    例: `PLATEAU_TEST_DATABASE_URL=postgresql:///plateau_api_test pytest --run-integration`
+    """
+    url = os.environ.get('PLATEAU_TEST_DATABASE_URL')
+    if not url:
+        pytest.skip('PLATEAU_TEST_DATABASE_URL not set; skipping DB integration tests')
+    return url
+
+
+@pytest.fixture
+def fresh_plateau_schema(integration_db_url):
+    """`plateau_buildings` と `plateau_building_nodes` を初期状態 (nodes FK = NO ACTION)
+    で作り直し、autocommit な接続を返す。
+
+    各テストが migration の前提状態から始められるよう、毎回 DROP + CREATE する。
+    PostGIS 拡張は使わない最小スキーマ (id / building_part / parent_building_id /
+    building_id のみ) なので、PostGIS 無しの素の DB でも動く。
+    """
+    import psycopg2
+    conn = psycopg2.connect(integration_db_url)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute('DROP TABLE IF EXISTS plateau_building_nodes CASCADE')
+        cur.execute('DROP TABLE IF EXISTS plateau_buildings CASCADE')
+        # parent_building_id は importer の ALTER 経由の挙動を踏襲して
+        # ここで ON DELETE CASCADE を直接付ける (本番と同じ pre-migration 状態)。
+        cur.execute('''
+            CREATE TABLE plateau_buildings (
+                id SERIAL PRIMARY KEY,
+                building_part TEXT,
+                parent_building_id INTEGER
+                    REFERENCES plateau_buildings(id) ON DELETE CASCADE
+            )
+        ''')
+        # 子側 FK の名前は PG デフォルト規則で
+        # `plateau_building_nodes_building_id_fkey` となり、migration スクリプトが
+        # 参照する定数 (CONSTRAINT_NAME) と一致する。
+        cur.execute('''
+            CREATE TABLE plateau_building_nodes (
+                id SERIAL PRIMARY KEY,
+                building_id INTEGER REFERENCES plateau_buildings(id)
+            )
+        ''')
+    yield conn
+    conn.close()
 
 
 @pytest.fixture

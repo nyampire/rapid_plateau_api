@@ -272,6 +272,84 @@ class TestParseOsmFileRelations:
 
 
 # ----------------------------------------------------------------------
+# citygml-osm v3.x fixtures (api#21 Phase 0 / #25)
+# ----------------------------------------------------------------------
+
+class TestCitygmlOsmFixtures:
+    """Pin the citygml-osm v3.x output contract so a future parser tweak or
+    upstream tool bump can't silently regress the fields importer reads.
+
+    Phase 0 (api#21) confirmed `parse_osm_file_safe` tolerates the upstream
+    non-standard XML extensions (`@area`/`@fix`/`@visible` on `<way>`,
+    `<memberWay>` child elements, `<complete>`/`<marged>` on `<relation>`).
+    These fixtures lock that in: ElementTree must keep ignoring the extras
+    while still extracting the standard tags / node refs / relation members
+    importer relies on.
+    """
+
+    FIX_DIR = Path(__file__).parent / 'fixtures' / 'citygml-osm'
+
+    def test_v4_outline_only_fixture_parses(self, bare_importer):
+        """V4 mesh shape: outlines only, no `building:part`, no `<relation>`.
+
+        Two outline buildings, every way carries the upstream non-standard
+        attrs + `<memberWay>` child. None of that should leak into the parsed
+        building records; importer should just see 2 plain outlines.
+        """
+        importer = bare_importer(citycode='13308')
+        nodes, buildings = importer.parse_osm_file_safe(
+            self.FIX_DIR / 'v4_outline_only.osm'
+        )
+
+        # 2 outlines, no parts.
+        assert len(buildings) == 2
+        assert all(b['is_part'] is False for b in buildings)
+        assert all(b['parent_outline_way_id'] is None for b in buildings)
+        # Standard tags survive the round-trip.
+        for b in buildings:
+            assert b['tags'].get('building') == 'yes'
+            assert 'ref:MLIT_PLATEAU' in b['tags']
+        # `area` / `fix` / `visible` and the synthetic `<memberWay>` child are
+        # upstream extensions, NOT OSM tags — they must not appear on the
+        # parsed tag dict.
+        for b in buildings:
+            assert 'area' not in b['tags']
+            assert 'fix' not in b['tags']
+            assert 'visible' not in b['tags']
+            assert 'memberWay' not in b['tags']
+        # Every node ref resolves into the parsed nodes table — i.e., the
+        # `visible='true'` attr didn't break node ingestion.
+        assert len(nodes) == 8
+
+    def test_v5_outline_with_part_via_relation(self, bare_importer):
+        """V5 mesh shape: outline + `building:part` linked by a
+        `<relation type='building'>` carrying the non-standard
+        `<complete>` / `<marged>` child elements.
+
+        Importer must follow the relation to attach the part to its parent
+        outline despite those unknown children sitting next to the standard
+        `<member>` rows.
+        """
+        importer = bare_importer(citycode='02321')
+        nodes, buildings = importer.parse_osm_file_safe(
+            self.FIX_DIR / 'v5_outline_with_part.osm'
+        )
+
+        assert len(buildings) == 2
+        by_way = {b['way_id']: b for b in buildings}
+        # outline
+        assert by_way['-100']['is_part'] is False
+        assert by_way['-100']['parent_outline_way_id'] is None
+        # part — relation lookup wins, attaches to -100.
+        assert by_way['-200']['is_part'] is True
+        assert by_way['-200']['parent_outline_way_id'] == '-100'
+        # Non-standard relation children don't leak into either building's tags.
+        for b in buildings:
+            assert 'complete' not in b['tags']
+            assert 'marged' not in b['tags']
+
+
+# ----------------------------------------------------------------------
 # 行政界 N03 フィルタ (Rapid#35 part C)
 # ----------------------------------------------------------------------
 

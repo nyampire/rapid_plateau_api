@@ -137,3 +137,37 @@ def fake_cursor_result(mock_connection):
         return cursor
 
     return _setup
+
+
+@pytest.fixture
+def bare_importer(monkeypatch, tmp_path):
+    """`PlateauImporter2PostGIS` を DB 接続なしで生成する factory fixture。
+
+    `_test_connection` / `_initialize_id_counters` / `_ensure_schema` の 3 つを
+    monkeypatch で no-op 化し、citycode 別の `tmp_path/<citycode>` を `data_dir`
+    として idempotent に用意した importer を返す。返り値は呼び出し可能な builder で、
+    citycode を任意に切り替えられる。
+
+    使い方::
+
+        def test_x(bare_importer):
+            importer = bare_importer()                  # citycode='99999'
+            importer = bare_importer(citycode='13203')  # 任意の citycode
+            importer = bare_importer(citycode=None)     # None ハンドリングの検証
+    """
+    from plateau_importer2postgis import PlateauImporter2PostGIS
+
+    monkeypatch.setattr(PlateauImporter2PostGIS, '_test_connection', lambda self: None)
+    monkeypatch.setattr(PlateauImporter2PostGIS, '_initialize_id_counters', lambda self: None)
+    monkeypatch.setattr(PlateauImporter2PostGIS, '_ensure_schema', lambda self: None)
+
+    def _build(citycode='99999'):
+        data_dir = tmp_path / (citycode or 'unknown')
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return PlateauImporter2PostGIS(
+            data_dir=str(data_dir),
+            postgres_url='fake',
+            citycode=citycode,
+        )
+
+    return _build

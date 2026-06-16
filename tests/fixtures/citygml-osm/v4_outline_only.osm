@@ -1,0 +1,40 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!--
+  Synthetic V4-style citygml-osm v3.x output snippet.
+
+  Pins the non-standard XML extensions that the upstream tool emits and that
+  importer.parse_osm_file_safe is expected to tolerate (ElementTree silently
+  ignores unknown attrs / child elements). Used by tests/test_plateau_importer2postgis.py
+  TestCitygmlOsmFixtures.
+
+  Carries: <node visible='true'>, <way area='yes' fix='3' visible='true'>,
+  <memberWay> child elements. No building:part, no <relation> — V4 mesh shape.
+-->
+<osm version='0.6' generator='citygml-osm 3.0.6'>
+  <bounds minlat='35.78' minlon='139.04' maxlat='35.79' maxlon='139.05' />
+  <node id='-1' visible='true' lat='35.78001' lon='139.04001' />
+  <node id='-2' visible='true' lat='35.78002' lon='139.04001' />
+  <node id='-3' visible='true' lat='35.78002' lon='139.04002' />
+  <node id='-4' visible='true' lat='35.78001' lon='139.04002' />
+  <node id='-5' visible='true' lat='35.78005' lon='139.04005' />
+  <node id='-6' visible='true' lat='35.78006' lon='139.04005' />
+  <node id='-7' visible='true' lat='35.78006' lon='139.04006' />
+  <node id='-8' visible='true' lat='35.78005' lon='139.04006' />
+  <way id='-100' area='yes' fix='3' visible='true'>
+    <nd ref='-1'/><nd ref='-2'/><nd ref='-3'/><nd ref='-4'/><nd ref='-1'/>
+    <memberWay ref='-100' role='outline'/>
+    <tag k='building' v='yes'/>
+    <tag k='building:levels' v='2'/>
+    <tag k='height' v='6.5'/>
+    <tag k='ref:MLIT_PLATEAU' v='13308-bldg-fixture-1'/>
+    <tag k='survey:date' v='2023-03-31'/>
+  </way>
+  <way id='-101' area='yes' fix='3' visible='true'>
+    <nd ref='-5'/><nd ref='-6'/><nd ref='-7'/><nd ref='-8'/><nd ref='-5'/>
+    <memberWay ref='-101' role='outline'/>
+    <tag k='building' v='yes'/>
+    <tag k='building:levels' v='1'/>
+    <tag k='height' v='3.2'/>
+    <tag k='ref:MLIT_PLATEAU' v='13308-bldg-fixture-2'/>
+  </way>
+</osm>

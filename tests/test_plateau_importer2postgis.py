@@ -9,8 +9,8 @@ plateau_importer2postgis.py のユニットテスト
 
 import io
 import os
-import tempfile
 import textwrap
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from plateau_importer2postgis import PlateauImporter2PostGIS
@@ -226,37 +226,12 @@ _MIN_OSM = textwrap.dedent("""\
 class TestParseOsmFileRelations:
     """relation 経由で building:part way が抽出されることを検証"""
 
-    def _make_importer(self, monkeypatch):
-        """DB 接続を avoid して importer を生成"""
-        # __init__ の DB 呼び出しを skip
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_test_connection', lambda self: None)
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_initialize_id_counters', lambda self: None)
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_ensure_schema', lambda self: None)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            os.makedirs(os.path.join(tmpdir, '39999'), exist_ok=True)
-            importer = PlateauImporter2PostGIS(
-                data_dir=os.path.join(tmpdir, '39999'),
-                postgres_url='fake',
-                citycode='39999',
-            )
-            return importer
-
-    def test_outline_and_part_both_extracted(self, monkeypatch, tmp_path):
+    def test_outline_and_part_both_extracted(self, bare_importer):
         """outline + part の両方が buildings リストに含まれ、role が正しく付与される"""
-        # __init__ が DB を触らないように mock
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_test_connection', lambda self: None)
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_initialize_id_counters', lambda self: None)
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_ensure_schema', lambda self: None)
-        data_dir = tmp_path / '39999'
-        data_dir.mkdir()
-        osm_file = data_dir / 'test.osm'
+        importer = bare_importer(citycode='39999')
+        osm_file = Path(importer.data_dir) / 'test.osm'
         osm_file.write_text(_MIN_OSM)
 
-        importer = PlateauImporter2PostGIS(
-            data_dir=str(data_dir),
-            postgres_url='fake',
-            citycode='39999',
-        )
         nodes, buildings = importer.parse_osm_file_safe(osm_file)
 
         assert len(buildings) == 2
@@ -274,11 +249,8 @@ class TestParseOsmFileRelations:
         assert part['is_part'] is True
         assert part['parent_outline_way_id'] == '-10'
 
-    def test_standalone_building_part_without_relation(self, monkeypatch, tmp_path):
+    def test_standalone_building_part_without_relation(self, bare_importer):
         """relation 無しでも building:part だけの way は part として抽出される"""
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_test_connection', lambda self: None)
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_initialize_id_counters', lambda self: None)
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_ensure_schema', lambda self: None)
         # relation を除いた XML
         osm_no_rel = _MIN_OSM.replace(
             '<relation id="-30">\n    <member type="way" ref="-10" role="outline"/>\n'
@@ -287,15 +259,10 @@ class TestParseOsmFileRelations:
             '    <tag k="height" v="10"/>\n  </relation>\n',
             ''
         )
-        data_dir = tmp_path / '39999'
-        data_dir.mkdir()
-        osm_file = data_dir / 'test.osm'
+        importer = bare_importer(citycode='39999')
+        osm_file = Path(importer.data_dir) / 'test.osm'
         osm_file.write_text(osm_no_rel)
-        importer = PlateauImporter2PostGIS(
-            data_dir=str(data_dir),
-            postgres_url='fake',
-            citycode='39999',
-        )
+
         nodes, buildings = importer.parse_osm_file_safe(osm_file)
 
         by_way_id = {b['way_id']: b for b in buildings}
@@ -326,18 +293,6 @@ class TestCityBoundaryFilter:
 
     SQL = None  # 各テストで _build_boundary_filter_select_sql() を再取得
 
-    def _make_importer(self, monkeypatch, tmp_path, citycode='13203'):
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_test_connection', lambda self: None)
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_initialize_id_counters', lambda self: None)
-        monkeypatch.setattr(PlateauImporter2PostGIS, '_ensure_schema', lambda self: None)
-        data_dir = tmp_path / (citycode or 'unknown')
-        data_dir.mkdir(parents=True, exist_ok=True)
-        return PlateauImporter2PostGIS(
-            data_dir=str(data_dir),
-            postgres_url='fake',
-            citycode=citycode,
-        )
-
     def test_filter_sql_structure(self):
         """SELECT SQL に Part A と同じ NOT EXISTS 相当の構造が含まれる。
 
@@ -354,9 +309,9 @@ class TestCityBoundaryFilter:
         # city_code でスコープされている
         assert 'b.city_code = %s' in sql
 
-    def test_within_boundary_keeps_all(self, monkeypatch, tmp_path):
+    def test_within_boundary_keeps_all(self, bare_importer):
         """全件境界内: SELECT が [] → DELETE は呼ばれない、戻り値 (0, 0)"""
-        importer = self._make_importer(monkeypatch, tmp_path)
+        importer = bare_importer(citycode='13203')
         cursor = MagicMock()
         cursor.fetchall.return_value = []  # 境界外 0 件
 
@@ -373,14 +328,14 @@ class TestCityBoundaryFilter:
             for call in cursor.execute.call_args_list
         )
 
-    def test_outside_boundary_deletes_buildings(self, monkeypatch, tmp_path):
+    def test_outside_boundary_deletes_buildings(self, bare_importer):
         """境界外: SELECT が ID リスト → 単一の DELETE FROM plateau_buildings が発行される。
 
         api#20: ノードと子 part の連鎖削除は ON DELETE CASCADE 任せなので、
         importer 側は親 building の DELETE 1 文だけ走らせる。nodes_deleted は
         CASCADE 経由で計測不能なので戻り値は (buildings_deleted, 0)。
         """
-        importer = self._make_importer(monkeypatch, tmp_path)
+        importer = bare_importer(citycode='13203')
         cursor = MagicMock()
         cursor.fetchall.return_value = [(101,), (102,), (103,)]
         cursor.rowcount = 3  # buildings の DELETE rowcount
@@ -407,14 +362,14 @@ class TestCityBoundaryFilter:
         # 戻り値: buildings_deleted=rowcount, nodes_deleted=0 (CASCADE で計測不能)
         assert b == 3 and n == 0
 
-    def test_null_boundary_passes_through(self, monkeypatch, tmp_path):
+    def test_null_boundary_passes_through(self, bare_importer):
         """NULL boundary の都市 (13999 / 27999 など): SQL の IS NOT NULL 句で
         SELECT が空となり、DELETE は呼ばれない。
 
         SELECT 結果のモックは「境界内」ケースと同形だが、テスト名で意図を分離する。
         併せて SQL に IS NOT NULL があることは `test_filter_sql_structure` で保証。
         """
-        importer = self._make_importer(monkeypatch, tmp_path, citycode='13999')
+        importer = bare_importer(citycode='13999')
         cursor = MagicMock()
         cursor.fetchall.return_value = []  # 行政界なしなので SELECT 結果も空
 
@@ -425,27 +380,25 @@ class TestCityBoundaryFilter:
         select_params = cursor.execute.call_args_list[0].args[1]
         assert select_params == ('13999',)
 
-    def test_unknown_citycode_skipped(self, monkeypatch, tmp_path):
+    def test_unknown_citycode_skipped(self, bare_importer):
         """citycode='unknown' / None のときはフィルタを完全スキップする
         (誤って他都市の行を巻き込まないための安全策)。
         """
-        for i, code in enumerate(('unknown', None)):
-            importer = self._make_importer(
-                monkeypatch, tmp_path / f'case{i}', citycode='unknown'
-            )
+        for code in ('unknown', None):
+            importer = bare_importer(citycode='unknown')
             importer.citycode = code  # 直接書き換えて検証対象の値にする
             cursor = MagicMock()
             b, n = importer._apply_city_boundary_filter(cursor)
             assert (b, n) == (0, 0)
             cursor.execute.assert_not_called()
 
-    def test_select_failure_falls_back_to_pass_through(self, monkeypatch, tmp_path):
+    def test_select_failure_falls_back_to_pass_through(self, bare_importer):
         """dash_city_master 不在等で SELECT が例外を投げても import は止めない。
 
         本フィルタは Part A (API 側の同等フィルタ) の補助層で、欠落しても
         重複が出るだけで重大な破壊は起きないため pass-through が安全。
         """
-        importer = self._make_importer(monkeypatch, tmp_path)
+        importer = bare_importer(citycode='13203')
         cursor = MagicMock()
         cursor.execute.side_effect = Exception('relation "dash_city_master" does not exist')
 
@@ -455,7 +408,7 @@ class TestCityBoundaryFilter:
         # SELECT 1 回で諦め、DELETE は呼ばれない
         assert cursor.execute.call_count == 1
 
-    def test_no_savepoint_or_node_delete_after_cascade_migration(self, monkeypatch, tmp_path):
+    def test_no_savepoint_or_node_delete_after_cascade_migration(self, bare_importer):
         """api#20 (CASCADE 化) 後: SAVEPOINT もノード DELETE も発行されないこと。
 
         plateau_migrate_fk_cascade.py で plateau_building_nodes.building_id を
@@ -463,7 +416,7 @@ class TestCityBoundaryFilter:
         ノードと子 part も連鎖削除される。SAVEPOINT は不要。
         旧来の 2 段階 DELETE + SAVEPOINT パターンが回帰しないことを確認する。
         """
-        importer = self._make_importer(monkeypatch, tmp_path)
+        importer = bare_importer(citycode='13203')
         cursor = MagicMock()
         cursor.fetchall.return_value = [(501,)]
         cursor.rowcount = 1

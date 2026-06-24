@@ -98,10 +98,10 @@ def fresh_plateau_full_schema(integration_db_url):
     Usage::
 
         @pytest.mark.integration
-        def test_x(fresh_plateau_full_schema, integration_db_url):
+        def test_x(fresh_plateau_full_schema, integration_db_url, plateau_api_class):
             conn = fresh_plateau_full_schema
             # seed via _seed_building from test_dedup_city_duplicates.py
-            api = PlateauAPI(database_url=integration_db_url)
+            api = plateau_api_class(database_url=integration_db_url)
             ...
     """
     import psycopg2
@@ -161,6 +161,23 @@ def fresh_plateau_full_schema(integration_db_url):
         ''')
     yield conn
     conn.close()
+
+
+@pytest.fixture
+def plateau_api_class(integration_db_url):
+    """Import ``OSMFJPlateauAPI`` safely under integration test conditions.
+
+    ``osmfj_plateau_api`` instantiates ``OSMFJPlateauAPI()`` at module load
+    (line 561) and reads ``DATABASE_URL`` from the environment, falling back
+    to a production-default URL that won't work locally. This fixture sets
+    ``DATABASE_URL`` to the test DB URL before importing the module so the
+    module-level instance can connect.
+
+    Returns the class itself; callers instantiate with an explicit URL.
+    """
+    os.environ.setdefault('DATABASE_URL', integration_db_url)
+    from osmfj_plateau_api import OSMFJPlateauAPI
+    return OSMFJPlateauAPI
 
 
 @pytest.fixture

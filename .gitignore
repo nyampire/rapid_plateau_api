@@ -8,3 +8,4 @@ plateau_data/
 .pytest_cache/
 htmlcov/
 CLAUDE.md
+.superpowers/

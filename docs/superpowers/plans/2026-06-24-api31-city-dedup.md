@@ -4,7 +4,7 @@
 
 **Goal:** When two adjacent municipalities both import the same building, return only one row from `/api/mapwithai/buildings`, deterministically picking the geographically correct city.
 
-**Architecture:** SQL-level dedup inside the existing CTE in `PlateauAPI.get_buildings_in_bbox`. The `bbox_outlines` and `orphan_parts` CTEs gain a new `DISTINCT ON` key (centroid + height + levels + building_part) and an `ORDER BY` tiebreaker (N03-contained `city_code` first, then smallest `city_code`).
+**Architecture:** SQL-level dedup inside the existing CTE in `OSMFJPlateauAPI.get_buildings_in_bbox`. The `bbox_outlines` and `orphan_parts` CTEs gain a new `DISTINCT ON` key (centroid + height + levels + building_part) and an `ORDER BY` tiebreaker (N03-contained `city_code` first, then smallest `city_code`).
 
 **Tech Stack:** Python 3, psycopg2, PostgreSQL 16 + PostGIS 3, FastAPI, pytest.
 
@@ -53,7 +53,7 @@ def fresh_plateau_full_schema(integration_db_url):
         def test_x(fresh_plateau_full_schema, integration_db_url):
             conn = fresh_plateau_full_schema
             # seed via _seed_building from test_dedup_city_duplicates.py
-            api = PlateauAPI(database_url=integration_db_url)
+            api = plateau_api_class(database_url=integration_db_url)
             ...
     """
     import psycopg2
@@ -128,8 +128,6 @@ import logging
 
 import pytest
 
-from osmfj_plateau_api import PlateauAPI
-
 
 def _square_wkt(lat: float, lon: float, size_deg: float = 0.0001) -> str:
     """Tiny square polygon WKT centered on (lat, lon)."""
@@ -180,15 +178,15 @@ def _seed_city_boundary(conn, *, city_code, polygon_wkt):
 
 @pytest.mark.integration
 def test_fixture_round_trips_a_single_building(
-    fresh_plateau_full_schema, integration_db_url
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
 ):
-    """Smoke test: fixture and seed helpers wired up; PlateauAPI can read."""
+    """Smoke test: fixture and seed helpers wired up; OSMFJPlateauAPI can read."""
     conn = fresh_plateau_full_schema
     lat, lon = 35.6890, 139.4855
     _seed_building(conn, osm_id=1, city_code='13206',
                    lat=lat, lon=lon, height=22, building_levels=5)
 
-    api = PlateauAPI(database_url=integration_db_url)
+    api = plateau_api_class(database_url=integration_db_url)
     results = api.get_buildings_in_bbox(
         lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
     )
@@ -229,7 +227,7 @@ git commit -m "Add fresh_plateau_full_schema fixture for dedup integration tests
 
 **Interfaces:**
 - Consumes: `fresh_plateau_full_schema`, `_seed_building`, `_seed_city_boundary` from Task 1
-- Produces: nothing new beyond modified SQL — same `PlateauAPI.get_buildings_in_bbox(...) -> List[Dict]` signature
+- Produces: nothing new beyond modified SQL — same `OSMFJPlateauAPI.get_buildings_in_bbox(...) -> List[Dict]` signature
 
 - [ ] **Step 1: Write the 5 failing behavioral tests**
 
@@ -238,7 +236,7 @@ Append to `tests/test_dedup_city_duplicates.py`:
 ```python
 @pytest.mark.integration
 def test_dedup_picks_n03_contained_city(
-    fresh_plateau_full_schema, integration_db_url
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
 ):
     """When city A's N03 contains the centroid and city B has no boundary row,
     both pass the input filter; dedup must keep city A."""
@@ -253,7 +251,7 @@ def test_dedup_picks_n03_contained_city(
                         polygon_wkt=_square_wkt(lat, lon, size_deg=0.01))
     # 13214 has no dash_city_master row → also passes (LEFT-JOIN behavior)
 
-    api = PlateauAPI(database_url=integration_db_url)
+    api = plateau_api_class(database_url=integration_db_url)
     results = api.get_buildings_in_bbox(
         lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
     )
@@ -264,7 +262,7 @@ def test_dedup_picks_n03_contained_city(
 
 @pytest.mark.integration
 def test_dedup_picks_smallest_city_code_when_neither_n03_contains(
-    fresh_plateau_full_schema, integration_db_url
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
 ):
     """Neither city has a dash_city_master row → smallest city_code wins."""
     conn = fresh_plateau_full_schema
@@ -274,7 +272,7 @@ def test_dedup_picks_smallest_city_code_when_neither_n03_contains(
     _seed_building(conn, osm_id=102, city_code='13206',
                    lat=lat, lon=lon, height=22, building_levels=5)
 
-    api = PlateauAPI(database_url=integration_db_url)
+    api = plateau_api_class(database_url=integration_db_url)
     results = api.get_buildings_in_bbox(
         lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
     )
@@ -285,7 +283,7 @@ def test_dedup_picks_smallest_city_code_when_neither_n03_contains(
 
 @pytest.mark.integration
 def test_dedup_picks_smallest_city_code_when_both_n03_contain(
-    fresh_plateau_full_schema, integration_db_url
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
 ):
     """Both boundaries overlap and contain the centroid → smallest city_code wins."""
     conn = fresh_plateau_full_schema
@@ -298,7 +296,7 @@ def test_dedup_picks_smallest_city_code_when_both_n03_contain(
     _seed_city_boundary(conn, city_code='13206', polygon_wkt=inside)
     _seed_city_boundary(conn, city_code='13214', polygon_wkt=inside)
 
-    api = PlateauAPI(database_url=integration_db_url)
+    api = plateau_api_class(database_url=integration_db_url)
     results = api.get_buildings_in_bbox(
         lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
     )
@@ -309,7 +307,7 @@ def test_dedup_picks_smallest_city_code_when_both_n03_contain(
 
 @pytest.mark.integration
 def test_height_difference_preserves_both(
-    fresh_plateau_full_schema, integration_db_url
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
 ):
     """Same centroid but different height → two distinct buildings → both kept."""
     conn = fresh_plateau_full_schema
@@ -319,7 +317,7 @@ def test_height_difference_preserves_both(
     _seed_building(conn, osm_id=102, city_code='13214',
                    lat=lat, lon=lon, height=23, building_levels=5)
 
-    api = PlateauAPI(database_url=integration_db_url)
+    api = plateau_api_class(database_url=integration_db_url)
     results = api.get_buildings_in_bbox(
         lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
     )
@@ -329,7 +327,7 @@ def test_height_difference_preserves_both(
 
 @pytest.mark.integration
 def test_related_parts_follow_surviving_outline(
-    fresh_plateau_full_schema, integration_db_url
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
 ):
     """When outline A is deduped out, A's children parts must also disappear."""
     conn = fresh_plateau_full_schema
@@ -346,7 +344,7 @@ def test_related_parts_follow_surviving_outline(
                    lat=lat + 0.00002, lon=lon, height=10, building_levels=3,
                    building_part='yes', parent_building_id=outline_b)
 
-    api = PlateauAPI(database_url=integration_db_url)
+    api = plateau_api_class(database_url=integration_db_url)
     results = api.get_buildings_in_bbox(
         lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
     )
@@ -495,7 +493,7 @@ Append to `tests/test_dedup_city_duplicates.py`:
 ```python
 @pytest.mark.integration
 def test_orphan_parts_dedup(
-    fresh_plateau_full_schema, integration_db_url
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
 ):
     """Orphan building:part rows (parent_building_id IS NULL) must also be
     deduped across cities by the same key + tiebreaker as outlines."""
@@ -508,7 +506,7 @@ def test_orphan_parts_dedup(
                    lat=lat, lon=lon, height=10, building_levels=3,
                    building_part='yes')
 
-    api = PlateauAPI(database_url=integration_db_url)
+    api = plateau_api_class(database_url=integration_db_url)
     results = api.get_buildings_in_bbox(
         lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
     )
@@ -608,7 +606,7 @@ Append to `tests/test_dedup_city_duplicates.py`:
 ```python
 @pytest.mark.integration
 def test_logs_deduped_count(
-    fresh_plateau_full_schema, integration_db_url, caplog
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class, caplog
 ):
     """The info log line must include the deduped count, derived from
     COUNT(*) OVER () minus the returned row count."""
@@ -619,7 +617,7 @@ def test_logs_deduped_count(
     _seed_building(conn, osm_id=102, city_code='13206',
                    lat=lat, lon=lon, height=22, building_levels=5)
 
-    api = PlateauAPI(database_url=integration_db_url)
+    api = plateau_api_class(database_url=integration_db_url)
     with caplog.at_level(logging.INFO, logger='osmfj_plateau_api'):
         api.get_buildings_in_bbox(
             lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,

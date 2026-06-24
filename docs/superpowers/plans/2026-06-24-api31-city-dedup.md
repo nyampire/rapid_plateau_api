@@ -14,7 +14,7 @@
 - Tiebreaker order: (1) row whose `city_code` has `dash_city_master.boundary_geom` containing the centroid; (2) smallest `city_code`
 - Layer: SQL CTE only — no Python-side post-fetch filtering
 - Tests: integration tests using `PLATEAU_TEST_DATABASE_URL` + new `fresh_plateau_full_schema` fixture; default `pytest` (no `--run-integration`) must continue to pass without a DB
-- Single file modified: `osmfj_plateau_api.py` (no migration, no API response shape change)
+- Single production file modified: `osmfj_plateau_api.py` (no migration, no API response shape change). Test files and `tests/conftest.py` may be added or extended.
 - Log line shape (verbatim): `f"検索結果: {len(result)}件 (bbox: {min_lon:.4f},{min_lat:.4f},{max_lon:.4f},{max_lat:.4f}, deduped: {raw_count - len(result)}件)"`
 
 ---

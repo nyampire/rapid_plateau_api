@@ -192,3 +192,27 @@ def test_related_parts_follow_surviving_outline(
     # 102's child = 202. Outline 101 and its child 201 are gone.
     osm_ids = {r['osm_id'] for r in results}
     assert osm_ids == {102, 202}
+
+
+@pytest.mark.integration
+def test_orphan_parts_dedup(
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
+):
+    """Orphan building:part rows (parent_building_id IS NULL) must also be
+    deduped across cities by the same key + tiebreaker as outlines."""
+    conn = fresh_plateau_full_schema
+    lat, lon = 35.6890, 139.4855
+    _seed_building(conn, osm_id=301, city_code='13214',
+                   lat=lat, lon=lon, height=10, building_levels=3,
+                   building_part='yes')
+    _seed_building(conn, osm_id=302, city_code='13206',
+                   lat=lat, lon=lon, height=10, building_levels=3,
+                   building_part='yes')
+
+    api = plateau_api_class(database_url=integration_db_url)
+    results = api.get_buildings_in_bbox(
+        lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
+    )
+
+    assert len(results) == 1
+    assert results[0]['osm_id'] == 302  # 13206 wins via smallest city_code

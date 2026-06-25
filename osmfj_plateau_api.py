@@ -182,7 +182,8 @@ class OSMFJPlateauAPI:
                 ),
                 orphan_parts AS (
                     -- bbox 内で relation 無しの building:part
-                    SELECT
+                    -- outline と同じ dedup key + tiebreaker で出口防御 (#31)
+                    SELECT DISTINCT ON ({dedup_key})
                         b.id, b.osm_id, b.building, b.height, b.ele,
                         b.building_levels, b.name, b.addr_housenumber,
                         b.addr_street, b.start_date, b.building_material,
@@ -194,6 +195,7 @@ class OSMFJPlateauAPI:
                       AND b.parent_building_id IS NULL
                       AND {spatial_condition}
                       {city_boundary_filter}
+                    ORDER BY {dedup_key}, {dedup_tiebreaker}
                 ),
                 all_buildings AS (
                     SELECT * FROM bbox_outlines

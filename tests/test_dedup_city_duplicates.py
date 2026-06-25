@@ -71,3 +71,124 @@ def test_fixture_round_trips_a_single_building(
 
     assert len(results) == 1
     assert results[0]['osm_id'] == 1
+
+
+@pytest.mark.integration
+def test_dedup_picks_n03_contained_city(
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
+):
+    """When city A's N03 contains the centroid and city B has no boundary row,
+    both pass the input filter; dedup must keep city A."""
+    conn = fresh_plateau_full_schema
+    lat, lon = 35.6890, 139.4855
+    _seed_building(conn, osm_id=101, city_code='13206',
+                   lat=lat, lon=lon, height=22, building_levels=5)
+    _seed_building(conn, osm_id=102, city_code='13214',
+                   lat=lat, lon=lon, height=22, building_levels=5)
+    # 13206 boundary contains the centroid → passes city_boundary_filter
+    _seed_city_boundary(conn, city_code='13206',
+                        polygon_wkt=_square_wkt(lat, lon, size_deg=0.01))
+    # 13214 has no dash_city_master row → also passes (LEFT-JOIN behavior)
+
+    api = plateau_api_class(database_url=integration_db_url)
+    results = api.get_buildings_in_bbox(
+        lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
+    )
+
+    assert len(results) == 1
+    assert results[0]['osm_id'] == 101  # 13206 wins via N03 priority
+
+
+@pytest.mark.integration
+def test_dedup_picks_smallest_city_code_when_neither_n03_contains(
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
+):
+    """Neither city has a dash_city_master row → smallest city_code wins."""
+    conn = fresh_plateau_full_schema
+    lat, lon = 35.6890, 139.4855
+    _seed_building(conn, osm_id=101, city_code='13214',
+                   lat=lat, lon=lon, height=22, building_levels=5)
+    _seed_building(conn, osm_id=102, city_code='13206',
+                   lat=lat, lon=lon, height=22, building_levels=5)
+
+    api = plateau_api_class(database_url=integration_db_url)
+    results = api.get_buildings_in_bbox(
+        lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
+    )
+
+    assert len(results) == 1
+    assert results[0]['osm_id'] == 102  # 13206 wins via smallest city_code
+
+
+@pytest.mark.integration
+def test_dedup_picks_smallest_city_code_when_both_n03_contain(
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
+):
+    """Both boundaries overlap and contain the centroid → smallest city_code wins."""
+    conn = fresh_plateau_full_schema
+    lat, lon = 35.6890, 139.4855
+    _seed_building(conn, osm_id=101, city_code='13214',
+                   lat=lat, lon=lon, height=22, building_levels=5)
+    _seed_building(conn, osm_id=102, city_code='13206',
+                   lat=lat, lon=lon, height=22, building_levels=5)
+    inside = _square_wkt(lat, lon, size_deg=0.01)
+    _seed_city_boundary(conn, city_code='13206', polygon_wkt=inside)
+    _seed_city_boundary(conn, city_code='13214', polygon_wkt=inside)
+
+    api = plateau_api_class(database_url=integration_db_url)
+    results = api.get_buildings_in_bbox(
+        lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
+    )
+
+    assert len(results) == 1
+    assert results[0]['osm_id'] == 102
+
+
+@pytest.mark.integration
+def test_height_difference_preserves_both(
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
+):
+    """Same centroid but different height → two distinct buildings → both kept."""
+    conn = fresh_plateau_full_schema
+    lat, lon = 35.6890, 139.4855
+    _seed_building(conn, osm_id=101, city_code='13206',
+                   lat=lat, lon=lon, height=22, building_levels=5)
+    _seed_building(conn, osm_id=102, city_code='13214',
+                   lat=lat, lon=lon, height=23, building_levels=5)
+
+    api = plateau_api_class(database_url=integration_db_url)
+    results = api.get_buildings_in_bbox(
+        lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
+    )
+
+    assert {r['osm_id'] for r in results} == {101, 102}
+
+
+@pytest.mark.integration
+def test_related_parts_follow_surviving_outline(
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
+):
+    """When outline A is deduped out, A's children parts must also disappear."""
+    conn = fresh_plateau_full_schema
+    lat, lon = 35.6890, 139.4855
+    outline_a = _seed_building(conn, osm_id=101, city_code='13214',
+                               lat=lat, lon=lon, height=22, building_levels=5)
+    outline_b = _seed_building(conn, osm_id=102, city_code='13206',
+                               lat=lat, lon=lon, height=22, building_levels=5)
+    # Children: same shape per parent, offset slightly so they don't collide
+    _seed_building(conn, osm_id=201, city_code='13214',
+                   lat=lat + 0.00002, lon=lon, height=10, building_levels=3,
+                   building_part='yes', parent_building_id=outline_a)
+    _seed_building(conn, osm_id=202, city_code='13206',
+                   lat=lat + 0.00002, lon=lon, height=10, building_levels=3,
+                   building_part='yes', parent_building_id=outline_b)
+
+    api = plateau_api_class(database_url=integration_db_url)
+    results = api.get_buildings_in_bbox(
+        lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
+    )
+
+    # Surviving outline = 102 (13206 wins via smallest city_code).
+    # 102's child = 202. Outline 101 and its child 201 are gone.
+    osm_ids = {r['osm_id'] for r in results}
+    assert osm_ids == {102, 202}

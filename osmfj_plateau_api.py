@@ -95,7 +95,6 @@ class OSMFJPlateauAPI:
                         b.geom
                     )
                 """
-                distinct_key = "b.osm_id"
             else:
                 spatial_condition = """
                     ST_Contains(
@@ -103,7 +102,6 @@ class OSMFJPlateauAPI:
                         b.centroid
                     )
                 """
-                distinct_key = "MD5(ST_AsText(b.geom))"
 
             # Cross-city mesh duplicate guard (Rapid#35):
             # PLATEAU は都市別配布だが標準地域メッシュは複数 city にまたがる。
@@ -127,13 +125,36 @@ class OSMFJPlateauAPI:
                 )
             """
 
+            # Cross-city duplicate dedup at API output (#31).
+            # 入口の city_boundary_filter を通り抜けた重複（=両 city とも boundary
+            # が centroid を含む / どちらも dash_city_master 行が無い等）を出口で
+            # 1 件に畳む。dedup key は同一建物の判定に必要十分な 4 タプル。
+            # tiebreaker は (1) N03 boundary に centroid を含む city を優先、
+            # (2) smallest city_code (deterministic) の順。
+            dedup_key = """
+                ROUND(ST_X(b.centroid)::numeric, 6),
+                ROUND(ST_Y(b.centroid)::numeric, 6),
+                COALESCE(b.height::text, ''),
+                COALESCE(b.building_levels::text, ''),
+                COALESCE(b.building_part, '')
+            """
+            dedup_tiebreaker = """
+                (CASE WHEN EXISTS (
+                    SELECT 1 FROM dash_city_master m
+                    WHERE m.city_code = b.city_code
+                      AND m.boundary_geom IS NOT NULL
+                      AND ST_Contains(m.boundary_geom, b.centroid)
+                ) THEN 0 ELSE 1 END),
+                b.city_code
+            """
+
             # Phase 2: bbox 内の outline / simple を取得後、それらの parts も追加で取得。
             # さらに bbox 内の orphan part (relation 無しの building:part) も併せて返す。
             # LATERAL JOIN で各 building のノードを個別に集約（GROUP BY 不要）。
             query = f"""
                 WITH bbox_outlines AS (
                     -- bbox 内の outline / simple (building_part IS NULL)
-                    SELECT DISTINCT ON ({distinct_key})
+                    SELECT DISTINCT ON ({dedup_key})
                         b.id, b.osm_id, b.building, b.height, b.ele,
                         b.building_levels, b.name, b.addr_housenumber,
                         b.addr_street, b.start_date, b.building_material,
@@ -144,7 +165,7 @@ class OSMFJPlateauAPI:
                     WHERE {spatial_condition}
                       AND b.building_part IS NULL
                       {city_boundary_filter}
-                    ORDER BY {distinct_key}
+                    ORDER BY {dedup_key}, {dedup_tiebreaker}
                     LIMIT %s
                 ),
                 related_parts AS (

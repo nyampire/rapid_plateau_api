@@ -246,8 +246,14 @@ class OSMFJPlateauAPI:
             raw_count = max(
                 (r.get('pre_dedup_count', 0) or 0) for r in result
             ) if result else 0
-            # The window count includes both DISTINCT collapsing and any LIMIT
-            # truncation; in practice LIMIT rarely fires for typical bboxes.
+            # raw_count is pre-DISTINCT and pre-LIMIT: it counts outline
+            # candidates that passed WHERE. deduped is best-effort:
+            #   - len(result) also includes related/orphan part rows, so a
+            #     mixed-content bbox under-counts (the max(0,…) guard kicks in)
+            #   - if LIMIT fires, deduped over-counts by (raw_count - limit)
+            # In practice parts are sparse and LIMIT rarely fires for typical
+            # bboxes, so the metric tracks city-dedup well enough for
+            # observability without an extra round-trip.
             deduped = max(0, raw_count - len(result))
             # Strip the internal column from the response so the API output
             # shape is unchanged.

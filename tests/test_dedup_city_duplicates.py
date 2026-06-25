@@ -240,5 +240,5 @@ def test_logs_deduped_count(
         )
 
     info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
-    matched = [m for m in info_msgs if 'deduped' in m and '1件' in m]
+    matched = [m for m in info_msgs if 'deduped: 1件' in m]
     assert matched, f"expected a 'deduped: 1件' info log, got: {info_msgs!r}"

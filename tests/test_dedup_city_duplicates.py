@@ -221,6 +221,37 @@ def test_orphan_parts_dedup(
 
 
 @pytest.mark.integration
+def test_orphan_parts_dedup_picks_n03_contained_city(
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
+):
+    """Orphan-part tiebreaker mirrors outline behavior: when one city's
+    N03 contains the centroid and the other has no boundary row, the
+    N03-contained city wins regardless of city_code ordering."""
+    conn = fresh_plateau_full_schema
+    lat, lon = 35.6890, 139.4855
+    # city_code='13206' is the smaller value; assign it to the city WITHOUT
+    # the N03 boundary so the test fails if the tiebreaker were ever wired
+    # to plain smallest-city_code instead of N03-first.
+    _seed_building(conn, osm_id=301, city_code='13214',
+                   lat=lat, lon=lon, height=10, building_levels=3,
+                   building_part='yes')
+    _seed_building(conn, osm_id=302, city_code='13206',
+                   lat=lat, lon=lon, height=10, building_levels=3,
+                   building_part='yes')
+    # Only 13214 has a dash_city_master row whose boundary contains the centroid
+    _seed_city_boundary(conn, city_code='13214',
+                        polygon_wkt=_square_wkt(lat, lon, size_deg=0.01))
+
+    api = plateau_api_class(database_url=integration_db_url)
+    results = api.get_buildings_in_bbox(
+        lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
+    )
+
+    assert len(results) == 1
+    assert results[0]['osm_id'] == 301  # 13214 wins via N03 priority
+
+
+@pytest.mark.integration
 def test_logs_deduped_count(
     fresh_plateau_full_schema, integration_db_url, plateau_api_class, caplog
 ):

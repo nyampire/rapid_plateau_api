@@ -164,18 +164,20 @@ def fresh_plateau_full_schema(integration_db_url):
 
 
 @pytest.fixture
-def plateau_api_class(integration_db_url):
+def plateau_api_class(integration_db_url, monkeypatch):
     """Import ``OSMFJPlateauAPI`` safely under integration test conditions.
 
     ``osmfj_plateau_api`` instantiates ``OSMFJPlateauAPI()`` at module load
     (line 561) and reads ``DATABASE_URL`` from the environment, falling back
     to a production-default URL that won't work locally. This fixture sets
     ``DATABASE_URL`` to the test DB URL before importing the module so the
-    module-level instance can connect.
+    module-level instance can connect. ``monkeypatch.setenv`` overrides any
+    pre-existing shell ``DATABASE_URL`` (which could point at the wrong DB)
+    and reverts at test teardown to keep the environment pristine.
 
     Returns the class itself; callers instantiate with an explicit URL.
     """
-    os.environ.setdefault('DATABASE_URL', integration_db_url)
+    monkeypatch.setenv('DATABASE_URL', integration_db_url)
     from osmfj_plateau_api import OSMFJPlateauAPI
     return OSMFJPlateauAPI
 

@@ -201,10 +201,15 @@ class OSMFJPlateauAPI:
                     ORDER BY {dedup_key}, {dedup_tiebreaker}
                 ),
                 all_buildings AS (
+                    -- UNION ALL: the three CTEs are mutually disjoint by WHERE
+                    -- (outlines: building_part IS NULL; related_parts:
+                    -- parent_building_id IN outlines; orphan_parts: building_part='yes'
+                    -- AND parent_building_id IS NULL), so a sort/hash dedup is
+                    -- pure overhead.
                     SELECT * FROM bbox_outlines
-                    UNION
+                    UNION ALL
                     SELECT * FROM related_parts
-                    UNION
+                    UNION ALL
                     SELECT * FROM orphan_parts
                 )
                 SELECT
@@ -240,21 +245,28 @@ class OSMFJPlateauAPI:
             buildings = cursor.fetchall()
             result = [dict(building) for building in buildings]
 
-            # Compute deduped count from the window column.
-            # The max() picks any non-zero outline row's count; if there were
-            # zero outlines (only orphan parts or empty), default to 0.
+            # Observability for dedup effectiveness and LIMIT truncation.
+            # raw_count = COUNT(*) OVER () inside bbox_outlines = outline
+            # candidates that passed WHERE, before DISTINCT ON and LIMIT.
+            # Returns the outline window count when any outline is present
+            # (related/orphan part rows carry 0); 0 when result is empty.
             raw_count = max(
                 (r.get('pre_dedup_count', 0) or 0) for r in result
             ) if result else 0
-            # raw_count is pre-DISTINCT and pre-LIMIT: it counts outline
-            # candidates that passed WHERE. deduped is best-effort:
-            #   - len(result) also includes related/orphan part rows, so a
-            #     mixed-content bbox under-counts (the max(0,…) guard kicks in)
-            #   - if LIMIT fires, deduped over-counts by (raw_count - limit)
-            # In practice parts are sparse and LIMIT rarely fires for typical
-            # bboxes, so the metric tracks city-dedup well enough for
-            # observability without an extra round-trip.
-            deduped = max(0, raw_count - len(result))
+            outline_in_result = sum(
+                1 for r in result
+                if r.get('parent_building_id') is None
+                and r.get('building_part') is None
+            )
+            # raw_count > limit ⇔ LIMIT truncation definitely happened, in
+            # which case post-LIMIT dedup state is unknowable without re-querying.
+            # raw_count <= limit ⇔ LIMIT did not fire, so deduped is exactly
+            # raw_count - outline_in_result.
+            if raw_count > limit:
+                obs = f"outline_candidates: {raw_count}, limit_hit: true (limit={limit})"
+            else:
+                deduped = max(0, raw_count - outline_in_result)
+                obs = f"outline_candidates: {raw_count}, deduped: {deduped}件"
             # Strip the internal column from the response so the API output
             # shape is unchanged.
             for r in result:
@@ -263,7 +275,7 @@ class OSMFJPlateauAPI:
             logger.info(
                 f"検索結果: {len(result)}件 "
                 f"(bbox: {min_lon:.4f},{min_lat:.4f},{max_lon:.4f},{max_lat:.4f}, "
-                f"deduped: {deduped}件)"
+                f"{obs})"
             )
             return result
 

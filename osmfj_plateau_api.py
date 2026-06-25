@@ -128,7 +128,7 @@ class OSMFJPlateauAPI:
             # Cross-city duplicate dedup at API output (#31).
             # 入口の city_boundary_filter を通り抜けた重複（=両 city とも boundary
             # が centroid を含む / どちらも dash_city_master 行が無い等）を出口で
-            # 1 件に畳む。dedup key は同一建物の判定に必要十分な 4 タプル。
+            # 1 件に畳む。dedup key は同一建物の判定に必要十分な 5 タプル。
             # tiebreaker は (1) N03 boundary に centroid を含む city を優先、
             # (2) smallest city_code (deterministic) の順。
             dedup_key = """

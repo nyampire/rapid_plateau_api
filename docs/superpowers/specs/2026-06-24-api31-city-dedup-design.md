@@ -103,13 +103,27 @@ Rationale for SQL over Python:
 
 ### Observability
 
-`logger.info` records the deduped count per request:
+`logger.info` records both the raw outline-candidate count and a deduped
+figure per request. The pre-dedup count comes from `COUNT(*) OVER ()` in the
+CTE — single-query, no extra round-trip.
+
+Normal path (LIMIT did not fire — `raw_count <= limit`):
 
 ```
-検索結果: {len(result)}件 (bbox: ..., deduped: N件)
+検索結果: {len(result)}件 (bbox: ..., outline_candidates: {raw_count}, deduped: {N}件)
 ```
 
-The pre-dedup count comes from `COUNT(*) OVER ()` in the CTE — single-query, no extra round-trip.
+LIMIT path (`raw_count > limit`; post-truncation dedup state is unknowable
+without re-querying):
+
+```
+検索結果: {len(result)}件 (bbox: ..., outline_candidates: {raw_count}, limit_hit: true (limit={L}))
+```
+
+`deduped` is computed against the outline rows in the result (excluding
+related/orphan parts), so a mixed-content bbox does not under-count. The
+LIMIT-hit branch keeps the operator from chasing a misleading "deduped: 4000"
+when 4000 is really LIMIT truncation, not city dedup.
 
 ## Edge cases
 

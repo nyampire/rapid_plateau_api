@@ -160,7 +160,8 @@ class OSMFJPlateauAPI:
                         b.addr_street, b.start_date, b.building_material,
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
                         b.tourism, b.leisure, b.landuse, b.building_part,
-                        b.parent_building_id
+                        b.parent_building_id,
+                        COUNT(*) OVER () AS pre_dedup_count
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
                       AND b.building_part IS NULL
@@ -176,7 +177,8 @@ class OSMFJPlateauAPI:
                         b.addr_street, b.start_date, b.building_material,
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
                         b.tourism, b.leisure, b.landuse, b.building_part,
-                        b.parent_building_id
+                        b.parent_building_id,
+                        0 AS pre_dedup_count
                     FROM plateau_buildings b
                     WHERE b.parent_building_id IN (SELECT id FROM bbox_outlines)
                 ),
@@ -189,7 +191,8 @@ class OSMFJPlateauAPI:
                         b.addr_street, b.start_date, b.building_material,
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
                         b.tourism, b.leisure, b.landuse, b.building_part,
-                        b.parent_building_id
+                        b.parent_building_id,
+                        0 AS pre_dedup_count
                     FROM plateau_buildings b
                     WHERE b.building_part = 'yes'
                       AND b.parent_building_id IS NULL
@@ -211,6 +214,7 @@ class OSMFJPlateauAPI:
                     ub.roof_material, ub.roof_shape, ub.amenity, ub.shop,
                     ub.tourism, ub.leisure, ub.landuse, ub.building_part,
                     ub.parent_building_id,
+                    ub.pre_dedup_count,
                     bn.nodes
                 FROM all_buildings ub
                 LEFT JOIN LATERAL (
@@ -236,7 +240,25 @@ class OSMFJPlateauAPI:
             buildings = cursor.fetchall()
             result = [dict(building) for building in buildings]
 
-            logger.info(f"検索結果: {len(result)}件 (bbox: {min_lon:.4f},{min_lat:.4f},{max_lon:.4f},{max_lat:.4f})")
+            # Compute deduped count from the window column.
+            # The max() picks any non-zero outline row's count; if there were
+            # zero outlines (only orphan parts or empty), default to 0.
+            raw_count = max(
+                (r.get('pre_dedup_count', 0) or 0) for r in result
+            ) if result else 0
+            # The window count includes both DISTINCT collapsing and any LIMIT
+            # truncation; in practice LIMIT rarely fires for typical bboxes.
+            deduped = max(0, raw_count - len(result))
+            # Strip the internal column from the response so the API output
+            # shape is unchanged.
+            for r in result:
+                r.pop('pre_dedup_count', None)
+
+            logger.info(
+                f"検索結果: {len(result)}件 "
+                f"(bbox: {min_lon:.4f},{min_lat:.4f},{max_lon:.4f},{max_lat:.4f}, "
+                f"deduped: {deduped}件)"
+            )
             return result
 
         except Exception as e:

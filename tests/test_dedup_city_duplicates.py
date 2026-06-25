@@ -4,6 +4,8 @@ These tests require a real PostgreSQL + PostGIS instance reachable via
 ``PLATEAU_TEST_DATABASE_URL``. They are skipped by default; run with
 ``pytest --run-integration``.
 """
+import logging
+
 import pytest
 
 
@@ -216,3 +218,27 @@ def test_orphan_parts_dedup(
 
     assert len(results) == 1
     assert results[0]['osm_id'] == 302  # 13206 wins via smallest city_code
+
+
+@pytest.mark.integration
+def test_logs_deduped_count(
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class, caplog
+):
+    """The info log line must include the deduped count, derived from
+    COUNT(*) OVER () minus the returned row count."""
+    conn = fresh_plateau_full_schema
+    lat, lon = 35.6890, 139.4855
+    _seed_building(conn, osm_id=101, city_code='13214',
+                   lat=lat, lon=lon, height=22, building_levels=5)
+    _seed_building(conn, osm_id=102, city_code='13206',
+                   lat=lat, lon=lon, height=22, building_levels=5)
+
+    api = plateau_api_class(database_url=integration_db_url)
+    with caplog.at_level(logging.INFO, logger='osmfj_plateau_api'):
+        api.get_buildings_in_bbox(
+            lon - 0.005, lat - 0.005, lon + 0.005, lat + 0.005, limit=100,
+        )
+
+    info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
+    matched = [m for m in info_msgs if 'deduped' in m and '1件' in m]
+    assert matched, f"expected a 'deduped: 1件' info log, got: {info_msgs!r}"

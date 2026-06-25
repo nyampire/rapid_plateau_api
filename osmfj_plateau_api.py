@@ -95,7 +95,6 @@ class OSMFJPlateauAPI:
                         b.geom
                     )
                 """
-                distinct_key = "b.osm_id"
             else:
                 spatial_condition = """
                     ST_Contains(
@@ -103,7 +102,6 @@ class OSMFJPlateauAPI:
                         b.centroid
                     )
                 """
-                distinct_key = "MD5(ST_AsText(b.geom))"
 
             # Cross-city mesh duplicate guard (Rapid#35):
             # PLATEAU は都市別配布だが標準地域メッシュは複数 city にまたがる。
@@ -127,24 +125,48 @@ class OSMFJPlateauAPI:
                 )
             """
 
+            # Cross-city duplicate dedup at API output (#31).
+            # 入口の city_boundary_filter を通り抜けた重複（=両 city とも boundary
+            # が centroid を含む / どちらも dash_city_master 行が無い等）を出口で
+            # 1 件に畳む。dedup key は同一建物の判定に必要十分な 5 タプル。
+            # tiebreaker は (1) N03 boundary に centroid を含む city を優先、
+            # (2) smallest city_code (deterministic) の順。
+            dedup_key = """
+                ROUND(ST_X(b.centroid)::numeric, 6),
+                ROUND(ST_Y(b.centroid)::numeric, 6),
+                COALESCE(b.height::text, ''),
+                COALESCE(b.building_levels::text, ''),
+                COALESCE(b.building_part, '')
+            """
+            dedup_tiebreaker = """
+                (CASE WHEN EXISTS (
+                    SELECT 1 FROM dash_city_master m
+                    WHERE m.city_code = b.city_code
+                      AND m.boundary_geom IS NOT NULL
+                      AND ST_Contains(m.boundary_geom, b.centroid)
+                ) THEN 0 ELSE 1 END),
+                b.city_code
+            """
+
             # Phase 2: bbox 内の outline / simple を取得後、それらの parts も追加で取得。
             # さらに bbox 内の orphan part (relation 無しの building:part) も併せて返す。
             # LATERAL JOIN で各 building のノードを個別に集約（GROUP BY 不要）。
             query = f"""
                 WITH bbox_outlines AS (
                     -- bbox 内の outline / simple (building_part IS NULL)
-                    SELECT DISTINCT ON ({distinct_key})
+                    SELECT DISTINCT ON ({dedup_key})
                         b.id, b.osm_id, b.building, b.height, b.ele,
                         b.building_levels, b.name, b.addr_housenumber,
                         b.addr_street, b.start_date, b.building_material,
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
                         b.tourism, b.leisure, b.landuse, b.building_part,
-                        b.parent_building_id
+                        b.parent_building_id,
+                        COUNT(*) OVER () AS pre_dedup_count
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
                       AND b.building_part IS NULL
                       {city_boundary_filter}
-                    ORDER BY {distinct_key}
+                    ORDER BY {dedup_key}, {dedup_tiebreaker}
                     LIMIT %s
                 ),
                 related_parts AS (
@@ -155,30 +177,39 @@ class OSMFJPlateauAPI:
                         b.addr_street, b.start_date, b.building_material,
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
                         b.tourism, b.leisure, b.landuse, b.building_part,
-                        b.parent_building_id
+                        b.parent_building_id,
+                        0 AS pre_dedup_count
                     FROM plateau_buildings b
                     WHERE b.parent_building_id IN (SELECT id FROM bbox_outlines)
                 ),
                 orphan_parts AS (
                     -- bbox 内で relation 無しの building:part
-                    SELECT
+                    -- outline と同じ dedup key + tiebreaker で出口防御 (#31)
+                    SELECT DISTINCT ON ({dedup_key})
                         b.id, b.osm_id, b.building, b.height, b.ele,
                         b.building_levels, b.name, b.addr_housenumber,
                         b.addr_street, b.start_date, b.building_material,
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
                         b.tourism, b.leisure, b.landuse, b.building_part,
-                        b.parent_building_id
+                        b.parent_building_id,
+                        0 AS pre_dedup_count
                     FROM plateau_buildings b
                     WHERE b.building_part = 'yes'
                       AND b.parent_building_id IS NULL
                       AND {spatial_condition}
                       {city_boundary_filter}
+                    ORDER BY {dedup_key}, {dedup_tiebreaker}
                 ),
                 all_buildings AS (
+                    -- UNION ALL: the three CTEs are mutually disjoint by WHERE
+                    -- (outlines: building_part IS NULL; related_parts:
+                    -- parent_building_id IN outlines; orphan_parts: building_part='yes'
+                    -- AND parent_building_id IS NULL), so a sort/hash dedup is
+                    -- pure overhead.
                     SELECT * FROM bbox_outlines
-                    UNION
+                    UNION ALL
                     SELECT * FROM related_parts
-                    UNION
+                    UNION ALL
                     SELECT * FROM orphan_parts
                 )
                 SELECT
@@ -188,6 +219,7 @@ class OSMFJPlateauAPI:
                     ub.roof_material, ub.roof_shape, ub.amenity, ub.shop,
                     ub.tourism, ub.leisure, ub.landuse, ub.building_part,
                     ub.parent_building_id,
+                    ub.pre_dedup_count,
                     bn.nodes
                 FROM all_buildings ub
                 LEFT JOIN LATERAL (
@@ -213,7 +245,38 @@ class OSMFJPlateauAPI:
             buildings = cursor.fetchall()
             result = [dict(building) for building in buildings]
 
-            logger.info(f"検索結果: {len(result)}件 (bbox: {min_lon:.4f},{min_lat:.4f},{max_lon:.4f},{max_lat:.4f})")
+            # Observability for dedup effectiveness and LIMIT truncation.
+            # raw_count = COUNT(*) OVER () inside bbox_outlines = outline
+            # candidates that passed WHERE, before DISTINCT ON and LIMIT.
+            # Returns the outline window count when any outline is present
+            # (related/orphan part rows carry 0); 0 when result is empty.
+            raw_count = max(
+                (r.get('pre_dedup_count', 0) or 0) for r in result
+            ) if result else 0
+            outline_in_result = sum(
+                1 for r in result
+                if r.get('parent_building_id') is None
+                and r.get('building_part') is None
+            )
+            # raw_count > limit ⇔ LIMIT truncation definitely happened, in
+            # which case post-LIMIT dedup state is unknowable without re-querying.
+            # raw_count <= limit ⇔ LIMIT did not fire, so deduped is exactly
+            # raw_count - outline_in_result.
+            if raw_count > limit:
+                obs = f"outline_candidates: {raw_count}, limit_hit: true (limit={limit})"
+            else:
+                deduped = max(0, raw_count - outline_in_result)
+                obs = f"outline_candidates: {raw_count}, deduped: {deduped}件"
+            # Strip the internal column from the response so the API output
+            # shape is unchanged.
+            for r in result:
+                r.pop('pre_dedup_count', None)
+
+            logger.info(
+                f"検索結果: {len(result)}件 "
+                f"(bbox: {min_lon:.4f},{min_lat:.4f},{max_lon:.4f},{max_lat:.4f}, "
+                f"{obs})"
+            )
             return result
 
         except Exception as e:

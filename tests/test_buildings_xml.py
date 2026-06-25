@@ -394,11 +394,16 @@ class TestGetBuildingsInBboxQuery:
         with patch.object(api, 'get_connection', return_value=conn):
             api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
         sql = cursor.execute.call_args[0][0]
-        # dash_city_master を参照する EXISTS が SQL 全体で 2 回現れること
-        # (bbox_outlines / orphan_parts に各 1 回)
+        # dash_city_master を参照する EXISTS が SQL 全体で 4 回現れること:
+        #   - bbox_outlines の city_boundary_filter (1 回)
+        #   - bbox_outlines の dedup_tiebreaker (#31 で追加、1 回)
+        #   - orphan_parts の city_boundary_filter (1 回)
+        #   - orphan_parts の dedup_tiebreaker (#31 Task 3 で追加、1 回)
         boundary_filter_occurrences = sql.count('FROM dash_city_master m')
-        assert boundary_filter_occurrences == 2, (
-            f"dash_city_master subquery should appear twice (outlines + orphan parts), "
+        assert boundary_filter_occurrences == 4, (
+            f"dash_city_master subquery should appear 4 times "
+            f"(outlines filter + outlines dedup tiebreaker + orphan parts filter "
+            f"+ orphan parts dedup tiebreaker), "
             f"got {boundary_filter_occurrences}"
         )
 

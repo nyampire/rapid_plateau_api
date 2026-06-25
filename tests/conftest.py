@@ -86,6 +86,103 @@ def fresh_plateau_schema(integration_db_url):
 
 
 @pytest.fixture
+def fresh_plateau_full_schema(integration_db_url):
+    """Full schema with PostGIS for dedup integration tests.
+
+    Drops and recreates ``plateau_buildings`` (full column set incl. ``geom``,
+    ``centroid``, ``osm_id``, ``city_code``, ``height``, ``building_levels``,
+    ``building_part``, ``parent_building_id``) plus ``plateau_building_nodes``
+    and ``dash_city_master``. Requires PostGIS — unlike ``fresh_plateau_schema``
+    which is intentionally PostGIS-free.
+
+    Usage::
+
+        @pytest.mark.integration
+        def test_x(fresh_plateau_full_schema, integration_db_url, plateau_api_class):
+            conn = fresh_plateau_full_schema
+            # seed via _seed_building from test_dedup_city_duplicates.py
+            api = plateau_api_class(database_url=integration_db_url)
+            ...
+    """
+    import psycopg2
+    conn = psycopg2.connect(integration_db_url)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute('CREATE EXTENSION IF NOT EXISTS postgis')
+        cur.execute('DROP TABLE IF EXISTS plateau_building_nodes CASCADE')
+        cur.execute('DROP TABLE IF EXISTS plateau_buildings CASCADE')
+        cur.execute('DROP TABLE IF EXISTS dash_city_master CASCADE')
+        cur.execute('''
+            CREATE TABLE plateau_buildings (
+                id SERIAL PRIMARY KEY,
+                osm_id BIGINT,
+                building TEXT,
+                height DOUBLE PRECISION,
+                ele DOUBLE PRECISION,
+                building_levels INTEGER,
+                name TEXT,
+                addr_housenumber TEXT,
+                addr_street TEXT,
+                start_date TEXT,
+                building_material TEXT,
+                roof_material TEXT,
+                roof_shape TEXT,
+                amenity TEXT,
+                shop TEXT,
+                tourism TEXT,
+                leisure TEXT,
+                landuse TEXT,
+                city_code TEXT,
+                building_part TEXT,
+                parent_building_id INTEGER
+                    REFERENCES plateau_buildings(id) ON DELETE CASCADE,
+                geom geometry(Polygon, 4326),
+                centroid geometry(Point, 4326)
+            )
+        ''')
+        cur.execute('CREATE INDEX ON plateau_buildings USING GIST (geom)')
+        cur.execute('CREATE INDEX ON plateau_buildings USING GIST (centroid)')
+        cur.execute('''
+            CREATE TABLE plateau_building_nodes (
+                id SERIAL PRIMARY KEY,
+                osm_id BIGINT,
+                lat DOUBLE PRECISION,
+                lon DOUBLE PRECISION,
+                sequence_id INTEGER,
+                building_id INTEGER
+                    REFERENCES plateau_buildings(id) ON DELETE CASCADE
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE dash_city_master (
+                city_code TEXT PRIMARY KEY,
+                boundary_geom geometry(MultiPolygon, 4326)
+            )
+        ''')
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def plateau_api_class(integration_db_url, monkeypatch):
+    """Import ``OSMFJPlateauAPI`` safely under integration test conditions.
+
+    ``osmfj_plateau_api`` instantiates ``OSMFJPlateauAPI()`` at module load
+    (line 561) and reads ``DATABASE_URL`` from the environment, falling back
+    to a production-default URL that won't work locally. This fixture sets
+    ``DATABASE_URL`` to the test DB URL before importing the module so the
+    module-level instance can connect. ``monkeypatch.setenv`` overrides any
+    pre-existing shell ``DATABASE_URL`` (which could point at the wrong DB)
+    and reverts at test teardown to keep the environment pristine.
+
+    Returns the class itself; callers instantiate with an explicit URL.
+    """
+    monkeypatch.setenv('DATABASE_URL', integration_db_url)
+    from osmfj_plateau_api import OSMFJPlateauAPI
+    return OSMFJPlateauAPI
+
+
+@pytest.fixture
 def mock_connection():
     """
     psycopg2.connect をモック化したコネクション。

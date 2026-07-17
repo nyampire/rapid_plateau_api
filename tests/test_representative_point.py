@@ -135,6 +135,71 @@ def _seed_invalid_geometry_building(conn, *, osm_id=1003, city_code='13101'):
                             points=points, height=5, building_levels=1)
 
 
+def _insert_building_raw(conn, *, osm_id, city_code, geom_sql, points,
+                          height=None, building_levels=None,
+                          building_part=None, parent_building_id=None):
+    """Like `_insert_building` but takes a raw SQL geometry expression
+    (e.g. ``'NULL'``) instead of a WKT literal, and supports
+    `building_part` / `parent_building_id` so it can seed a broken-geometry
+    *part* row parented to a valid outline.
+
+    `centroid` is left NULL too — `related_parts` (unlike `bbox_outlines` /
+    `orphan_parts`) has no spatial filter on its own rows, so a NULL
+    centroid doesn't exclude the row from that CTE.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO plateau_buildings
+                (osm_id, building, height, building_levels, city_code,
+                 building_part, parent_building_id, geom, centroid)
+            VALUES (%s, 'yes', %s, %s, %s, %s, %s, {geom_sql}, NULL)
+            RETURNING id
+            """,
+            (osm_id, height, building_levels, city_code, building_part,
+             parent_building_id),
+        )
+        building_id = cur.fetchone()[0]
+
+        for seq, (lat, lon) in enumerate(points):
+            cur.execute(
+                """
+                INSERT INTO plateau_building_nodes
+                    (osm_id, lat, lon, sequence_id, building_id)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (osm_id * 100 + seq, lat, lon, seq, building_id),
+            )
+    return building_id
+
+
+def _seed_part_with_broken_geometry(conn, *, parent_building_id, osm_id=1004,
+                                    city_code='13101', lat=35.6795,
+                                    lon=139.7563):
+    """Seed a `building:part='yes'` row with `geom = NULL`, parented to
+    `parent_building_id`.
+
+    Carries a valid 4-point node ring so it still survives
+    `buildings_to_osm_xml`'s >=3-valid-node check and comes back as a
+    `<way>` — it's the *geometry* that's broken, not the node ring. This
+    reaches the HTTP response via `related_parts`, which (unlike
+    `bbox_outlines` / `orphan_parts`) has no `{spatial_condition}` filter on
+    its own rows and so doesn't require `geom` to be non-NULL.
+    """
+    size_deg = 0.0001
+    points = [
+        (lat - size_deg, lon - size_deg),
+        (lat - size_deg, lon + size_deg),
+        (lat + size_deg, lon + size_deg),
+        (lat + size_deg, lon - size_deg),
+    ]
+    return _insert_building_raw(
+        conn, osm_id=osm_id, city_code=city_code, geom_sql='NULL',
+        points=points, height=5, building_levels=1,
+        building_part='yes', parent_building_id=parent_building_id,
+    )
+
+
 def _tags(elem):
     return {t.get('k'): t.get('v') for t in elem.findall('tag')}
 
@@ -251,7 +316,10 @@ def test_representative_point_falls_inside_polygon(
 def test_absent_when_building_geometry_broken(
     fresh_plateau_full_schema, integration_db_url, monkeypatch
 ):
-    """If ST_PointOnSurface can't resolve a point on invalid geometry, the
+    """Companion to `test_representative_point_omitted_for_broken_part_geometry`
+    below, which is the test that actually verifies the tag is *omitted*.
+
+    If ST_PointOnSurface can't resolve a point on invalid geometry, the
     tag is absent — the endpoint must not crash either way.
 
     See `_seed_invalid_geometry_building`'s docstring: in this PostGIS
@@ -259,6 +327,9 @@ def test_absent_when_building_geometry_broken(
     NULL, so this test asserts the weaker (but still meaningful) invariant
     documented in the task's ambiguity resolutions — no crash, valid XML,
     and any representative_point tag that IS present still parses cleanly.
+    This is still worth keeping: it's a different broken-geometry shape
+    (self-intersecting outline, reached via `bbox_outlines`'s own spatial
+    filter) than the NULL-geometry *part* case below.
     """
     conn = fresh_plateau_full_schema
     _seed_invalid_geometry_building(conn)
@@ -274,3 +345,49 @@ def test_absent_when_building_geometry_broken(
         if 'representative_point' in tags:
             lon_str, lat_str = tags['representative_point'].split(',')
             float(lon_str), float(lat_str)  # must parse without raising
+
+
+def test_representative_point_omitted_for_broken_part_geometry(
+    fresh_plateau_full_schema, integration_db_url, monkeypatch
+):
+    """A building:part row with `geom = NULL` reaches the HTTP response via
+    `related_parts`, which — unlike `bbox_outlines` / `orphan_parts` — has
+    no `{spatial_condition}` filter on its own rows (its `WHERE` only checks
+    `b.parent_building_id IN (SELECT id FROM bbox_outlines)`). So a part
+    with unusable geometry isn't excluded before it reaches the SELECT
+    list, and per the code's own NULL-handling in
+    `get_buildings_in_bbox`/`_emit_building_tags` it should come back as a
+    `<way>` that lacks `representative_point`, while its parent outline
+    keeps its tag.
+    """
+    conn = fresh_plateau_full_schema
+    lat, lon = 35.6795, 139.7563
+    outline_id = _seed_building(conn, lat=lat, lon=lon, height=12.5,
+                                building_levels=3, osm_id=2001)
+    part_id = _seed_part_with_broken_geometry(
+        conn, parent_building_id=outline_id, osm_id=2002, lat=lat, lon=lon,
+    )
+    client = _make_client(integration_db_url, monkeypatch)
+
+    resp = client.get('/api/mapwithai/buildings',
+                      params={'bbox': '139.755,35.679,139.758,35.680'})
+    assert resp.status_code == 200
+    root = ET.fromstring(resp.content)
+
+    ways_by_id = {w.get('id'): w for w in root.findall('way')}
+    outline_way = ways_by_id.get(str(-outline_id))
+    part_way = ways_by_id.get(str(-part_id))
+
+    # Both ways must be present: the broken-geometry part must survive
+    # `related_parts`' WHERE and be emitted by `buildings_to_osm_xml`
+    # (it has a valid 4-point node ring, independent of `geom`).
+    assert outline_way is not None, \
+        f"outline way -{outline_id} missing from response ways: {sorted(ways_by_id)}"
+    assert part_way is not None, \
+        f"broken-geometry part way -{part_id} missing from response ways " \
+        f"(related_parts should not filter it out): {sorted(ways_by_id)}"
+
+    assert 'representative_point' in _tags(outline_way), \
+        "parent outline should still carry representative_point"
+    assert 'representative_point' not in _tags(part_way), \
+        "part with geom=NULL must NOT carry representative_point"

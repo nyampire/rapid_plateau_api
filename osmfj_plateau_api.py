@@ -161,6 +161,8 @@ class OSMFJPlateauAPI:
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
                         b.tourism, b.leisure, b.landuse, b.building_part,
                         b.parent_building_id,
+                        ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
+                            AS representative_point,
                         COUNT(*) OVER () AS pre_dedup_count
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
@@ -178,6 +180,8 @@ class OSMFJPlateauAPI:
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
                         b.tourism, b.leisure, b.landuse, b.building_part,
                         b.parent_building_id,
+                        ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
+                            AS representative_point,
                         0 AS pre_dedup_count
                     FROM plateau_buildings b
                     WHERE b.parent_building_id IN (SELECT id FROM bbox_outlines)
@@ -192,6 +196,8 @@ class OSMFJPlateauAPI:
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
                         b.tourism, b.leisure, b.landuse, b.building_part,
                         b.parent_building_id,
+                        ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
+                            AS representative_point,
                         0 AS pre_dedup_count
                     FROM plateau_buildings b
                     WHERE b.building_part = 'yes'
@@ -219,6 +225,7 @@ class OSMFJPlateauAPI:
                     ub.roof_material, ub.roof_shape, ub.amenity, ub.shop,
                     ub.tourism, ub.leisure, ub.landuse, ub.building_part,
                     ub.parent_building_id,
+                    ub.representative_point,
                     ub.pre_dedup_count,
                     bn.nodes
                 FROM all_buildings ub
@@ -244,6 +251,20 @@ class OSMFJPlateauAPI:
             cursor.execute(query, params)
             buildings = cursor.fetchall()
             result = [dict(building) for building in buildings]
+
+            # Normalize representative_point: psycopg2 decodes the jsonb
+            # `-> 'coordinates'` column into a Python list ([lon, lat])
+            # automatically. ST_PointOnSurface returns SQL NULL for a NULL
+            # input geometry, and an empty coordinates array ([]) for an
+            # empty-but-non-NULL geometry (e.g. `POLYGON EMPTY`) — both are
+            # "no usable point" and collapse to None here so downstream XML
+            # emission can skip the tag with a single check.
+            for r in result:
+                rp = r.get('representative_point')
+                if rp is not None and len(rp) >= 2:
+                    r['representative_point'] = [float(rp[0]), float(rp[1])]
+                else:
+                    r['representative_point'] = None
 
             # Observability for dedup effectiveness and LIMIT truncation.
             # raw_count = COUNT(*) OVER () inside bbox_outlines = outline
@@ -337,6 +358,16 @@ class OSMFJPlateauAPI:
             add_tag('leisure', building['leisure'])
         if building.get('landuse'):
             add_tag('landuse', building['landuse'])
+
+        # Representative point (ST_PointOnSurface, lon,lat / 7 decimal places
+        # ~1cm precision) for client-side point-in-polygon matching against
+        # OSM buildings (PLATEAU height transfer). Omitted when unavailable
+        # (NULL/empty geometry) — additive tag, safe for existing clients to
+        # ignore. Applied to both <way> (outline/part) and duplicated onto
+        # the outline's <relation>, since this method is shared by both.
+        rp = building.get('representative_point')
+        if rp is not None:
+            add_tag('representative_point', f'{rp[0]:.7f},{rp[1]:.7f}')
 
     def buildings_to_osm_xml(self, buildings: List[Dict]) -> str:
         """建物データを OSM XML 形式に変換 (Phase 2: relation 出力対応)

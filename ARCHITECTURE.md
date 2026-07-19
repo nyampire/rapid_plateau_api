@@ -7,7 +7,7 @@
 ```
                             ┌────────────────────────┐
                             │   surveyor.mydns.jp    │ (外部、Plateau配信元)
-                            │   PLATEAU OSMデータ     │
+                            │   Plateau OSMデータ     │
                             └───────────┬────────────┘
                                         │ HTTPS
                                         │

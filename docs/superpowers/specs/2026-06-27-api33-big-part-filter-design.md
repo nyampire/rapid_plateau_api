@@ -1,5 +1,12 @@
 # Design: Filter clean Lod1Solid-derived duplicate parts at API output (#33)
 
+> **Status: proposal, not implemented (as of 2026-07-19).** Nothing described
+> below — the filter predicates, the constants, the tests — exists in the code
+> yet; #33 is still open. This is merged for the measurements in *Problem*,
+> which were taken against the production database on 2026-06-26 and are
+> expensive to reproduce. Re-measure before acting on the numbers: the database
+> has changed since.
+
 Date: 2026-06-27
 Issue: #33
 Related: #29 (parent issue, hold), #30 (ref:MLIT_PLATEAU DB column), #31 (cross-city dedup, merged)

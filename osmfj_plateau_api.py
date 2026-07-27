@@ -32,6 +32,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _valid_start_date(value) -> bool:
+    """True if `value` is a plausible construction year worth emitting.
+
+    PLATEAU stores start_date as a bare 'YYYY' year. Source CityGML with a
+    missing year of construction comes through as '0001' (year 1) -- a
+    placeholder, not a real date, that currently affects ~11% of dated buildings.
+    Emit start_date only when the leading year is 4 digits within a realistic
+    range (1000 .. current year + 1); drop '0001', '0000', far-future, or
+    malformed values so they never reach OSM.
+    """
+    if not value:
+        return False
+    year_str = str(value).strip()[:4]
+    if not year_str.isdigit():
+        return False
+    year = int(year_str)
+    return 1000 <= year <= datetime.now().year + 1
+
+
 class OSMFJPlateauAPI:
     """Plateau建物データAPI"""
 
@@ -340,7 +359,7 @@ class OSMFJPlateauAPI:
             add_tag('addr:housenumber', building['addr_housenumber'])
         if building.get('addr_street'):
             add_tag('addr:street', building['addr_street'])
-        if building.get('start_date'):
+        if _valid_start_date(building.get('start_date')):
             add_tag('start_date', building['start_date'])
         if building.get('building_material'):
             add_tag('building:material', building['building_material'])

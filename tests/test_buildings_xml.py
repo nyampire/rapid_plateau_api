@@ -256,6 +256,22 @@ class TestBuildingsToOsmXml:
         assert tags.get('building') == 'residential'
         assert tags.get('height') == '10.5'
 
+    def test_valid_start_date_is_emitted(self, api):
+        """妥当な建設年 (YYYY) は start_date として出力される"""
+        building = _make_building(building_id=1, start_date='2020')
+        xml_str = api.buildings_to_osm_xml([building])
+        root = ET.fromstring(xml_str)
+        tags = {t.get('k'): t.get('v') for t in root.find('way').findall('tag')}
+        assert tags.get('start_date') == '2020'
+
+    def test_placeholder_start_date_0001_is_dropped(self, api):
+        """欠損年のプレースホルダ '0001' は start_date として出力しない"""
+        building = _make_building(building_id=1, start_date='0001')
+        xml_str = api.buildings_to_osm_xml([building])
+        root = ET.fromstring(xml_str)
+        tags = {t.get('k'): t.get('v') for t in root.find('way').findall('tag')}
+        assert 'start_date' not in tags
+
     def test_empty_input_returns_empty_osm(self, api):
         """空配列 → 空の osm 要素"""
         xml_str = api.buildings_to_osm_xml([])
@@ -607,3 +623,35 @@ class TestBuildingsToOsmXmlNodeSharing:
         emitted = [(n.get('id'), n.get('lat'), n.get('lon')) for n in root.findall('node')]
         matches = [nid for nid, la, lo in emitted if (la, lo) == ('35.7000000', '139.7000000')]
         assert len(matches) == 2, f"cross-relation coord should NOT dedupe, got {matches}"
+
+
+class TestValidStartDate:
+    """_valid_start_date: which construction years are emitted vs dropped.
+
+    PLATEAU stores start_date as a bare 'YYYY' year; a missing year comes
+    through as the placeholder '0001'. Only plausible 4-digit years in
+    [1000, current+1] should be emitted.
+    """
+
+    def test_plausible_years_accepted(self):
+        import osmfj_plateau_api as m
+        from datetime import datetime
+        for v in ['1000', '1868', '2020', str(datetime.now().year), str(datetime.now().year + 1)]:
+            assert m._valid_start_date(v) is True, v
+
+    def test_placeholder_and_out_of_range_rejected(self):
+        import osmfj_plateau_api as m
+        from datetime import datetime
+        for v in ['0001', '0000', '0999', str(datetime.now().year + 2)]:
+            assert m._valid_start_date(v) is False, v
+
+    def test_empty_and_malformed_rejected(self):
+        import osmfj_plateau_api as m
+        for v in [None, '', '   ', 'abcd', '20x0']:
+            assert m._valid_start_date(v) is False, v
+
+    def test_full_date_judged_by_leading_year(self):
+        # If a full 'YYYY-MM-DD' ever appears, judge by the leading year.
+        import osmfj_plateau_api as m
+        assert m._valid_start_date('2020-05-01') is True
+        assert m._valid_start_date('0001-01-01') is False

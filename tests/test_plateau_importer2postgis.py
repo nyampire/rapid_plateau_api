@@ -565,3 +565,11 @@ class TestFileKey:
         importer = bare_importer(citycode='43100')
         outside = Path('/somewhere/else/mesh.osm')
         assert importer._file_key(outside) == str(outside)
+
+    def test_flat_layout_keys_to_basename(self, bare_importer):
+        """No-op invariant: a file directly in data_dir keys to its bare
+        basename, identical to the pre-hardening behavior."""
+        importer = bare_importer(citycode='43100')
+        data_dir = Path(importer.data_dir)
+        f = data_dir / '53385729.osm'
+        assert importer._file_key(f) == '53385729.osm'

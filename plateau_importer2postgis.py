@@ -255,7 +255,7 @@ class PlateauImporter2PostGIS:
             logger.error(f"❌ 既存データ分析エラー: {e}")
             return {}
 
-    def _discover_osm_files(self):
+    def _discover_osm_files(self) -> Tuple[List[Path], int]:
         """Return (osm_files, zip_count).
 
         In --no-zip mode, collect .osm directly (recursive glob) — a strict
@@ -1330,9 +1330,11 @@ class PlateauImporter2PostGIS:
                 if self.no_zip:
                     logger.error("❌ .osmファイルが見つかりません (--no-zip モード)")
                     logger.info("💡 ヒント: data-dir 配下に変換済み .osm を配置してください")
-                else:
+                elif zip_count == 0:
                     logger.error("❌ zipファイルが見つかりません")
                     logger.info("💡 ヒント: データディレクトリにzipファイルを配置してください")
+                else:
+                    logger.error("❌ OSMファイルが見つかりません")
                 return False
 
             # 既存データの事前削除（バッチ処理前に1回だけ実行）

@@ -9,6 +9,7 @@ plateau_importer2postgis.py のユニットテスト
 
 import io
 import os
+import shutil
 import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -506,3 +507,38 @@ class TestCityBoundaryFilter:
             "SAVEPOINT should not appear after the CASCADE migration"
         assert not any('DELETE FROM plateau_building_nodes' in s for s in sqls), \
             "Nodes are now removed via CASCADE; importer should not delete them explicitly"
+
+
+class TestDiscoverOsmFiles:
+    """`_discover_osm_files()` picks the .osm source based on the no_zip flag."""
+
+    FIX_DIR = Path(__file__).parent / 'fixtures' / 'citygml-osm'
+
+    def _place(self, data_dir: Path, rel: str) -> Path:
+        """Copy the v4 fixture to data_dir/<rel> and return the path."""
+        dest = data_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(self.FIX_DIR / 'v4_outline_only.osm', dest)
+        return dest
+
+    def test_no_zip_rglob_finds_nested_osm_and_ignores_zip(self, bare_importer):
+        importer = bare_importer(citycode='43100')
+        importer.no_zip = True
+        data_dir = Path(importer.data_dir)
+        self._place(data_dir, 'extracted/53385729/53385729.osm')
+        self._place(data_dir, 'extracted/53385730/53385730.osm')
+        # A stray .zip must be ignored entirely in no-zip mode.
+        (data_dir / 'leftover.zip').write_bytes(b'not a real zip')
+
+        osm_files, zip_count = importer._discover_osm_files()
+
+        names = sorted(p.name for p in osm_files)
+        assert names == ['53385729.osm', '53385730.osm']
+        assert zip_count == 0
+
+    def test_no_zip_empty_dir_returns_empty(self, bare_importer):
+        importer = bare_importer(citycode='43100')
+        importer.no_zip = True
+        osm_files, zip_count = importer._discover_osm_files()
+        assert osm_files == []
+        assert zip_count == 0

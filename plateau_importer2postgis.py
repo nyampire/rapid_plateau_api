@@ -255,6 +255,19 @@ class PlateauImporter2PostGIS:
             logger.error(f"❌ 既存データ分析エラー: {e}")
             return {}
 
+    def _file_key(self, osm_file):
+        """Namespace key for a mesh file, unique within data_dir.
+
+        Uses the path relative to data_dir instead of the basename, so two
+        files that share a basename in different subdirectories (adjacent
+        cities share a mesh tile) do not collide in the in-memory node dict.
+        A no-op for single-city dirs where mesh names are already unique.
+        """
+        try:
+            return str(Path(osm_file).relative_to(self.data_dir))
+        except ValueError:
+            return str(osm_file)
+
     def _discover_osm_files(self) -> Tuple[List[Path], int]:
         """Return (osm_files, zip_count).
 
@@ -1390,12 +1403,13 @@ class PlateauImporter2PostGIS:
 
                     nodes, buildings = self.parse_osm_file_safe(osm_file)
 
+                    key_base = self._file_key(osm_file)
                     for original_id, node_data in nodes.items():
-                        file_specific_key = f"{osm_file.name}:{original_id}"
+                        file_specific_key = f"{key_base}:{original_id}"
                         all_nodes[file_specific_key] = node_data
 
                     for building in buildings:
-                        building['node_refs'] = [f"{osm_file.name}:{ref}" for ref in building['node_refs']]
+                        building['node_refs'] = [f"{key_base}:{ref}" for ref in building['node_refs']]
                         all_buildings.append(building)
 
                     logger.info(f"     結果: {len(nodes):,}ノード, {len(buildings):,}建物")

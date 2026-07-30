@@ -542,3 +542,26 @@ class TestDiscoverOsmFiles:
         osm_files, zip_count = importer._discover_osm_files()
         assert osm_files == []
         assert zip_count == 0
+
+
+class TestFileKey:
+    """`_file_key()` namespaces meshes by path, not basename, so two files
+    that share a basename (adjacent cities share a mesh tile) do not collide."""
+
+    def test_same_basename_different_subdir_distinct_keys(self, bare_importer):
+        importer = bare_importer(citycode='43100')
+        data_dir = Path(importer.data_dir)
+        f1 = data_dir / 'extracted' / '53385729_a' / '53385729.osm'
+        f2 = data_dir / 'extracted' / '53385729_b' / '53385729.osm'
+
+        k1 = importer._file_key(f1)
+        k2 = importer._file_key(f2)
+
+        assert k1 != k2
+        assert k1 == 'extracted/53385729_a/53385729.osm'
+        assert k2 == 'extracted/53385729_b/53385729.osm'
+
+    def test_file_outside_data_dir_falls_back_to_full_path(self, bare_importer):
+        importer = bare_importer(citycode='43100')
+        outside = Path('/somewhere/else/mesh.osm')
+        assert importer._file_key(outside) == str(outside)

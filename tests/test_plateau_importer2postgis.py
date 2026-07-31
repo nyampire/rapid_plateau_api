@@ -9,6 +9,7 @@ plateau_importer2postgis.py のユニットテスト
 
 import io
 import os
+import shutil
 import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -506,3 +507,69 @@ class TestCityBoundaryFilter:
             "SAVEPOINT should not appear after the CASCADE migration"
         assert not any('DELETE FROM plateau_building_nodes' in s for s in sqls), \
             "Nodes are now removed via CASCADE; importer should not delete them explicitly"
+
+
+class TestDiscoverOsmFiles:
+    """`_discover_osm_files()` picks the .osm source based on the no_zip flag."""
+
+    FIX_DIR = Path(__file__).parent / 'fixtures' / 'citygml-osm'
+
+    def _place(self, data_dir: Path, rel: str) -> Path:
+        """Copy the v4 fixture to data_dir/<rel> and return the path."""
+        dest = data_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(self.FIX_DIR / 'v4_outline_only.osm', dest)
+        return dest
+
+    def test_no_zip_rglob_finds_nested_osm_and_ignores_zip(self, bare_importer):
+        importer = bare_importer(citycode='43100')
+        importer.no_zip = True
+        data_dir = Path(importer.data_dir)
+        self._place(data_dir, 'extracted/53385729/53385729.osm')
+        self._place(data_dir, 'extracted/53385730/53385730.osm')
+        # A stray .zip must be ignored entirely in no-zip mode.
+        (data_dir / 'leftover.zip').write_bytes(b'not a real zip')
+
+        osm_files, zip_count = importer._discover_osm_files()
+
+        names = sorted(p.name for p in osm_files)
+        assert names == ['53385729.osm', '53385730.osm']
+        assert zip_count == 0
+
+    def test_no_zip_empty_dir_returns_empty(self, bare_importer):
+        importer = bare_importer(citycode='43100')
+        importer.no_zip = True
+        osm_files, zip_count = importer._discover_osm_files()
+        assert osm_files == []
+        assert zip_count == 0
+
+
+class TestFileKey:
+    """`_file_key()` namespaces meshes by path, not basename, so two files
+    that share a basename (adjacent cities share a mesh tile) do not collide."""
+
+    def test_same_basename_different_subdir_distinct_keys(self, bare_importer):
+        importer = bare_importer(citycode='43100')
+        data_dir = Path(importer.data_dir)
+        f1 = data_dir / 'extracted' / '53385729_a' / '53385729.osm'
+        f2 = data_dir / 'extracted' / '53385729_b' / '53385729.osm'
+
+        k1 = importer._file_key(f1)
+        k2 = importer._file_key(f2)
+
+        assert k1 != k2
+        assert k1 == 'extracted/53385729_a/53385729.osm'
+        assert k2 == 'extracted/53385729_b/53385729.osm'
+
+    def test_file_outside_data_dir_falls_back_to_full_path(self, bare_importer):
+        importer = bare_importer(citycode='43100')
+        outside = Path('/somewhere/else/mesh.osm')
+        assert importer._file_key(outside) == str(outside)
+
+    def test_flat_layout_keys_to_basename(self, bare_importer):
+        """No-op invariant: a file directly in data_dir keys to its bare
+        basename, identical to the pre-hardening behavior."""
+        importer = bare_importer(citycode='43100')
+        data_dir = Path(importer.data_dir)
+        f = data_dir / '53385729.osm'
+        assert importer._file_key(f) == '53385729.osm'

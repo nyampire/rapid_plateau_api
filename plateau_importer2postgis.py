@@ -38,17 +38,20 @@ class PlateauImporter2PostGIS:
                  data_dir="./plateau_data",
                  postgres_url="postgresql://osmfj_user:secure_plateau_password@localhost:5432/osmfj_plateau",
                  coord_bounds=None,
-                 citycode=None):
+                 citycode=None,
+                 no_zip=False):
         """
         Args:
             data_dir: zipファイルが格納されたディレクトリ
             postgres_url: PostgreSQL接続URL
             coord_bounds: 座標範囲チェック用 (min_lat, max_lat, min_lon, max_lon)。Noneで無効化
             citycode: 市区町村コード (例: "31202")。Noneの場合はdata_dirのディレクトリ名から推定
+            no_zip: True の場合、zip 展開をスキップし data_dir 配下の .osm を直接読む
         """
         self.data_dir = Path(data_dir)
         self.postgres_url = postgres_url
         self.coord_bounds = coord_bounds
+        self.no_zip = no_zip
 
         # 市区町村コードの決定
         if citycode:
@@ -251,6 +254,36 @@ class PlateauImporter2PostGIS:
         except Exception as e:
             logger.error(f"❌ 既存データ分析エラー: {e}")
             return {}
+
+    def _file_key(self, osm_file):
+        """Namespace key for a mesh file, unique within data_dir.
+
+        Uses the path relative to data_dir instead of the basename, so two
+        files that share a basename in different subdirectories (adjacent
+        cities share a mesh tile) do not collide in the in-memory node dict.
+        A no-op for single-city dirs where mesh names are already unique.
+        """
+        try:
+            return str(Path(osm_file).relative_to(self.data_dir))
+        except ValueError:
+            return str(osm_file)
+
+    def _discover_osm_files(self) -> Tuple[List[Path], int]:
+        """Return (osm_files, zip_count).
+
+        In --no-zip mode, collect .osm directly (recursive glob) — a strict
+        superset of both a flat and an ``extracted/<mesh>/`` layout — and report
+        zero zips. Otherwise, run the existing zip discovery + extraction.
+        """
+        if self.no_zip:
+            osm_files = sorted(self.data_dir.rglob("*.osm"))
+            logger.info(f"📂 --no-zip: {len(osm_files)}個の.osmを直接検出: {self.data_dir}")
+            return osm_files, 0
+
+        zip_files = self.find_zip_files()
+        if not zip_files:
+            return [], 0
+        return self.extract_zip_files(zip_files), len(zip_files)
 
     def find_zip_files(self) -> List[Path]:
         """zipファイル検索と分析"""
@@ -1303,19 +1336,18 @@ class PlateauImporter2PostGIS:
             logger.info("\n📊 Phase 1: 既存データ分析")
             start_analysis = self.analyze_existing_data()
 
-            # Phase 2: zipファイル確認
-            logger.info("\n📁 Phase 2: zipファイル確認")
-            zip_files = self.find_zip_files()
-            if not zip_files:
-                logger.error("❌ zipファイルが見つかりません")
-                logger.info("💡 ヒント: データディレクトリにzipファイルを配置してください")
-                return False
-
-            # Phase 3: OSM抽出
-            logger.info("\n📂 Phase 3: OSM展開・抽出")
-            osm_files = self.extract_zip_files(zip_files)
+            # Phase 2/3: OSMファイル収集 (zip 経由 or --no-zip 直読み)
+            logger.info("\n📁 Phase 2/3: OSMファイル収集")
+            osm_files, zip_count = self._discover_osm_files()
             if not osm_files:
-                logger.error("❌ OSMファイルが見つかりません")
+                if self.no_zip:
+                    logger.error("❌ .osmファイルが見つかりません (--no-zip モード)")
+                    logger.info("💡 ヒント: data-dir 配下に変換済み .osm を配置してください")
+                elif zip_count == 0:
+                    logger.error("❌ zipファイルが見つかりません")
+                    logger.info("💡 ヒント: データディレクトリにzipファイルを配置してください")
+                else:
+                    logger.error("❌ OSMファイルが見つかりません")
                 return False
 
             # 既存データの事前削除（バッチ処理前に1回だけ実行）
@@ -1371,12 +1403,13 @@ class PlateauImporter2PostGIS:
 
                     nodes, buildings = self.parse_osm_file_safe(osm_file)
 
+                    key_base = self._file_key(osm_file)
                     for original_id, node_data in nodes.items():
-                        file_specific_key = f"{osm_file.name}:{original_id}"
+                        file_specific_key = f"{key_base}:{original_id}"
                         all_nodes[file_specific_key] = node_data
 
                     for building in buildings:
-                        building['node_refs'] = [f"{osm_file.name}:{ref}" for ref in building['node_refs']]
+                        building['node_refs'] = [f"{key_base}:{ref}" for ref in building['node_refs']]
                         all_buildings.append(building)
 
                     logger.info(f"     結果: {len(nodes):,}ノード, {len(buildings):,}建物")
@@ -1406,7 +1439,7 @@ class PlateauImporter2PostGIS:
             # Phase 7: レポート作成
             logger.info("\n📋 Phase 7: インポートレポート作成")
             self.create_import_report(
-                start_analysis, len(zip_files), len(osm_files),
+                start_analysis, zip_count, len(osm_files),
                 total_buildings_count, total_nodes_count
             )
 
@@ -1446,6 +1479,8 @@ def main():
                        help='座標範囲チェック: "min_lat,max_lat,min_lon,max_lon" (例: "35.2,35.6,133.0,133.5")')
     parser.add_argument('--verbose', action='store_true',
                        help='詳細ログ出力')
+    parser.add_argument('--no-zip', action='store_true',
+                       help='data-dir 配下の .osm を直接読む (zip 展開をスキップ)')
 
     args = parser.parse_args()
 
@@ -1458,7 +1493,7 @@ def main():
 
     logger.info("🏗️ Plateau建物データ PostGISインポーター起動")
 
-    importer = PlateauImporter2PostGIS(args.data_dir, args.postgres_url, coord_bounds, args.citycode)
+    importer = PlateauImporter2PostGIS(args.data_dir, args.postgres_url, coord_bounds, args.citycode, args.no_zip)
     success = importer.run_complete_import()
 
     if success:

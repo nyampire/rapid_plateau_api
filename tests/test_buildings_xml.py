@@ -144,6 +144,17 @@ def _make_building(building_id=1, nodes=None, **tags):
     return d
 
 
+def _josm_duplicate_node_coords(root):
+    """Replicate JOSM's "Duplicated nodes" validator: group the emitted <node>
+    elements by coordinate and return every coordinate carried by more than one
+    node. The emitter writes lat/lon at 7 decimals (``f"{v:.7f}"``), which is
+    OSM's storage precision — the same rounding JOSM keys duplicates on — so a
+    plain string-equality group here flags exactly what JOSM would."""
+    from collections import Counter
+    counts = Counter((n.get('lat'), n.get('lon')) for n in root.findall('node'))
+    return [coord for coord, n in counts.items() if n > 1]
+
+
 class TestBuildingsToOsmXml:
     def test_basic_polygon_produces_valid_xml(self, api):
         """4頂点の建物 → 有効な OSM XML"""
@@ -604,8 +615,14 @@ class TestBuildingsToOsmXmlNodeSharing:
             assert canonical in outline_refs, f"outline missing canonical ref {canonical} for ({lat},{lon})"
             assert canonical in part_refs, f"part missing canonical ref {canonical} for ({lat},{lon})"
 
-    def test_separate_relations_do_not_share_nodes(self, api):
-        """別 relation の outline 同士は同座標でも共有しない (importer 側 Phase 1 の責務)"""
+    def test_separate_buildings_share_coincident_corner_nodes(self, api):
+        """Two separate buildings that touch at a corner must share that node.
+
+        Adjacent Plateau buildings arrive with their own node id at an identical
+        coordinate; emitting both unshared is exactly what JOSM flags as a
+        "Duplicated nodes" error (api#38). The emitter dedupes coincident
+        coordinates across the whole response, so the shared corner becomes one
+        <node> that both ways reference and JOSM finds nothing to flag."""
         shared = {'id': 10, 'lat': 35.7000000, 'lon': 139.7000000}
         o1_nodes = [shared,
                     {'id': 11, 'lat': 35.7000000, 'lon': 139.7010000},
@@ -619,10 +636,21 @@ class TestBuildingsToOsmXmlNodeSharing:
         xml_str = api.buildings_to_osm_xml([o1, o2])
         root = ET.fromstring(xml_str)
 
-        # The (35.7, 139.7) coord should appear in TWO distinct node elements
-        emitted = [(n.get('id'), n.get('lat'), n.get('lon')) for n in root.findall('node')]
-        matches = [nid for nid, la, lo in emitted if (la, lo) == ('35.7000000', '139.7000000')]
-        assert len(matches) == 2, f"cross-relation coord should NOT dedupe, got {matches}"
+        # JOSM-equivalent check: no coordinate may carry more than one node.
+        assert _josm_duplicate_node_coords(root) == []
+
+        # The (35.7, 139.7) coord is emitted as exactly ONE node...
+        at_shared = [n for n in root.findall('node')
+                     if (n.get('lat'), n.get('lon')) == ('35.7000000', '139.7000000')]
+        assert len(at_shared) == 1
+        shared_nid = at_shared[0].get('id')
+
+        # ...and both ways reference that same node id at the shared corner.
+        ways = root.findall('way')
+        assert len(ways) == 2
+        for way in ways:
+            refs = [nd.get('ref') for nd in way.findall('nd')]
+            assert shared_nid in refs, f"way {way.get('id')} does not reference shared node"
 
 
 class TestValidStartDate:

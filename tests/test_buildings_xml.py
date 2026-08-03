@@ -683,3 +683,51 @@ class TestValidStartDate:
         import osmfj_plateau_api as m
         assert m._valid_start_date('2020-05-01') is True
         assert m._valid_start_date('0001-01-01') is False
+
+
+class TestDropPartsNotIntersectingParent:
+    """記録上の親と交差しない部分立体は出力しない。
+
+    importer の way 番号衝突により、部分立体が数 km 離れた別の建物に
+    紐づいている行が本番に 16,175 件ある。そのまま出すと、小さな範囲の
+    要求に対して遠方のジオメトリが返る。
+    """
+
+    def _square(self, base_id, lat, lon, d=0.0002):
+        return [
+            {'id': base_id + i, 'lat': la, 'lon': lo, 'sequence_id': i}
+            for i, (la, lo) in enumerate([
+                (lat, lon), (lat + d, lon), (lat + d, lon + d), (lat, lon + d)
+            ])
+        ]
+
+    def test_non_intersecting_part_is_not_emitted(self, api):
+        buildings = [
+            {'id': 1, 'building': 'yes', 'building_part': None,
+             'parent_building_id': None, 'intersects_parent': None,
+             'promote_part_id': None, 'nodes': self._square(100, 33.0, 133.0)},
+            {'id': 2, 'building': None, 'building_part': 'yes',
+             'parent_building_id': 1, 'intersects_parent': False,
+             'promote_part_id': None, 'nodes': self._square(200, 34.0, 134.0)},
+        ]
+
+        root = ET.fromstring(api.buildings_to_osm_xml(buildings))
+
+        way_ids = {w.get('id') for w in root.findall('way')}
+        assert '-2' not in way_ids
+        assert '-1' in way_ids
+
+    def test_intersecting_part_is_kept(self, api):
+        buildings = [
+            {'id': 1, 'building': 'yes', 'building_part': None,
+             'parent_building_id': None, 'intersects_parent': None,
+             'promote_part_id': None, 'nodes': self._square(100, 33.0, 133.0)},
+            {'id': 2, 'building': None, 'building_part': 'yes',
+             'parent_building_id': 1, 'intersects_parent': True,
+             'promote_part_id': None, 'nodes': self._square(200, 33.0, 133.0, d=0.0001)},
+        ]
+
+        root = ET.fromstring(api.buildings_to_osm_xml(buildings))
+
+        way_ids = {w.get('id') for w in root.findall('way')}
+        assert '-2' in way_ids

@@ -182,13 +182,22 @@ class OSMFJPlateauAPI:
                         b.parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
-                        COUNT(*) OVER () AS pre_dedup_count
+                        COUNT(*) OVER () AS pre_dedup_count,
+                        NULL::boolean AS intersects_parent
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
                       AND b.building_part IS NULL
                       {city_boundary_filter}
                     ORDER BY {dedup_key}, {dedup_tiebreaker}
                     LIMIT %s
+                ),
+                bbox_outline_geom AS (
+                    -- 交差判定と包含判定に外形のジオメトリが要る。
+                    -- bbox_outlines に geom を足すと UNION ALL の列が増えて
+                    -- Python まで運ばれるので、判定用に別で引く。
+                    SELECT bo.id, ST_MakeValid(pb.geom) AS geom
+                    FROM bbox_outlines bo
+                    JOIN plateau_buildings pb ON pb.id = bo.id
                 ),
                 related_parts AS (
                     -- 上記 outline に紐づく part (bbox 内外を問わず全て)
@@ -201,9 +210,10 @@ class OSMFJPlateauAPI:
                         b.parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
-                        0 AS pre_dedup_count
+                        0 AS pre_dedup_count,
+                        ST_Intersects(ST_MakeValid(b.geom), g.geom) AS intersects_parent
                     FROM plateau_buildings b
-                    WHERE b.parent_building_id IN (SELECT id FROM bbox_outlines)
+                    JOIN bbox_outline_geom g ON g.id = b.parent_building_id
                 ),
                 orphan_parts AS (
                     -- bbox 内で relation 無しの building:part
@@ -217,7 +227,8 @@ class OSMFJPlateauAPI:
                         b.parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
-                        0 AS pre_dedup_count
+                        0 AS pre_dedup_count,
+                        NULL::boolean AS intersects_parent
                     FROM plateau_buildings b
                     WHERE b.building_part = 'yes'
                       AND b.parent_building_id IS NULL
@@ -246,6 +257,7 @@ class OSMFJPlateauAPI:
                     ub.parent_building_id,
                     ub.representative_point,
                     ub.pre_dedup_count,
+                    ub.intersects_parent,
                     bn.nodes
                 FROM all_buildings ub
                 LEFT JOIN LATERAL (
@@ -443,6 +455,19 @@ class OSMFJPlateauAPI:
 
         processed_buildings = 0
         total_nodes_created = 0
+
+        # importer の way 番号衝突により、部分立体が別のメッシュの外形に
+        # 紐づいている行がある。記録上の親と交差しないものは親子ではありえない
+        # ので出力しない。#41 で importer は修正済みだが、既存データは
+        # 再取り込みまで残る。撤去条件は Task 3 のコメントを参照。
+        dropped_far_parts = 0
+        kept_buildings = []
+        for b in buildings:
+            if b.get('intersects_parent') is False:
+                dropped_far_parts += 1
+                continue
+            kept_buildings.append(b)
+        buildings = kept_buildings
 
         for building in buildings:
             try:

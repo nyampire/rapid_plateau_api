@@ -68,6 +68,7 @@ def fresh_plateau_schema(integration_db_url):
             CREATE TABLE plateau_buildings (
                 id SERIAL PRIMARY KEY,
                 building_part TEXT,
+                ref_mlit_plateau TEXT,
                 parent_building_id INTEGER
                     REFERENCES plateau_buildings(id) ON DELETE CASCADE
             )
@@ -134,6 +135,7 @@ def fresh_plateau_full_schema(integration_db_url):
                 landuse TEXT,
                 city_code TEXT,
                 building_part TEXT,
+                ref_mlit_plateau TEXT,
                 parent_building_id INTEGER
                     REFERENCES plateau_buildings(id) ON DELETE CASCADE,
                 geom geometry(Polygon, 4326),

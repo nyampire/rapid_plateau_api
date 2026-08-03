@@ -458,8 +458,25 @@ class OSMFJPlateauAPI:
 
         # importer の way 番号衝突により、部分立体が別のメッシュの外形に
         # 紐づいている行がある。記録上の親と交差しないものは親子ではありえない
-        # ので出力しない。#41 で importer は修正済みだが、既存データは
-        # 再取り込みまで残る。撤去条件は Task 3 のコメントを参照。
+        # ので出力しない。本番では 43,280 件の親子の不整合のうち 16,175 件が
+        # これで、重心距離は中央値 1,786m、最大 30,258m。#41 で importer は
+        # 修正済みだが、既存データは再取り込みまで残る。
+        #
+        # 撤去条件: 全都市の再取り込みが済み、本番で下記が 0 件になったとき。
+        #   SELECT count(*) FROM plateau_buildings p
+        #   JOIN plateau_buildings o ON p.parent_building_id = o.id
+        #   WHERE p.building_part IS NOT NULL AND o.building_part IS NULL
+        #     AND NOT ST_Intersects(ST_MakeValid(p.geom), ST_MakeValid(o.geom));
+        # 除外件数をログに出しているのは、応答側でも発火しなくなったことを
+        # 確認できないと撤去に踏み切れないため。
+        #
+        # intersects_parent は True/False/NULL の三値。落とすのは False だけで、
+        # NULL は落とさない。NULL は ST_Intersects が入力ジオメトリの一方
+        # (または両方) が NULL のときに返す値で、「交差していない」ではなく
+        # 「判定できない」を意味する。geom 列が壊れていてもノード列が正常なら
+        # 出力は正しく作れるため、判定できないことを理由に建物を捨てると正常な
+        # データを失う (tests/test_representative_point.py が固定している契約)。
+        # 外形行と孤立部分立体も設計上 NULL を持つ。
         dropped_far_parts = 0
         kept_buildings = []
         for b in buildings:
@@ -617,6 +634,9 @@ class OSMFJPlateauAPI:
             f"XML生成完了: {processed_buildings}件 (way: {len(all_ways)}, "
             f"relation: {len(all_relations)}), {total_nodes_created}ノード"
         )
+        # 0 件のときも出す。撤去してよいかは「発火しなくなったこと」で判断する
+        # ので、0 が記録に残らないと不在を証明できない。
+        logger.info(f"出口補正: 親と交差しない部分立体を除外 {dropped_far_parts}件")
 
         try:
             xml_string = ET.tostring(osm, encoding='unicode', method='xml')

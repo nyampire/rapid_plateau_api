@@ -573,3 +573,109 @@ class TestFileKey:
         data_dir = Path(importer.data_dir)
         f = data_dir / '53385729.osm'
         assert importer._file_key(f) == '53385729.osm'
+
+
+# ----------------------------------------------------------------------
+# way_id namespace per source file
+# ----------------------------------------------------------------------
+
+_COLLIDING_OSM = textwrap.dedent("""\
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="-1" lat="{lat}" lon="{lon}"/>
+  <node id="-2" lat="{lat}1" lon="{lon}"/>
+  <node id="-3" lat="{lat}1" lon="{lon}1"/>
+  <node id="-4" lat="{lat}" lon="{lon}1"/>
+  <node id="-5" lat="{lat}05" lon="{lon}05"/>
+  <node id="-6" lat="{lat}08" lon="{lon}05"/>
+  <node id="-7" lat="{lat}08" lon="{lon}08"/>
+  <node id="-8" lat="{lat}05" lon="{lon}08"/>
+  <way id="-10">
+    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
+    <tag k="building" v="yes"/>
+    <tag k="name" v="{name}-outline"/>
+  </way>
+  <way id="-20">
+    <nd ref="-5"/><nd ref="-6"/><nd ref="-7"/><nd ref="-8"/><nd ref="-5"/>
+    <tag k="building:part" v="yes"/>
+    <tag k="name" v="{name}-part"/>
+  </way>
+  <relation id="-30">
+    <member type="way" ref="-10" role="outline"/>
+    <member type="way" ref="-20" role="part"/>
+    <tag k="type" v="building"/>
+    <tag k="building" v="yes"/>
+  </relation>
+</osm>
+""")
+
+
+class TestWayIdNamespacePerFile:
+    """citygml-osm numbers each mesh file from -1, so the same way id appears in
+    every file of a city. The part -> outline link must stay inside its own file:
+    without a namespace the last file read wins and a part gets attached to a
+    completely different mesh's outline (often kilometres away).
+    """
+
+    def _batch(self, importer, specs):
+        """Parse each (subdir, lat, lon, name) spec and assemble one batch,
+        mirroring the per-file namespacing run_complete_import does."""
+        all_nodes = {}
+        all_buildings = []
+        for subdir, lat, lon, name in specs:
+            d = Path(importer.data_dir) / subdir
+            d.mkdir(parents=True, exist_ok=True)
+            osm_file = d / 'mesh.osm'
+            osm_file.write_text(_COLLIDING_OSM.format(lat=lat, lon=lon, name=name))
+
+            nodes, buildings = importer.parse_osm_file_safe(osm_file)
+            key_base = importer._file_key(osm_file)
+            for original_id, node_data in nodes.items():
+                all_nodes[f"{key_base}:{original_id}"] = node_data
+            for building in buildings:
+                building['node_refs'] = [f"{key_base}:{ref}" for ref in building['node_refs']]
+                all_buildings.append(building)
+        return all_nodes, all_buildings
+
+    def test_part_links_to_outline_from_its_own_file(self, bare_importer):
+        importer = bare_importer(citycode='43100')
+        all_nodes, all_buildings = self._batch(importer, [
+            ('meshA', '33.0', '133.0', 'A'),
+            ('meshB', '34.0', '134.0', 'B'),
+        ])
+
+        buildings_data, nodes_data, parts_parent_map = importer.process_buildings_safe(
+            all_nodes, all_buildings
+        )
+
+        assert len(buildings_data) == 4
+        # buildings_data row: (osm_id, ..., name at index 9, ...)
+        name_by_osm_id = {row[0]: row[9] for row in buildings_data}
+        assert sorted(name_by_osm_id.values()) == [
+            'A-outline', 'A-part', 'B-outline', 'B-part'
+        ]
+
+        parent_name_by_part_name = {
+            name_by_osm_id[part_id]: name_by_osm_id[parent_id]
+            for part_id, parent_id in parts_parent_map
+        }
+        assert parent_name_by_part_name == {
+            'A-part': 'A-outline',
+            'B-part': 'B-outline',
+        }
+
+    def test_plateau_id_keeps_the_raw_way_id(self, bare_importer):
+        """The namespace lives in the lookup key only. `way_id` itself is stored
+        as `plateau_id`, so prefixing it in place would change what lands in
+        the DB and break traceability back to the source .osm.
+        """
+        importer = bare_importer(citycode='43100')
+        all_nodes, all_buildings = self._batch(importer, [
+            ('meshA', '33.0', '133.0', 'A'),
+            ('meshB', '34.0', '134.0', 'B'),
+        ])
+
+        buildings_data, _, _ = importer.process_buildings_safe(all_nodes, all_buildings)
+
+        # row index 7 = plateau_id
+        assert sorted(row[7] for row in buildings_data) == ['-10', '-10', '-20', '-20']

@@ -382,6 +382,7 @@ class PlateauImporter2PostGIS:
             return {}, []
 
         file_prefix = osm_file.stem
+        file_key = self._file_key(osm_file)
         nodes = {}
         buildings = []
 
@@ -480,6 +481,7 @@ class PlateauImporter2PostGIS:
                     'node_refs': nd_refs,
                     'source_file': osm_file.name,
                     'file_prefix': file_prefix,
+                    'file_key': file_key,
                     'is_part': is_part and not is_building,  # building:part のみで building タグ無し
                     'parent_outline_way_id': parent_outline_way_id,
                 })
@@ -612,7 +614,10 @@ class PlateauImporter2PostGIS:
         buildings_data = []
         nodes_data = []
         parts_parent_map = []  # [(part_osm_id, parent_outline_osm_id), ...]
-        way_id_to_osm_id = {}  # source way_id → assigned building_id_counter
+        # (file_key, source way_id) → assigned building_id_counter.
+        # citygml-osm restarts way ids at -1 in every mesh file, so the key must
+        # carry the file or a part links to another mesh's outline.
+        way_id_to_osm_id = {}
         processed_count = 0
         skipped_count = 0
         duplicate_count = 0
@@ -743,12 +748,13 @@ class PlateauImporter2PostGIS:
                             ))
 
                             # way_id → osm_id を記録 (part の parent 解決に使う)
-                            way_id_to_osm_id[building['way_id']] = self.building_id_counter
+                            file_key = building.get('file_key')
+                            way_id_to_osm_id[(file_key, building['way_id'])] = self.building_id_counter
 
                             # part の場合は parent_outline_way_id 経由で parent_osm_id を解決
                             if is_part and building.get('parent_outline_way_id'):
                                 parent_way_id = building['parent_outline_way_id']
-                                parent_osm_id = way_id_to_osm_id.get(parent_way_id)
+                                parent_osm_id = way_id_to_osm_id.get((file_key, parent_way_id))
                                 if parent_osm_id is not None:
                                     parts_parent_map.append(
                                         (self.building_id_counter, parent_osm_id)

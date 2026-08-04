@@ -715,6 +715,37 @@ class TestMultipolygonOutput:
         roles = sorted(m.get('role') for m in root.find('relation').findall('member'))
         assert roles == ['inner', 'outer']
 
+    def test_outer_role_is_ring0_way_and_inner_role_is_hole_way(self, api):
+        """role の値だけでなく、role がどの way を指すかまで確認する。
+
+        sorted(role) だけを見る旧テストは 'outer'/'inner' の割り当てが逆転
+        していても (ring 0 に inner を振っても) 素通りしてしまう。ここでは
+        outer メンバーが ring 0 (外形) の way を、inner メンバーが穴の座標を
+        含む way を指していることをそれぞれ確認する。
+        """
+        building = self._hole_building()
+        root = ET.fromstring(api.buildings_to_osm_xml([building]))
+        rel = root.find('relation')
+        members = {m.get('role'): m.get('ref') for m in rel.findall('member')}
+        assert set(members) == {'outer', 'inner'}
+
+        # outer 側の way id は単一 way のときと同じ規則 (-building_db_id) で
+        # あるはず。これは ring 0 (外形) の way にしか成り立たない。
+        assert members['outer'] == str(-building['id'])
+
+        # inner 側の way は、穴 (ring_id == 1) の座標をすべて含んでいるはず。
+        node_coord_by_id = {
+            n.get('id'): (n.get('lat'), n.get('lon')) for n in root.findall('node')
+        }
+        hole_nodes = [n for n in building['nodes'] if n['ring_id'] == 1]
+        hole_coords = {(f"{n['lat']:.7f}", f"{n['lon']:.7f}") for n in hole_nodes}
+
+        inner_way = next(w for w in root.findall('way') if w.get('id') == members['inner'])
+        inner_way_coords = {
+            node_coord_by_id[nd.get('ref')] for nd in inner_way.findall('nd')
+        }
+        assert hole_coords <= inner_way_coords
+
     def test_ways_carry_no_building_tag(self, api):
         root = ET.fromstring(api.buildings_to_osm_xml([self._hole_building()]))
         for w in root.findall('way'):
@@ -735,6 +766,18 @@ class TestMultipolygonOutput:
         <relation> が 2 つ出てしまっていた (type=multipolygon と
         type=building)。別 offset (MULTIPOLYGON_RELATION_ID_OFFSET) を割り
         当てて解消したことを確認する。
+
+        注意: この fixture の入力の組み合わせ (id=1 が courtyard を持ち、かつ
+        id=2 の building:part から parent_building_id=1 として参照される) は
+        合成テストデータであり、実データでは起こらない。parent_building_id は
+        importer の親子マップからのみ埋まるが、このプラン Task 1 で新規 import は
+        親子リンクを恒久的に作らなくなった。ring_id > 0 (courtyard) は Task 3 の
+        multipolygon 経路でのみ作られる。同じ import 実行に由来する1行は
+        「古い行 (親リンクを持ちうるが ring は常に0)」か「新しい行 (ring を
+        持ちうるが親リンクは常に無い)」のどちらかであり、両方は成立し得ない。
+        このテストが確認しているのは「2つの relation id が衝突しない」ことのみで
+        あり、この入力に対して type=building と type=multipolygon の2relationが
+        出力される、という出力形状そのものを仕様として承認しているわけではない。
         """
         outline = self._hole_building()  # id=1, 穴あり, parent_building_id=None
         part = {

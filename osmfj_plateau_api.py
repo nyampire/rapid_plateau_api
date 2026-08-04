@@ -596,8 +596,18 @@ class OSMFJPlateauAPI:
                 else:
                     # 穴のある建物: 環ごとにタグ無し way を作り、
                     # type=multipolygon の relation でまとめる。タグは relation にだけ付ける。
-                    ring_way_ids: Dict[int, int] = {}
-                    ring_way_elems: List[ET.Element] = []
+                    #
+                    # 検証 (副作用なし) と生成 (_make_way_elem が all_nodes /
+                    # total_nodes_created に副作用を持つ) を2パスに分離する。
+                    # 1パスに混ぜていた頃は、ring 0 の way を作った直後に
+                    # ring 1 の検証が失敗すると、ring 0 の <node> だけが
+                    # response に残ってしまっていた (どの way からも参照され
+                    # ない孤立点としてクライアントに描画される)。全 ring の
+                    # 検証が通るまで _make_way_elem を一切呼ばないことで、
+                    # 失敗時に途中まで作った要素が response に残る余地を無く
+                    # す。これは下の broad except (この関数の末尾) が拾う
+                    # ケースでも同様に効く。
+                    ring_valid_nodes: Dict[int, List[Dict]] = {}
                     ring_failed = False
                     for ring_no in sorted(rings):
                         valid_nodes = _valid_nodes_from_ring(rings[ring_no])
@@ -608,13 +618,18 @@ class OSMFJPlateauAPI:
                             )
                             ring_failed = True
                             break
-                        way_id = (-building_db_id if ring_no == 0
-                                  else self.RING_ID_OFFSET - building_db_id * 100 - ring_no)
-                        ring_way_ids[ring_no] = way_id
-                        ring_way_elems.append(_make_way_elem(way_id, valid_nodes))
+                        ring_valid_nodes[ring_no] = valid_nodes
 
                     if ring_failed:
                         continue
+
+                    ring_way_ids: Dict[int, int] = {}
+                    ring_way_elems: List[ET.Element] = []
+                    for ring_no in sorted(rings):
+                        way_id = (-building_db_id if ring_no == 0
+                                  else self.RING_ID_OFFSET - building_db_id * 100 - ring_no)
+                        ring_way_ids[ring_no] = way_id
+                        ring_way_elems.append(_make_way_elem(way_id, ring_valid_nodes[ring_no]))
 
                     outer_way_id = ring_way_ids[0]
                     all_ways.extend(ring_way_elems)
@@ -623,6 +638,24 @@ class OSMFJPlateauAPI:
                     if is_part and parent_id is not None:
                         parts_by_parent_db_id.setdefault(parent_id, []).append(outer_way_id)
                     elif not is_part:
+                        # 穴を持つ outline を outline_by_db_id にも登録する。
+                        # 下の「parts を持つ outline」ループが、この building_db_id を
+                        # parent_building_id に持つ building:part 行を同じバッチで見つけた
+                        # 場合、type=building relation をもう1つ作ってしまい、この building
+                        # について type=multipolygon と type=building の2つのタグ付き
+                        # relation が出力される (テストでのみ再現、
+                        # test_multipolygon_relation_id_does_not_collide_with_parts_relation
+                        # 参照)。
+                        #
+                        # 実データではこの組み合わせは起こらない: parent_building_id は
+                        # importer の親子マップからのみ埋まるが、このプラン Task 1 で新規
+                        # import は親子リンクを作らなくなった (常に空)。ring_id > 0 は
+                        # Task 3 の multipolygon 経路でのみ作られる。同じ import 実行・同じ
+                        # ファイルに由来する以上、1行は「古い行 (親リンクを持ちうる。
+                        # ring_id はカラムのデフォルト値で全て 0)」か「新しい行 (ring を
+                        # 持ちうる。親リンクは常に無い)」のどちらかであり、両方は成立し
+                        # 得ない。そのため、ここで two-relation を防ぐ分岐は入れていない
+                        # (この前提が崩れたら要見直し)。
                         outline_by_db_id[building_db_id] = building
 
                     rel_elem = ET.Element('relation')

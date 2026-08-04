@@ -326,40 +326,39 @@ class OSMFJPlateauAPI:
         finally:
             conn.close()
 
-    # OSM XML 上での relation ID の生成オフセット。
-    # building の DB id は正値、way の出力 id は -building_db_id なので、
-    # relation の id は更に -1_000_000 でオフセットして衝突を避ける。
-    # (parts を持つ outline の type=building relation で使用)
-    RELATION_ID_OFFSET = -1_000_000
-
-    # type=multipolygon relation (穴のある建物) の ID 生成オフセット。
-    # RELATION_ID_OFFSET と別の定数にしている理由: 同じ建物が「穴を持つ
-    # outline」であると同時に「他の building:part 行から parent として
-    # 参照される outline」でもあり得る (courtyard と LOD2 分割は独立した
-    # 属性なので両立し得る)。もし同じ RELATION_ID_OFFSET を使うと、その
-    # 1 建物について type=multipolygon relation と type=building relation
-    # が同一 id で 2 つ出力される、確定的な衝突になる (実際に構築して確認
-    # 済み)。この offset を分けることでその衝突を解消する。
-    MULTIPOLYGON_RELATION_ID_OFFSET = -3_000_000
-
-    # 穴のある建物の内側リング(ring_id >= 1) を表す way の ID 生成オフセット。
-    # RELATION_ID_OFFSET と同じ考え方。building_db_id を 100 倍してから
-    # ring_no (1..) を足すことで、1 建物あたり内側リングを 99 個まで一意に
-    # 区別できる（100 個以上の穴を持つ建物は現状想定していない）。
+    # 合成 OSM id の採番。型ごとに (建物id, 役割) から一意に決める。
     #
-    # この方式は衝突を完全には排除しない (#4 で既知の、既存 way/relation ID
-    # 方式そのものが非衝突保証ではない問題と同程度のリスク)。以下はいずれも
-    # 「たまたま別の建物の DB id がその値に一致する」偶然の一致が必要で、
-    # production の bbox クエリで自然発生する可能性は極めて低いが、ゼロでは
-    # ない:
-    #   - 通常の way id (-id_B) と衝突: id_B == 100*id_A + ring_no + 2_000_000
-    #   - type=building relation id (RELATION_ID_OFFSET - id_C) と衝突:
-    #     id_C == 100*id_A + ring_no + 1_000_000
-    #   - type=multipolygon relation id (MULTIPOLYGON_RELATION_ID_OFFSET - id_D)
-    #     と衝突: id_D == 100*id_A + ring_no - 1_000_000
-    # (id_A は穴を持つ建物自身の DB id、id_B/id_C/id_D は同一レスポンス内の
-    # 別の建物の DB id)
-    INNER_RING_WAY_ID_OFFSET = -2_000_000
+    #   way      : -(建物id * WAY_ID_RING_MULTIPLIER + 環番号)
+    #   relation : -(建物id * RELATION_ID_KIND_MULTIPLIER + 種別)
+    #
+    # 環番号は外側リングが 0、内側リングが 1 から。種別は下の 2 定数。
+    #
+    # 単射である理由: 環番号が乗数未満なら商と余りが一意に決まるので、
+    # 値が一致するには建物 id と役割の両方が一致するしかない。
+    # 種別は {1, 2} の 2 値で乗数 10 未満なので、relation 側は前提なしに
+    # 成立する。way 側の前提は「環番号 < WAY_ID_RING_MULTIPLIER」の一つだけで、
+    # これを越えると建物 N の環が建物 N+1 の通常 way id を奪う。
+    # 上限は出力側で守る (buildings_to_osm_xml)。
+    #
+    # OSM の id は型ごとに独立しており、Rapid も entityID を型の頭文字付きで
+    # 作る (osmEntity.id.fromOSM) ので、way と relation の間では衝突しない。
+    # 確認が要るのは同じ型の中だけである。
+    #
+    # 桁: 建物 id 1,490 万 × 1000 で約 150 億。JavaScript の安全整数
+    # 9e15 の約 60 万分の 1 で、全都市の再取り込み 1 周あたり 1,490 万の
+    # 増加なら約 60 万周分の余裕がある。
+    WAY_ID_RING_MULTIPLIER = 1000
+    RELATION_ID_KIND_MULTIPLIER = 10
+    RELATION_KIND_BUILDING = 1
+    RELATION_KIND_MULTIPOLYGON = 2
+
+    def _way_id(self, building_db_id: int, ring_no: int = 0) -> int:
+        """way の合成 OSM id。ring_no 0 が外側リング (穴の無い建物もこれ)。"""
+        return -(building_db_id * self.WAY_ID_RING_MULTIPLIER + ring_no)
+
+    def _relation_id(self, building_db_id: int, kind: int) -> int:
+        """relation の合成 OSM id。kind は RELATION_KIND_* のいずれか。"""
+        return -(building_db_id * self.RELATION_ID_KIND_MULTIPLIER + kind)
 
     def _emit_building_tags(self, parent_elem, building: Dict, is_part: bool):
         """way / relation 共通のタグを追加するヘルパー。
@@ -577,7 +576,7 @@ class OSMFJPlateauAPI:
                     if len(valid_nodes) < 3:
                         continue
 
-                    way_id = -building_db_id
+                    way_id = self._way_id(building_db_id)
                     way_elem = _make_way_elem(way_id, valid_nodes)
 
                     # タグ追加 (outline/simple vs part で異なる)
@@ -635,8 +634,7 @@ class OSMFJPlateauAPI:
                     # way_id の算出 (副作用なし) を先に済ませ、outer_way_id を
                     # _make_way_elem 呼び出しより前に確定させる。
                     ring_way_ids: Dict[int, int] = {
-                        ring_no: (-building_db_id if ring_no == 0
-                                  else self.INNER_RING_WAY_ID_OFFSET - building_db_id * 100 - ring_no)
+                        ring_no: self._way_id(building_db_id, ring_no)
                         for ring_no in rings
                     }
                     outer_way_id = ring_way_ids[0]
@@ -672,7 +670,8 @@ class OSMFJPlateauAPI:
                         outline_by_db_id[building_db_id] = building
 
                     rel_elem = ET.Element('relation')
-                    rel_elem.set('id', str(self.MULTIPOLYGON_RELATION_ID_OFFSET - building_db_id))
+                    rel_elem.set('id', str(self._relation_id(
+                        building_db_id, self.RELATION_KIND_MULTIPOLYGON)))
                     rel_elem.set('visible', 'true')
                     rel_elem.set('version', '1')
                     rel_elem.set('changeset', '1')
@@ -704,7 +703,8 @@ class OSMFJPlateauAPI:
                 # → relation を作らず、parts は単独 way として残す
                 continue
             rel_elem = ET.Element('relation')
-            rel_elem.set('id', str(self.RELATION_ID_OFFSET - parent_db_id))
+            rel_elem.set('id', str(self._relation_id(
+                parent_db_id, self.RELATION_KIND_BUILDING)))
             rel_elem.set('visible', 'true')
             rel_elem.set('version', '1')
             rel_elem.set('changeset', '1')
@@ -712,7 +712,7 @@ class OSMFJPlateauAPI:
             rel_elem.set('user', 'osmfj-plateau')
             rel_elem.set('uid', '1')
             # outline メンバー
-            outline_way_id = -parent_db_id
+            outline_way_id = self._way_id(parent_db_id)
             m = ET.SubElement(rel_elem, 'member')
             m.set('type', 'way')
             m.set('ref', str(outline_way_id))

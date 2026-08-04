@@ -344,9 +344,14 @@ class OSMFJPlateauAPI:
     # 作る (osmEntity.id.fromOSM) ので、way と relation の間では衝突しない。
     # 確認が要るのは同じ型の中だけである。
     #
-    # 桁: 建物 id 1,490 万 × 1000 で約 150 億。JavaScript の安全整数
-    # 9e15 の約 60 万分の 1 で、全都市の再取り込み 1 周あたり 1,490 万の
-    # 増加なら約 60 万周分の余裕がある。
+    # 桁: way id の上限は乗数がどう変わっても「plateau_buildings.id の上限 ×
+    # WAY_ID_RING_MULTIPLIER」で決まる。現行の乗数 1000 では
+    # 2.1e9 × 1000 = 2.1e12 で、JavaScript の安全整数 9e15 の約 4000 分の
+    # 1 に収まる。先に尽きるのは plateau_buildings.id の方で、これは
+    # SERIAL (int4) なので上限は 2,147,483,647 (DEPLOY.md のスキーマ参照)。
+    # 再取り込みは都市ごとに行が削除されるだけでシーケンスは戻らないため、
+    # 全都市 1 周あたり約 1,490 万ずつ増える。int4 を使い切るまでには
+    # 約 144 周かかり、JS の安全整数に達するよりずっと早い。
     WAY_ID_RING_MULTIPLIER = 1000
     RELATION_ID_KIND_MULTIPLIER = 10
     RELATION_KIND_BUILDING = 1

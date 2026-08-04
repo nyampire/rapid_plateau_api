@@ -880,10 +880,19 @@ class TestSyntheticIdScheme:
         旧方式では type=building relation の id (-1_000_000 - id_C) と
         type=multipolygon relation の id (-3_000_000 - id_A) が
         id_C == id_A + 2_000_000 のときに一致した。
+        courtyard 建物 (id_A) を db_id=5 に固定し、その衝突相手 id_C =
+        2,000,005 を parts parent にして type=building relation を
+        実際に発生させる。プレーンな建物のままでは type=building
+        relation が出ないので衝突の検証にならない。
         """
         buildings = [self._hole_building(db_id=5)]
-        for db_id in (1, 2, 2_000_005, 3, 100):
+        for db_id in (1, 2, 3, 100):
             buildings.append(self._plain_building(db_id))
+        colliding_outline = self._plain_building(2_000_005)
+        colliding_part = self._plain_building(2_000_006)
+        colliding_part['building_part'] = 'yes'
+        colliding_part['parent_building_id'] = 2_000_005
+        buildings += [colliding_outline, colliding_part]
         outline = self._plain_building(9)
         part = self._plain_building(10)
         part['building_part'] = 'yes'

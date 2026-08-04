@@ -409,6 +409,31 @@ class PlateauImporter2PostGIS:
         # 親子関係を作ると実在しない建物を親にすることになるため、作らない。
         part_to_outline = {}
 
+        # building タグを持つ type=multipolygon は、穴のある建物である。
+        # outer を外側、inner を内側のリングとして 1 棟にまとめる。
+        # inner の way には building:part=yes が付くが、これは建物ではなく穴なので
+        # 独立した建物として収集しない (mp_inner_way_ids)。outer も同様に、
+        # 単独の建物として重複収集しないよう mp_outer_way_ids に記録する。
+        mp_inner_way_ids = set()
+        mp_buildings = []
+        for rel_elem in root.findall('relation'):
+            rel_tags = {t.get('k'): t.get('v') for t in rel_elem.findall('tag')
+                        if t.get('k') and t.get('v')}
+            if rel_tags.get('type') != 'multipolygon' or 'building' not in rel_tags:
+                continue
+            outer, inners = [], []
+            for m in rel_elem.findall('member'):
+                if m.get('type') != 'way':
+                    continue
+                if m.get('role') == 'outer':
+                    outer.append(m.get('ref'))
+                elif m.get('role') == 'inner':
+                    inners.append(m.get('ref'))
+                    mp_inner_way_ids.add(m.get('ref'))
+            if len(outer) == 1:
+                mp_buildings.append((rel_elem.get('id'), rel_tags, outer[0], inners))
+        mp_outer_way_ids = {mp[2] for mp in mp_buildings}
+
         # ノード収集（座標検証付き）
         for node_elem in root.findall('node'):
             original_id = node_elem.get('id')
@@ -445,13 +470,32 @@ class PlateauImporter2PostGIS:
                 continue
 
         # 建物ウェイ収集 (building または building:part を持つ way が対象)
+        # way_id → nd_refs は multipolygon の outer/inner 解決にも使うので、
+        # タグの有無に関わらず全 way について記録する。
+        all_way_nd_refs = {}
         for way_elem in root.findall('way'):
+            way_id = way_elem.get('id')
+
             tags = {}
             for tag_elem in way_elem.findall('tag'):
                 key = tag_elem.get('k')
                 value = tag_elem.get('v')
                 if key and value:
                     tags[key] = value
+
+            nd_refs = []
+            for nd_elem in way_elem.findall('nd'):
+                nd_ref = nd_elem.get('ref')
+                if nd_ref in nodes:
+                    nd_refs.append(nd_ref)
+            all_way_nd_refs[way_id] = nd_refs
+
+            # multipolygon の outer/inner として取り込み済みの way は、独立した
+            # 建物として重複収集しない。inner の building:part=yes は建物では
+            # なく穴を表すタグなので無視する。outer に building + ref:MLIT_PLATEAU
+            # が付いていても同様（実データで起こりうる）。
+            if way_id in mp_inner_way_ids or way_id in mp_outer_way_ids:
+                continue
 
             # 建物判定: building または building:part のいずれかがあれば対象
             is_building = bool(tags.get('building'))
@@ -465,14 +509,6 @@ class PlateauImporter2PostGIS:
             if (is_building or is_part) and not ref_mlit:
                 continue
 
-            way_id = way_elem.get('id')
-            nd_refs = []
-
-            for nd_elem in way_elem.findall('nd'):
-                nd_ref = nd_elem.get('ref')
-                if nd_ref in nodes:
-                    nd_refs.append(nd_ref)
-
             # 最低3点でポリゴン形成
             if len(nd_refs) >= 3:
                 # part の場合は parent_outline_way_id を解決
@@ -481,6 +517,7 @@ class PlateauImporter2PostGIS:
                     'way_id': way_id,
                     'tags': tags,
                     'node_refs': nd_refs,
+                    'rings': [nd_refs],
                     'source_file': osm_file.name,
                     'file_prefix': file_prefix,
                     'file_key': file_key,
@@ -490,6 +527,30 @@ class PlateauImporter2PostGIS:
                     'is_part': False,
                     'parent_outline_way_id': parent_outline_way_id,
                 })
+
+        # multipolygon (穴のある建物) を 1 棟の建物としてまとめる。
+        # ref:MLIT_PLATEAU が無くても取り込む（変換器が relation では欠落させる
+        # ことがある。周南市 10 メッシュ 15 件中 5 件、実在の校舎を含む）。
+        for rel_id, rel_tags, outer_way_id, inner_way_ids in mp_buildings:
+            outer_refs = all_way_nd_refs.get(outer_way_id)
+            if not outer_refs or len(outer_refs) < 3:
+                continue
+            rings = [outer_refs]
+            for inner_way_id in inner_way_ids:
+                inner_refs = all_way_nd_refs.get(inner_way_id)
+                if inner_refs:
+                    rings.append(inner_refs)
+            buildings.append({
+                'way_id': rel_id,
+                'tags': rel_tags,
+                'node_refs': outer_refs,
+                'rings': rings,
+                'source_file': osm_file.name,
+                'file_prefix': file_prefix,
+                'file_key': file_key,
+                'is_part': False,
+                'parent_outline_way_id': None,
+            })
 
         return nodes, buildings
 
@@ -651,21 +712,30 @@ class PlateauImporter2PostGIS:
                 node_refs = building['node_refs']
                 source_file = building['source_file']
 
-                # 座標収集・ユニークID使用
-                coords = []
+                # 座標収集・ユニークID使用。環ごとに集める
+                # (rings[0] が外側、以降が内側=穴)。内側リングが閉鎖後4点未満
+                # (描画不可能な穴) なら、その環だけを丸ごと落として建物は残す。
+                # ここで落とすことで ring_coords と building_nodes の ring_id が
+                # 常に一致する（存在しない穴の ring_id が nodes 側にだけ残る、
+                # という不整合を作らない）。外側 (ring_no == 0) の妥当性は
+                # 既存の面積・重複チェック（下段）に任せるのでここでは判定しない。
+                ring_coords = []
                 building_nodes = []
-
-                for seq, original_node_ref in enumerate(node_refs):
-                    if original_node_ref in all_nodes:
+                for ring_no, refs in enumerate(building['rings']):
+                    ring_pts = []
+                    ring_nodes = []
+                    for seq, original_node_ref in enumerate(refs):
+                        if original_node_ref not in all_nodes:
+                            continue
                         node_data = all_nodes[original_node_ref]
                         unique_node_id = node_data['unique_id']
                         lat = node_data['lat']
                         lon = node_data['lon']
 
-                        coords.append((lon, lat))
+                        ring_pts.append((lon, lat))
 
                         # ノードデータ（ユニークID使用）
-                        building_nodes.append((
+                        ring_nodes.append((
                             unique_node_id,        # id（負の値）
                             self.building_id_counter,  # building_id
                             seq,                   # sequence_id
@@ -673,8 +743,22 @@ class PlateauImporter2PostGIS:
                             lon,                   # lon
                             lon,                   # ST_Point用 lon
                             lat,                   # ST_Point用 lat
-                            0,                     # ring_id (0=外側)
+                            ring_no,               # ring_id (0=外側、1以上=内側の穴)
                         ))
+
+                    if ring_no > 0:
+                        closed = list(ring_pts)
+                        if closed and closed[0] != closed[-1]:
+                            closed.append(closed[0])
+                        if len(closed) < 4:
+                            continue  # 壊れた内側リングを丸ごと捨てる
+
+                    ring_coords.append(ring_pts)
+                    building_nodes.extend(ring_nodes)
+
+                # 外側の環の座標。面積検算・重複判定は外側のみで行う
+                # (穴は面積や重複の対象にしない)。
+                coords = ring_coords[0] if ring_coords else []
 
                 # ポリゴン形成チェック
                 if len(coords) >= 3:
@@ -707,9 +791,26 @@ class PlateauImporter2PostGIS:
                             # タグ変換
                             converted_tags = self.convert_building_tags_enhanced(tags, source_file)
 
-                            # WKT作成
-                            coords_str = ','.join([f"{lon} {lat}" for lon, lat in coords])
-                            polygon_wkt = f"POLYGON(({coords_str}))"
+                            # WKT作成。外側と内側をまとめて 1 つの POLYGON にする。
+                            # 内側リング (穴) は中庭であり、塗りつぶさない。壊れた
+                            # 内側リングは座標収集の時点で ring_coords から既に
+                            # 除外済み（building_nodes とのズレを作らないため）。
+                            # ここでの再チェックは念のための防御。外側
+                            # (ring_coords[0] = coords) は面積チェックを通過済み
+                            # なのでここでは常に有効。
+                            ring_wkts = []
+                            for ring in ring_coords:
+                                if not ring:
+                                    continue
+                                r = list(ring)
+                                if r[0] != r[-1]:
+                                    r.append(r[0])
+                                if len(r) < 4:
+                                    continue
+                                ring_wkts.append(
+                                    '(' + ','.join(f"{lon} {lat}" for lon, lat in r) + ')'
+                                )
+                            polygon_wkt = f"POLYGON({','.join(ring_wkts)})"
 
                             # 住所を結合
                             addr_parts = []
@@ -1346,6 +1447,33 @@ class PlateauImporter2PostGIS:
 
         logger.info(f"📋 インポートレポート作成: {report_file}")
 
+    def _merge_parsed_file(self, all_nodes: Dict, all_buildings: List, osm_file: Path) -> Tuple[Dict, List]:
+        """1 ファイルを解析し、バッチ集計用の all_nodes / all_buildings に
+        ファイルキーで名前空間化してマージする（in-place）。
+
+        citygml-osm はメッシュファイルごとに node/way/relation の id を -1 から
+        振り直すため、ファイルをまたいで同じ id が衝突する。`node_refs` だけで
+        なく `rings`（穴のある建物の外側・内側の各リング）も同じキーで
+        prefix しないと、多角形リングの座標がバッチ統合後に一件も解決できず、
+        建物ごと静かに消える（PR #41 と同種の事故）。
+
+        Returns:
+            (nodes, buildings): このファイル単独の（名前空間化前の）解析結果。
+            呼び出し側の進捗ログ用。
+        """
+        nodes, buildings = self.parse_osm_file_safe(osm_file)
+
+        key_base = self._file_key(osm_file)
+        for original_id, node_data in nodes.items():
+            all_nodes[f"{key_base}:{original_id}"] = node_data
+
+        for building in buildings:
+            building['node_refs'] = [f"{key_base}:{ref}" for ref in building['node_refs']]
+            building['rings'] = [[f"{key_base}:{r}" for r in ring] for ring in building['rings']]
+            all_buildings.append(building)
+
+        return nodes, buildings
+
     def run_complete_import(self):
         """完全インポート実行（バッチ分割対応・大規模都市OOM対策）"""
         logger.info("🚀 Plateau建物データ PostGISインポート開始")
@@ -1423,16 +1551,7 @@ class PlateauImporter2PostGIS:
                     file_num = batch_start + i
                     logger.info(f"📖 [{file_num:3d}/{len(osm_files)}] 解析中: {osm_file.name}")
 
-                    nodes, buildings = self.parse_osm_file_safe(osm_file)
-
-                    key_base = self._file_key(osm_file)
-                    for original_id, node_data in nodes.items():
-                        file_specific_key = f"{key_base}:{original_id}"
-                        all_nodes[file_specific_key] = node_data
-
-                    for building in buildings:
-                        building['node_refs'] = [f"{key_base}:{ref}" for ref in building['node_refs']]
-                        all_buildings.append(building)
+                    nodes, buildings = self._merge_parsed_file(all_nodes, all_buildings, osm_file)
 
                     logger.info(f"     結果: {len(nodes):,}ノード, {len(buildings):,}建物")
 

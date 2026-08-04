@@ -646,7 +646,8 @@ class TestWayIdNamespacePerFile:
 
     def _batch(self, importer, specs):
         """Parse each (subdir, lat, lon, name) spec and assemble one batch,
-        mirroring the per-file namespacing run_complete_import does."""
+        via the same `_merge_parsed_file` that `run_complete_import` calls per
+        file — rather than re-implementing the namespacing here by hand."""
         all_nodes = {}
         all_buildings = []
         for subdir, lat, lon, name in specs:
@@ -655,13 +656,7 @@ class TestWayIdNamespacePerFile:
             osm_file = d / 'mesh.osm'
             osm_file.write_text(_COLLIDING_OSM.format(lat=lat, lon=lon, name=name))
 
-            nodes, buildings = importer.parse_osm_file_safe(osm_file)
-            key_base = importer._file_key(osm_file)
-            for original_id, node_data in nodes.items():
-                all_nodes[f"{key_base}:{original_id}"] = node_data
-            for building in buildings:
-                building['node_refs'] = [f"{key_base}:{ref}" for ref in building['node_refs']]
-                all_buildings.append(building)
+            importer._merge_parsed_file(all_nodes, all_buildings, osm_file)
         return all_nodes, all_buildings
 
     def test_part_links_to_outline_from_its_own_file(self, bare_importer):
@@ -768,6 +763,7 @@ class TestRefMlitPlateau:
         all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
         for b in buildings:
             b['node_refs'] = [f'{key}:{r}' for r in b['node_refs']]
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
         rows, _, _ = importer.process_buildings_safe(all_nodes, buildings)
         return rows
 
@@ -825,6 +821,7 @@ class TestNodeRingId:
         all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
         for b in buildings:
             b['node_refs'] = [f'{key}:{r}' for r in b['node_refs']]
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
         _, nodes_data, _ = importer.process_buildings_safe(all_nodes, buildings)
 
         assert nodes_data, 'ノード行が空'
@@ -894,3 +891,195 @@ class TestDropSynthesizedShapes:
         nodes, buildings = self._parse(bare_importer, _SYNTH_OSM)
         by_id = {b['way_id']: b for b in buildings}
         assert by_id['-20']['is_part'] is False
+
+
+# ----------------------------------------------------------------------
+# 穴のある建物 (importer source-fidelity task 3)
+# ----------------------------------------------------------------------
+
+_HOLE_OSM = textwrap.dedent("""\
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="-1" lat="33.0" lon="133.0"/>
+  <node id="-2" lat="33.001" lon="133.0"/>
+  <node id="-3" lat="33.001" lon="133.001"/>
+  <node id="-4" lat="33.0" lon="133.001"/>
+  <node id="-5" lat="33.0003" lon="133.0003"/>
+  <node id="-6" lat="33.0007" lon="133.0003"/>
+  <node id="-7" lat="33.0007" lon="133.0007"/>
+  <node id="-8" lat="33.0003" lon="133.0007"/>
+  <way id="-10">
+    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
+  </way>
+  <way id="-20">
+    <nd ref="-5"/><nd ref="-6"/><nd ref="-7"/><nd ref="-8"/><nd ref="-5"/>
+    <tag k="building:part" v="yes"/>
+  </way>
+  <relation id="-30">
+    <member type="way" ref="-10" role="outer"/>
+    <member type="way" ref="-20" role="inner"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="building" v="public"/>
+    <tag k="height" v="14.6"/>
+  </relation>
+</osm>
+""")
+
+
+class TestHoleBuilding:
+    """穴のある建物は type=multipolygon で出力される。
+
+    周南市 10 メッシュで 15 個。すべて実在建物で、合成形状は含まれない。
+    inner の way には building:part=yes が付くが、これは建物ではなく穴である。
+    """
+
+    def _rows(self, bare_importer):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(_HOLE_OSM)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        return importer.process_buildings_safe(all_nodes, buildings)
+
+    def test_hole_building_is_one_row(self, bare_importer):
+        buildings_data, _, _ = self._rows(bare_importer)
+        assert len(buildings_data) == 1, '穴が別の建物として保存されている'
+
+    def test_geometry_has_an_interior_ring(self, bare_importer):
+        buildings_data, _, _ = self._rows(bare_importer)
+        wkt = buildings_data[0][8]   # geometry_wkt
+        assert wkt.count('(') >= 3, f'内側リングが無い: {wkt[:80]}'
+
+    def test_outer_way_with_its_own_building_tags_is_not_duplicated(self, bare_importer):
+        """brief のフィクスチャは outer way にタグが無いので素通りするが、実データ
+        では outer way に building + ref:MLIT_PLATEAU が付くことがある。
+
+        outer を単独の建物としても収集してしまうと、multipolygon 由来の1棟と
+        合わせて同じジオメトリの建物が2つでき、さらに悪いことに ---
+        way ループが multipolygon 組み立てより先に走るため、タグ付き outer が
+        先に「穴の無い」単純建物として登録される。その後 multipolygon 側の穴あき
+        建物を処理する際、外側の座標が同一なので重複ジオメトリ判定
+        (`processed_geometry_hashes`) に引っかかって *穴あきの方が捨てられる*。
+        結果、件数だけを見ると 1 件のままなのに、残るのは穴の無い建物になる
+        （中庭が塗りつぶされる = このタスクが解決するはずの不具合そのもの）。
+        よって件数だけでなく、残った建物が内側リングを保持しているかも確認する。
+        """
+        osm_with_tagged_outer = _HOLE_OSM.replace(
+            '  <way id="-10">\n    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>\n  </way>',
+            '  <way id="-10">\n    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>\n'
+            '    <tag k="building" v="public"/>\n'
+            '    <tag k="ref:MLIT_PLATEAU" v="35215-bldg-9"/>\n  </way>'
+        )
+        assert osm_with_tagged_outer != _HOLE_OSM, '置換対象の文字列が一致していない'
+
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(osm_with_tagged_outer)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        buildings_data, _, _ = importer.process_buildings_safe(all_nodes, buildings)
+
+        assert len(buildings_data) == 1, 'タグ付き outer way が別建物として重複収集されている'
+        wkt = buildings_data[0][8]
+        assert wkt.count('(') >= 3, f'穴が塗りつぶされた（重複判定で穴あきの方が捨てられた）: {wkt[:80]}'
+
+    def test_inner_nodes_carry_ring_one(self, bare_importer):
+        _, nodes_data, _ = self._rows(bare_importer)
+        rings = {row[7] for row in nodes_data}
+        assert rings == {0, 1}, f'環番号が {rings}'
+
+    def test_tags_come_from_the_relation(self, bare_importer):
+        buildings_data, _, _ = self._rows(bare_importer)
+        assert buildings_data[0][1] == 'public'   # building
+        # height は convert_building_tags_enhanced を通るので float になる
+        # (他の建物と同じ扱い。brief の '14.6' 文字列は型が合わないための誤り)。
+        assert buildings_data[0][2] == 14.6       # height
+
+
+_HOLE_MALFORMED_INNER_OSM = textwrap.dedent("""\
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="-1" lat="33.0" lon="133.0"/>
+  <node id="-2" lat="33.001" lon="133.0"/>
+  <node id="-3" lat="33.001" lon="133.001"/>
+  <node id="-4" lat="33.0" lon="133.001"/>
+  <node id="-5" lat="33.0003" lon="133.0003"/>
+  <node id="-6" lat="33.0007" lon="133.0003"/>
+  <way id="-10">
+    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
+  </way>
+  <way id="-20">
+    <nd ref="-5"/><nd ref="-6"/>
+    <tag k="building:part" v="yes"/>
+  </way>
+  <relation id="-30">
+    <member type="way" ref="-10" role="outer"/>
+    <member type="way" ref="-20" role="inner"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="building" v="public"/>
+  </relation>
+</osm>
+""")
+
+
+class TestHoleBuildingMalformedInnerRing:
+    """内側リングが不正 (閉鎖後4点未満) でも建物全体は捨てない。外側が有効なら
+    保存し、壊れた内側リングだけを落とす。inner way -20 は2点しかなく、閉鎖後も
+    3点にしかならないため穴として描けない。
+    """
+
+    def test_building_survives_with_outer_ring_only(self, bare_importer):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(_HOLE_MALFORMED_INNER_OSM)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+
+        buildings_data, nodes_data, _ = importer.process_buildings_safe(all_nodes, buildings)
+
+        assert len(buildings_data) == 1, '不正な内側リングのせいで建物ごと落ちている'
+        wkt = buildings_data[0][8]
+        # 壊れた内側リングは描かれないので、外側だけの単純な POLYGON になる。
+        assert wkt.count('(') == 2, f'壊れた内側リングが混入している: {wkt[:80]}'
+        # 内側リングのノードは書き込まれない (座標として無効なため)。
+        assert {row[7] for row in nodes_data} == {0}
+
+
+class TestMultipolygonRingsAreNamespacedInProduction:
+    """`run_complete_import` が呼ぶのは `_merge_parsed_file` であり、それが
+    `node_refs` と同じファイルキーで `rings` も prefix しなければならない。
+
+    ここを穴埋めしないと、実運用ではリングの各座標が `all_nodes` に一件も
+    解決できず、建物ごと静かに消える
+    （PR #41 で修正した「node 参照の名前空間バグ」と同種の事故）。
+
+    このテストは prefixing をテスト側で再現するのではなく、production が
+    実際に呼ぶ `_merge_parsed_file` をそのまま呼んで確認する。もし
+    `_merge_parsed_file` の `rings` prefix 行を消すと、outer/inner の参照が
+    どちらも `all_nodes` の中の別キーを指すことになり、座標が1点も解決
+    できず building_data が空になってこのテストが落ちる。
+    """
+
+    def test_rings_resolve_after_merge_parsed_file(self, bare_importer):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(_HOLE_OSM)
+
+        all_nodes, all_buildings = {}, []
+        importer._merge_parsed_file(all_nodes, all_buildings, osm_file)
+
+        buildings_data, nodes_data, _ = importer.process_buildings_safe(all_nodes, all_buildings)
+
+        assert len(buildings_data) == 1, 'rings が prefix されておらず建物が消えている'
+        wkt = buildings_data[0][8]
+        assert wkt.count('(') >= 3, f'内側リングの座標が解決できていない: {wkt[:80]}'
+        assert {row[7] for row in nodes_data} == {0, 1}

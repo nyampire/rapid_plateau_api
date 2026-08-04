@@ -1204,11 +1204,16 @@ class TestRingCountIsReported:
 
         API が出力できない本数でも DB には入る。式を直せば次のリクエストから
         出るという設計を、取り込み側で担保する。
+        外側 1 本 + 内側 1000 本、計 1001 本すべてが ring_id として残ることを
+        確認する。途中の環だけが under-4-points 分岐で落ちても、
+        最大値だけを見る assert では検出できない。
         """
         xml = self._many_ring_osm(1000)
         _, (buildings_data, nodes_data, _) = self._process(bare_importer, xml)
         assert len(buildings_data) == 1, '環が多い建物が取り込みで捨てられている'
-        assert max(row[7] for row in nodes_data) == 1000, '環番号が 1000 まで無い'
+        ring_ids = {row[7] for row in nodes_data}
+        assert len(ring_ids) == 1001, '外側+内側1000本のうちどれかの環が欠けている'
+        assert max(ring_ids) == 1000, '環番号が 1000 まで無い'
 
     def test_max_ring_count_reflects_1000_rings(self, bare_importer, caplog):
         xml = self._many_ring_osm(1000)

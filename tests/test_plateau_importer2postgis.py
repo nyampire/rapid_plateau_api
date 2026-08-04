@@ -206,12 +206,14 @@ _MIN_OSM = textwrap.dedent("""\
     <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
     <tag k="building" v="yes"/>
     <tag k="height" v="10"/>
+    <tag k="ref:MLIT_PLATEAU" v="39999-bldg-10"/>
   </way>
   <way id="-20">
     <nd ref="-5"/><nd ref="-6"/><nd ref="-7"/><nd ref="-8"/><nd ref="-5"/>
     <tag k="building:part" v="yes"/>
     <tag k="height" v="3.5"/>
     <tag k="ele" v="10"/>
+    <tag k="ref:MLIT_PLATEAU" v="39999-bldg-20"/>
   </way>
   <relation id="-30">
     <member type="way" ref="-10" role="outline"/>
@@ -225,10 +227,18 @@ _MIN_OSM = textwrap.dedent("""\
 
 
 class TestParseOsmFileRelations:
-    """relation 経由で building:part way が抽出されることを検証"""
+    """importer source-fidelity task 1 により、type=building の relation は
+    もう読まれない（融合で作られた合成 outline とその親子関係を取り込まない
+    ため）。このクラスはその relation が存在しても無視されることを検証する。
+    two way にはどちらも `ref:MLIT_PLATEAU` を付けてある。これが無い way は
+    合成形状とみなされて丸ごと落ちるため（TestDropSynthesizedShapes 参照）、
+    ここでは実在建物として残るケースだけを見ている。
+    """
 
     def test_outline_and_part_both_extracted(self, bare_importer):
-        """outline + part の両方が buildings リストに含まれ、role が正しく付与される"""
+        """outline + part の両方が buildings リストに含まれる。relation は
+        読まれないので、building:part だった way も is_part=False になり、
+        parent_outline_way_id は常に None になる。"""
         importer = bare_importer(citycode='39999')
         osm_file = Path(importer.data_dir) / 'test.osm'
         osm_file.write_text(_MIN_OSM)
@@ -244,14 +254,16 @@ class TestParseOsmFileRelations:
         assert outline['is_part'] is False
         assert outline['parent_outline_way_id'] is None
 
-        # part way -20
+        # part way -20: ref:MLIT_PLATEAU を持つので実在建物として扱われる。
+        # relation を読まなくなったので is_part は False、parent は None。
         assert '-20' in by_way_id
         part = by_way_id['-20']
-        assert part['is_part'] is True
-        assert part['parent_outline_way_id'] == '-10'
+        assert part['is_part'] is False
+        assert part['parent_outline_way_id'] is None
 
     def test_standalone_building_part_without_relation(self, bare_importer):
-        """relation 無しでも building:part だけの way は part として抽出される"""
+        """relation の有無に関わらず、建物 ID を持つ building:part way は
+        独立した建物として抽出される（is_part は常に False）。"""
         # relation を除いた XML
         osm_no_rel = _MIN_OSM.replace(
             '<relation id="-30">\n    <member type="way" ref="-10" role="outline"/>\n'
@@ -267,8 +279,7 @@ class TestParseOsmFileRelations:
         nodes, buildings = importer.parse_osm_file_safe(osm_file)
 
         by_way_id = {b['way_id']: b for b in buildings}
-        # part の parent_outline_way_id は None (relation 無いので)
-        assert by_way_id['-20']['is_part'] is True
+        assert by_way_id['-20']['is_part'] is False
         assert by_way_id['-20']['parent_outline_way_id'] is None
 
 
@@ -327,9 +338,13 @@ class TestCitygmlOsmFixtures:
         `<relation type='building'>` carrying the non-standard
         `<complete>` / `<marged>` child elements.
 
-        Importer must follow the relation to attach the part to its parent
-        outline despite those unknown children sitting next to the standard
-        `<member>` rows.
+        importer source-fidelity task 1: the `type=building` relation is no
+        longer read — it links a synthesized merge outline to the real
+        buildings it fused, not a source BuildingPart, so the parent link
+        would point at a shape that doesn't exist in the source. Both ways
+        here carry `ref:MLIT_PLATEAU` (the fixture models the part as a real
+        building demoted by the converter's fusion), so both survive as
+        independent buildings with `is_part=False` and no parent.
         """
         importer = bare_importer(citycode='02321')
         nodes, buildings = importer.parse_osm_file_safe(
@@ -341,9 +356,10 @@ class TestCitygmlOsmFixtures:
         # outline
         assert by_way['-100']['is_part'] is False
         assert by_way['-100']['parent_outline_way_id'] is None
-        # part — relation lookup wins, attaches to -100.
-        assert by_way['-200']['is_part'] is True
-        assert by_way['-200']['parent_outline_way_id'] == '-100'
+        # part — has a real building ID, so it's promoted to a standalone
+        # building; the relation is not consulted anymore.
+        assert by_way['-200']['is_part'] is False
+        assert by_way['-200']['parent_outline_way_id'] is None
         # Non-standard relation children don't leak into either building's tags.
         for b in buildings:
             assert 'complete' not in b['tags']
@@ -594,11 +610,13 @@ _COLLIDING_OSM = textwrap.dedent("""\
     <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
     <tag k="building" v="yes"/>
     <tag k="name" v="{name}-outline"/>
+    <tag k="ref:MLIT_PLATEAU" v="43100-bldg-{name}-10"/>
   </way>
   <way id="-20">
     <nd ref="-5"/><nd ref="-6"/><nd ref="-7"/><nd ref="-8"/><nd ref="-5"/>
     <tag k="building:part" v="yes"/>
     <tag k="name" v="{name}-part"/>
+    <tag k="ref:MLIT_PLATEAU" v="43100-bldg-{name}-20"/>
   </way>
   <relation id="-30">
     <member type="way" ref="-10" role="outline"/>
@@ -612,9 +630,18 @@ _COLLIDING_OSM = textwrap.dedent("""\
 
 class TestWayIdNamespacePerFile:
     """citygml-osm numbers each mesh file from -1, so the same way id appears in
-    every file of a city. The part -> outline link must stay inside its own file:
-    without a namespace the last file read wins and a part gets attached to a
-    completely different mesh's outline (often kilometres away).
+    every file of a city.
+
+    Historically this class also verified that the part -> outline link (via
+    the `type=building` relation) stayed scoped to its own file. importer
+    source-fidelity task 1 stopped reading that relation entirely — it links
+    a synthesized merge outline to the real buildings it fused, not a source
+    BuildingPart — so no parent link is produced anymore, from any file.
+    `test_part_links_to_outline_from_its_own_file` now asserts that instead.
+    What's left worth guarding: the same way id (-10/-20) appears in every
+    mesh file, so anything keyed only by raw `way_id` (not `(file_key,
+    way_id)`) would silently collide across files. `way_id` fixture ways
+    below carry `ref:MLIT_PLATEAU` so they still survive the task-1 filter.
     """
 
     def _batch(self, importer, specs):
@@ -638,6 +665,13 @@ class TestWayIdNamespacePerFile:
         return all_nodes, all_buildings
 
     def test_part_links_to_outline_from_its_own_file(self, bare_importer):
+        """Renamed in spirit only (kept the original name to avoid churn):
+        the `type=building` relation is no longer read (importer
+        source-fidelity task 1), so no part->outline link is produced at
+        all — not a wrong cross-file one, none. `parts_parent_map` is always
+        empty. Both ways still carry `ref:MLIT_PLATEAU`, so all 4 buildings
+        (2 per mesh file) are still collected as independent buildings.
+        """
         importer = bare_importer(citycode='43100')
         all_nodes, all_buildings = self._batch(importer, [
             ('meshA', '33.0', '133.0', 'A'),
@@ -655,14 +689,7 @@ class TestWayIdNamespacePerFile:
             'A-outline', 'A-part', 'B-outline', 'B-part'
         ]
 
-        parent_name_by_part_name = {
-            name_by_osm_id[part_id]: name_by_osm_id[parent_id]
-            for part_id, parent_id in parts_parent_map
-        }
-        assert parent_name_by_part_name == {
-            'A-part': 'A-outline',
-            'B-part': 'B-outline',
-        }
+        assert parts_parent_map == []
 
     def test_plateau_id_keeps_the_raw_way_id(self, bare_importer):
         """The namespace lives in the lookup key only. `way_id` itself is stored
@@ -778,3 +805,66 @@ class TestRefMlitPlateau:
         n_placeholders = template.count('%s')
         assert n_cols == n_placeholders
         assert len(self._rows(bare_importer)[0]) == n_cols
+
+
+# ----------------------------------------------------------------------
+# 合成形状を取り込まない (importer source-fidelity task 1)
+# ----------------------------------------------------------------------
+
+_SYNTH_OSM = textwrap.dedent("""\
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="-1" lat="33.0" lon="133.0"/>
+  <node id="-2" lat="33.001" lon="133.0"/>
+  <node id="-3" lat="33.001" lon="133.001"/>
+  <node id="-4" lat="33.0" lon="133.001"/>
+  <node id="-5" lat="33.0002" lon="133.0002"/>
+  <node id="-6" lat="33.0004" lon="133.0002"/>
+  <node id="-7" lat="33.0004" lon="133.0004"/>
+  <node id="-8" lat="33.0002" lon="133.0004"/>
+  <way id="-10">
+    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <way id="-20">
+    <nd ref="-5"/><nd ref="-6"/><nd ref="-7"/><nd ref="-8"/><nd ref="-5"/>
+    <tag k="building:part" v="yes"/>
+    <tag k="ref:MLIT_PLATEAU" v="35215-bldg-1"/>
+  </way>
+  <relation id="-30">
+    <member type="way" ref="-10" role="outline"/>
+    <member type="way" ref="-20" role="part"/>
+    <tag k="type" v="building"/>
+    <tag k="building" v="yes"/>
+  </relation>
+</osm>
+""")
+
+
+class TestDropSynthesizedShapes:
+    """変換器が作った合成形状を取り込まない。
+
+    融合で作られた外形は建物 ID を持たない。10 メッシュ 386 本すべてが
+    元データの lod0FootPrint と一致しないことを確認済み。
+    """
+
+    def _parse(self, bare_importer, xml):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(xml)
+        return importer.parse_osm_file_safe(osm_file)
+
+    def test_way_without_building_id_is_not_collected(self, bare_importer):
+        nodes, buildings = self._parse(bare_importer, _SYNTH_OSM)
+        way_ids = {b['way_id'] for b in buildings}
+        assert '-10' not in way_ids, '合成外形が収集されている'
+        assert '-20' in way_ids, '建物 ID を持つ way が落ちている'
+
+    def test_no_parent_link_is_produced(self, bare_importer):
+        nodes, buildings = self._parse(bare_importer, _SYNTH_OSM)
+        assert all(b['parent_outline_way_id'] is None for b in buildings)
+
+    def test_part_with_building_id_becomes_a_building(self, bare_importer):
+        nodes, buildings = self._parse(bare_importer, _SYNTH_OSM)
+        by_id = {b['way_id']: b for b in buildings}
+        assert by_id['-20']['is_part'] is False

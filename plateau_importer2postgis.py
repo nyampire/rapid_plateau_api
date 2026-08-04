@@ -372,11 +372,15 @@ class PlateauImporter2PostGIS:
     def parse_osm_file_safe(self, osm_file: Path) -> Tuple[Dict, List]:
         """安全なOSMファイル解析（修復済み技術）
 
-        building:part 対応:
-        - <relation type=building> をパースし、role=outline/role=part の way を識別
-        - building タグを持つ way は単純な building、または relation の outline
-        - building:part タグを持つ way は part (relation 経由でも単独でも対応)
-        - 各 building/part に対し building_part フラグと parent_outline_way_id を付与
+        building / building:part 対応 (importer source-fidelity task 1):
+        - <relation type=building> は読まない。融合で作られた合成 outline と
+          その親子関係を取り込まないため。よって parent_outline_way_id は
+          常に None、is_part は常に False になる。
+        - `ref:MLIT_PLATEAU` タグを持たない building/building:part way は
+          融合で作られた合成形状とみなし、取り込まない。
+        - `ref:MLIT_PLATEAU` を持つ way は building:part タグが付いていても
+          実在する独立した建物として扱う（変換器は CityGML の BuildingPart
+          を読まないため、真の部分立体は出力に存在しない）。
         """
         try:
             tree = ET.parse(osm_file)
@@ -390,32 +394,12 @@ class PlateauImporter2PostGIS:
         nodes = {}
         buildings = []
 
-        # relation 解析: type=building の relation から
-        # part_way_id → parent_outline_way_id のマップを構築
+        # type=building の relation は読まない。
+        # この relation は「接触する建物を融合したまとまり」であり、outline は
+        # 融合で作られた形状、part は取り込まれた実在建物である。元データの
+        # BuildingPart に由来するものではない（変換器はそれを読んでいない）。
+        # 親子関係を作ると実在しない建物を親にすることになるため、作らない。
         part_to_outline = {}
-        for rel_elem in root.findall('relation'):
-            rel_tags = {}
-            for tag_elem in rel_elem.findall('tag'):
-                k = tag_elem.get('k')
-                v = tag_elem.get('v')
-                if k and v:
-                    rel_tags[k] = v
-            if rel_tags.get('type') != 'building':
-                continue
-            outline_way_id = None
-            part_way_ids = []
-            for m in rel_elem.findall('member'):
-                if m.get('type') != 'way':
-                    continue
-                role = m.get('role')
-                ref = m.get('ref')
-                if role == 'outline':
-                    outline_way_id = ref
-                elif role == 'part':
-                    part_way_ids.append(ref)
-            if outline_way_id:
-                for pwid in part_way_ids:
-                    part_to_outline[pwid] = outline_way_id
 
         # ノード収集（座標検証付き）
         for node_elem in root.findall('node'):
@@ -467,6 +451,12 @@ class PlateauImporter2PostGIS:
             if not (is_building or is_part):
                 continue
 
+            # 建物 ID を持たない建物 way は、融合で作られた合成形状である。
+            # 元データに対応する形状が無いので取り込まない (10 メッシュ 386 本で確認)。
+            ref_mlit = tags.get('ref:MLIT_PLATEAU')
+            if (is_building or is_part) and not ref_mlit:
+                continue
+
             way_id = way_elem.get('id')
             nd_refs = []
 
@@ -486,7 +476,10 @@ class PlateauImporter2PostGIS:
                     'source_file': osm_file.name,
                     'file_prefix': file_prefix,
                     'file_key': file_key,
-                    'is_part': is_part and not is_building,  # building:part のみで building タグ無し
+                    # 建物 ID を持つ way は、building:part に降格されていても
+                    # 元は独立した建物である。変換器は CityGML の BuildingPart を
+                    # 読まないので、真の部分立体は出力に存在しない。
+                    'is_part': False,
                     'parent_outline_way_id': parent_outline_way_id,
                 })
 

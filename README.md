@@ -169,7 +169,8 @@ Indexes:
 | id | serial | 主キー |
 | osm_id | bigint | ノード ID (負の値) |
 | building_id | int | 建物 ID (外部キー → plateau_buildings.id) |
-| sequence_id | int | ノード順序 |
+| sequence_id | int | ノード順序 (環ごとに 0 から再開) |
+| ring_id | int NOT NULL DEFAULT 0 | 環の種別。0=外環、1以上=内環 (穴) |
 | lat | float | 緯度 |
 | lon | float | 経度 |
 | geom | geometry | ポイント |

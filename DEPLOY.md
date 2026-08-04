@@ -169,6 +169,7 @@ CREATE TABLE plateau_building_nodes (
     osm_id BIGINT,
     building_id INTEGER REFERENCES plateau_buildings(id),
     sequence_id INTEGER,
+    ring_id INTEGER NOT NULL DEFAULT 0,
     lat DOUBLE PRECISION,
     lon DOUBLE PRECISION,
     geom GEOMETRY(Point, 4326)
@@ -185,6 +186,12 @@ GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO osmfj_user;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO osmfj_user;
 SQL
 ```
+
+> **注意**: `ring_id` カラムは上の `CREATE TABLE` に含まれているので新規構築では問題にならない。
+> 既存データベースをこの手順のバージョンに追従させる場合は、`ALTER TABLE plateau_building_nodes ADD COLUMN ring_id INTEGER NOT NULL DEFAULT 0;` をこの時点、つまり API のデプロイより前に必ず実行する。
+> API のノード取得クエリは `n.ring_id` を毎リクエスト参照するが、このカラムを作るのはインポーターの初回実行だけなので、ALTER 前に API を新しいバージョンへ更新すると、インポート未実行のデータベースに対するリクエストが全て 500 エラーになる。
+> このカラムはデフォルト値が volatile でないため、PostgreSQL の ADD COLUMN はメタデータのみの変更で済み、テーブル全体の書き換えは発生しない。
+> ただし ACCESS EXCLUSIVE ロックを取得するので、長時間実行中のクエリが無いタイミングで流すこと。
 
 ---
 

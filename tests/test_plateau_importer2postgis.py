@@ -17,13 +17,13 @@ from unittest.mock import MagicMock
 from plateau_importer2postgis import PlateauImporter2PostGIS
 
 
-def _make_row(osm_id, building_id, seq, lat, lon):
+def _make_row(osm_id, building_id, seq, lat, lon, ring_id=0):
     """nodes_data の1行を組み立てるヘルパー。
 
     insert_to_database_batch の append と同じレイアウト:
-    (osm_id, building_id, sequence_id, lat, lon, lon, lat)
+    (osm_id, building_id, sequence_id, lat, lon, lon, lat, ring_id)
     """
-    return (osm_id, building_id, seq, lat, lon, lon, lat)
+    return (osm_id, building_id, seq, lat, lon, lon, lat, ring_id)
 
 
 class TestDedupeAndRemapNodes:
@@ -805,6 +805,32 @@ class TestRefMlitPlateau:
         n_placeholders = template.count('%s')
         assert n_cols == n_placeholders
         assert len(self._rows(bare_importer)[0]) == n_cols
+
+
+class TestNodeRingId:
+    """ノード行が環番号を持つ。内側リングを表現するための土台。
+
+    本タスクでは挙動を変えない。穴の無い建物はすべて 0 になる。
+    """
+
+    def test_simple_building_nodes_are_ring_zero(self, bare_importer):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(_MIN_OSM.replace(
+            '<tag k="building" v="yes"/>',
+            '<tag k="building" v="yes"/>\n    <tag k="ref:MLIT_PLATEAU" v="35215-bldg-1"/>'
+        ))
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['node_refs'] = [f'{key}:{r}' for r in b['node_refs']]
+        _, nodes_data, _ = importer.process_buildings_safe(all_nodes, buildings)
+
+        assert nodes_data, 'ノード行が空'
+        # 行のレイアウト: (osm_id, building_id, seq, lat, lon, lon, lat, ring_id)
+        assert all(len(row) == 8 for row in nodes_data)
+        assert all(row[7] == 0 for row in nodes_data)
 
 
 # ----------------------------------------------------------------------

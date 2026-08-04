@@ -122,20 +122,22 @@ class PlateauImporter2PostGIS:
             try:
                 cur = conn.cursor()
                 cur.execute("""
-                    SELECT column_name FROM information_schema.columns
-                    WHERE table_name='plateau_buildings'
-                      AND column_name IN ('building_part', 'parent_building_id',
-                                          'ref_mlit_plateau')
+                    SELECT table_name, column_name FROM information_schema.columns
+                    WHERE (table_name='plateau_buildings'
+                           AND column_name IN ('building_part', 'parent_building_id',
+                                               'ref_mlit_plateau'))
+                       OR (table_name='plateau_building_nodes'
+                           AND column_name = 'ring_id')
                 """)
-                existing = {row[0] for row in cur.fetchall()}
+                existing = {(row[0], row[1]) for row in cur.fetchall()}
                 added = []
-                if 'building_part' not in existing:
+                if ('plateau_buildings', 'building_part') not in existing:
                     cur.execute("ALTER TABLE plateau_buildings ADD COLUMN building_part TEXT")
                     added.append('building_part')
-                if 'ref_mlit_plateau' not in existing:
+                if ('plateau_buildings', 'ref_mlit_plateau') not in existing:
                     cur.execute("ALTER TABLE plateau_buildings ADD COLUMN ref_mlit_plateau TEXT")
                     added.append('ref_mlit_plateau')
-                if 'parent_building_id' not in existing:
+                if ('plateau_buildings', 'parent_building_id') not in existing:
                     cur.execute(
                         "ALTER TABLE plateau_buildings "
                         "ADD COLUMN parent_building_id INTEGER "
@@ -147,6 +149,12 @@ class PlateauImporter2PostGIS:
                         "WHERE parent_building_id IS NOT NULL"
                     )
                     added.append('parent_building_id')
+                if ('plateau_building_nodes', 'ring_id') not in existing:
+                    cur.execute(
+                        "ALTER TABLE plateau_building_nodes "
+                        "ADD COLUMN ring_id INTEGER NOT NULL DEFAULT 0"
+                    )
+                    added.append('ring_id')
                 if added:
                     conn.commit()
                     logger.info(f"🗂️ スキーマ拡張: {', '.join(added)} を追加")
@@ -664,7 +672,8 @@ class PlateauImporter2PostGIS:
                             lat,                   # lat
                             lon,                   # lon
                             lon,                   # ST_Point用 lon
-                            lat                    # ST_Point用 lat
+                            lat,                   # ST_Point用 lat
+                            0,                     # ring_id (0=外側)
                         ))
 
                 # ポリゴン形成チェック
@@ -930,7 +939,8 @@ class PlateauImporter2PostGIS:
             seen.add(key)
             db_building_id = osm_id_to_db_id[osm_building_id]
             mapped.append((node_data[0], db_building_id, node_data[2],
-                           node_data[3], node_data[4], node_data[5], node_data[6]))
+                           node_data[3], node_data[4], node_data[5], node_data[6],
+                           node_data[7]))
         return mapped, skipped, orphan
 
     def insert_to_database_batch(self, buildings_data: List, nodes_data: List,
@@ -1002,11 +1012,11 @@ class PlateauImporter2PostGIS:
                     execute_values(
                         cursor,
                         """
-                        INSERT INTO plateau_building_nodes (osm_id, building_id, sequence_id, lat, lon, geom)
+                        INSERT INTO plateau_building_nodes (osm_id, building_id, sequence_id, lat, lon, geom, ring_id)
                         VALUES %s
                         """,
                         mapped_nodes_data,
-                        template="(%s, %s, %s, %s, %s, ST_Point(%s, %s))",
+                        template="(%s, %s, %s, %s, %s, ST_Point(%s, %s), %s)",
                         page_size=5000
                     )
                 logger.info("✅ ノード投入完了")
@@ -1257,11 +1267,11 @@ class PlateauImporter2PostGIS:
                     execute_values(
                         cursor,
                         """
-                        INSERT INTO plateau_building_nodes (osm_id, building_id, sequence_id, lat, lon, geom)
+                        INSERT INTO plateau_building_nodes (osm_id, building_id, sequence_id, lat, lon, geom, ring_id)
                         VALUES %s
                         """,
                         mapped_nodes_data,
-                        template="(%s, %s, %s, %s, %s, ST_Point(%s, %s))",
+                        template="(%s, %s, %s, %s, %s, ST_Point(%s, %s), %s)",
                         page_size=5000
                     )
                 logger.info("✅ ノード投入完了")

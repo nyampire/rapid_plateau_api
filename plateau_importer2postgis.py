@@ -432,6 +432,15 @@ class PlateauImporter2PostGIS:
                     mp_inner_way_ids.add(m.get('ref'))
             if len(outer) == 1:
                 mp_buildings.append((rel_elem.get('id'), rel_tags, outer[0], inners))
+            else:
+                # outer が 0 個または複数個の relation はここで組み立てを諦める。
+                # inner way はこの building から除外済み (穴として消える)、outer way は
+                # (あれば) 通常の building way として別途収集されるので建物自体は残るが、
+                # 中庭が塞がれた状態になる。件数は稀と想定しているのでログに残す。
+                logger.warning(
+                    f"⚠️ multipolygon relation {rel_elem.get('id')} をスキップ: "
+                    f"outer member が {len(outer)} 個 (期待値 1)"
+                )
         mp_outer_way_ids = {mp[2] for mp in mp_buildings}
 
         # ノード収集（座標検証付き）

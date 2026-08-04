@@ -359,7 +359,7 @@ class OSMFJPlateauAPI:
     #     と衝突: id_D == 100*id_A + ring_no - 1_000_000
     # (id_A は穴を持つ建物自身の DB id、id_B/id_C/id_D は同一レスポンス内の
     # 別の建物の DB id)
-    RING_ID_OFFSET = -2_000_000
+    INNER_RING_WAY_ID_OFFSET = -2_000_000
 
     def _emit_building_tags(self, parent_elem, building: Dict, is_part: bool):
         """way / relation 共通のタグを追加するヘルパー。
@@ -636,7 +636,7 @@ class OSMFJPlateauAPI:
                     # _make_way_elem 呼び出しより前に確定させる。
                     ring_way_ids: Dict[int, int] = {
                         ring_no: (-building_db_id if ring_no == 0
-                                  else self.RING_ID_OFFSET - building_db_id * 100 - ring_no)
+                                  else self.INNER_RING_WAY_ID_OFFSET - building_db_id * 100 - ring_no)
                         for ring_no in rings
                     }
                     outer_way_id = ring_way_ids[0]

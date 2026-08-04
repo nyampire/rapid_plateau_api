@@ -4,6 +4,7 @@ osmfj_plateau_api.py の buildings エンドポイントと buildings_to_osm_xml
 主要な機能なのにテストがなかったため新規追加。
 """
 
+import logging
 import sys
 import xml.etree.ElementTree as ET
 from unittest.mock import MagicMock, patch
@@ -894,3 +895,73 @@ class TestSyntheticIdScheme:
         rel_ids = [r.get('id') for r in root.findall('relation')]
         assert len(way_ids) == len(set(way_ids)), f'way id が重複: {way_ids}'
         assert len(rel_ids) == len(set(rel_ids)), f'relation id が重複: {rel_ids}'
+
+
+class TestRingLimitAndIdUniqueness:
+    """環番号の上限は API の出力側だけで守る。
+
+    上限は id の採番式の制約であって、データの制約ではない。
+    取り込み側は何も捨てないので、式を直せば次のリクエストから出る。
+    """
+
+    def _hole_building(self, db_id=1, inner_rings=1):
+        def ring(base, lat, lon, d, r):
+            return [{'id': base + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': r}
+                    for i, (la, lo) in enumerate([
+                        (lat, lon), (lat + d, lon), (lat + d, lon + d), (lat, lon + d)])]
+        nodes = ring(10 ** 7, 33.0, 133.0, 0.5, 0)
+        for r in range(1, inner_rings + 1):
+            base = 10 ** 7 + r * 10
+            nodes += ring(base, 33.0 + 0.0001 * r, 133.0 + 0.0001 * r, 0.00002, r)
+        return {
+            'id': db_id, 'building': 'public', 'height': 14.6, 'building_part': None,
+            'parent_building_id': None, 'nodes': nodes,
+        }
+
+    def test_ring_999_is_served(self, api):
+        b = self._hole_building(db_id=3, inner_rings=999)
+        root = ET.fromstring(api.buildings_to_osm_xml([b]))
+        assert root.find('relation') is not None, '環 999 本の建物が出ていない'
+        way_ids = {w.get('id') for w in root.findall('way')}
+        assert str(-(3 * 1000 + 999)) in way_ids
+
+    def test_ring_1000_is_dropped_from_the_response(self, api, caplog):
+        b = self._hole_building(db_id=3, inner_rings=1000)
+        with caplog.at_level(logging.WARNING):
+            root = ET.fromstring(api.buildings_to_osm_xml([b]))
+        assert root.find('relation') is None, '環 1000 本の建物が出力されている'
+        assert root.findall('way') == [], '一部の way だけ残っている'
+        assert root.findall('node') == [], '参照されないノードが残っている'
+        assert any('1000' in r.message for r in caplog.records), '警告が出ていない'
+
+    def test_other_buildings_survive_when_one_is_dropped(self, api):
+        big = self._hole_building(db_id=3, inner_rings=1000)
+        ok = {
+            'id': 4, 'building': 'yes', 'height': 5.0, 'building_part': None,
+            'parent_building_id': None,
+            'nodes': [{'id': 900 + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': 0}
+                      for i, (la, lo) in enumerate([
+                          (35.0, 135.0), (35.01, 135.0), (35.01, 135.01), (35.0, 135.01)])],
+        }
+        root = ET.fromstring(api.buildings_to_osm_xml([big, ok]))
+        assert [w.get('id') for w in root.findall('way')] == [str(-(4 * 1000))]
+
+    def test_duplicate_id_is_reported(self, api, caplog, monkeypatch):
+        """採番式が壊れたときの網。式を潰して衝突を作り、警告が出ることを見る。
+
+        現在の式では同型の id が衝突しないので、衝突そのものは作れない。
+        検知の経路が生きていることだけを確かめる。
+        """
+        monkeypatch.setattr(type(api), '_way_id',
+                            lambda self, building_db_id, ring_no=0: -1)
+        b1 = {
+            'id': 1, 'building': 'yes', 'height': 5.0, 'building_part': None,
+            'parent_building_id': None,
+            'nodes': [{'id': 10 + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': 0}
+                      for i, (la, lo) in enumerate([
+                          (36.0, 136.0), (36.01, 136.0), (36.01, 136.01), (36.0, 136.01)])],
+        }
+        b2 = dict(b1, id=2)
+        with caplog.at_level(logging.WARNING):
+            api.buildings_to_osm_xml([b1, b2])
+        assert any('衝突' in r.message for r in caplog.records), '重複が報告されていない'

@@ -443,8 +443,18 @@ class OSMFJPlateauAPI:
         parts_by_parent_db_id: Dict[int, List[int]] = {}
         # parent_db_id → outline の building dict (タグ duplicate のため)
         outline_by_db_id: Dict[int, Dict] = {}
-        # DB id of buildings that successfully emitted a way (失敗除外)
-        emitted_db_ids = set()
+        # 発行済みの (型, id) を記録する。同じ型で同じ id が二度出たら、
+        # 採番式の単射性が壊れている。式の証明が将来の変更で崩れたときの網。
+        emitted_element_ids = set()
+
+        def _register_element_id(kind, element_id):
+            key = (kind, element_id)
+            if key in emitted_element_ids:
+                logger.warning(
+                    f"⚠️ 合成 id の衝突: {kind} id {element_id} が同じレスポンスに"
+                    f"二度出た。採番式を確認すること"
+                )
+            emitted_element_ids.add(key)
 
         # Emit a single <node> for each unique (lat, lon) across the WHOLE
         # response and reuse its id from every way that touches that coordinate.
@@ -583,7 +593,7 @@ class OSMFJPlateauAPI:
                     self._emit_building_tags(way_elem, building, is_part)
 
                     all_ways.append(way_elem)
-                    emitted_db_ids.add(building_db_id)
+                    _register_element_id('way', way_id)
                     # relation 構築の準備
                     if is_part and parent_id is not None:
                         parts_by_parent_db_id.setdefault(parent_id, []).append(way_id)
@@ -614,6 +624,21 @@ class OSMFJPlateauAPI:
                     # 呼ばれる前に起こる。よって下の broad except がこの
                     # ケースを拾っても、この building 分の <node> は1つも
                     # response に残らない。
+
+                    # 環番号が乗数に達すると、この建物の環が次の建物の通常
+                    # way id を奪う。奪われた側は編集画面から黙って消えるので、
+                    # 出力しないほうを選ぶ。DB には保存されているので、
+                    # 採番式を直せば次のリクエストから出る。
+                    max_ring_no = max(rings)
+                    if max_ring_no >= self.WAY_ID_RING_MULTIPLIER:
+                        logger.warning(
+                            f"⚠️ 建物をレスポンスから除外 {building_db_id}: "
+                            f"内側リングが環番号 {max_ring_no} まであり、way id の"
+                            f"採番範囲 ({self.WAY_ID_RING_MULTIPLIER}) を超える。"
+                            f"DB には保存されている"
+                        )
+                        continue
+
                     ring_valid_nodes: Dict[int, List[Dict]] = {}
                     ring_failed = False
                     for ring_no in sorted(rings):
@@ -644,7 +669,8 @@ class OSMFJPlateauAPI:
                         for ring_no in sorted(rings)
                     ]
                     all_ways.extend(ring_way_elems)
-                    emitted_db_ids.add(building_db_id)
+                    for ring_no in sorted(rings):
+                        _register_element_id('way', ring_way_ids[ring_no])
                     # relation 構築の準備 (outer way の id は単一 way の場合と同じ規則)
                     if is_part and parent_id is not None:
                         parts_by_parent_db_id.setdefault(parent_id, []).append(outer_way_id)
@@ -687,6 +713,9 @@ class OSMFJPlateauAPI:
                     type_tag.set('k', 'type')
                     type_tag.set('v', 'multipolygon')
                     self._emit_building_tags(rel_elem, building, is_part)
+                    _register_element_id(
+                        'relation',
+                        self._relation_id(building_db_id, self.RELATION_KIND_MULTIPOLYGON))
                     all_relations.append(rel_elem)
 
                     processed_buildings += 1
@@ -728,6 +757,8 @@ class OSMFJPlateauAPI:
             type_tag.set('k', 'type')
             type_tag.set('v', 'building')
             self._emit_building_tags(rel_elem, outline, is_part=False)
+            _register_element_id(
+                'relation', self._relation_id(parent_db_id, self.RELATION_KIND_BUILDING))
 
             all_relations.append(rel_elem)
 

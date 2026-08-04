@@ -687,9 +687,11 @@ class TestWayIdNamespacePerFile:
         assert parts_parent_map == []
 
     def test_plateau_id_keeps_the_raw_way_id(self, bare_importer):
-        """The namespace lives in the lookup key only. `way_id` itself is stored
-        as `plateau_id`, so prefixing it in place would change what lands in
-        the DB and break traceability back to the source .osm.
+        """`plateau_id` にファイルキーの名前空間が漏れないことを守る。
+
+        型の頭文字は付くが、その後ろは変換出力の生の要素 id のままである。
+        名前空間付与 (mesh.osm:-10 のような形) が混ざると、DB に保存される
+        値が変わってしまう。
         """
         importer = bare_importer(citycode='43100')
         all_nodes, all_buildings = self._batch(importer, [
@@ -700,7 +702,7 @@ class TestWayIdNamespacePerFile:
         buildings_data, _, _ = importer.process_buildings_safe(all_nodes, all_buildings)
 
         # row index 7 = plateau_id
-        assert sorted(row[7] for row in buildings_data) == ['-10', '-10', '-20', '-20']
+        assert sorted(row[7] for row in buildings_data) == ['w-10', 'w-10', 'w-20', 'w-20']
 
 
 # ----------------------------------------------------------------------
@@ -1083,3 +1085,41 @@ class TestMultipolygonRingsAreNamespacedInProduction:
         wkt = buildings_data[0][8]
         assert wkt.count('(') >= 3, f'内側リングの座標が解決できていない: {wkt[:80]}'
         assert {row[7] for row in nodes_data} == {0, 1}
+
+
+# ----------------------------------------------------------------------
+# plateau_id に元要素の型を記録する (importer source-fidelity task 3)
+# ----------------------------------------------------------------------
+
+class TestPlateauIdCarriesTheElementType:
+    """`plateau_id` は元要素の型が判る形で記録する。
+
+    OSM は way と relation の id 空間を分けているので、生の数字だけでは
+    変換出力のどの要素から来たかを特定できない。`source_dataset` に
+    ファイル名が入っているため、型さえ足せば一意に決まる。
+
+    書き方は osmEntity.id.fromOSM と同じで、way -10 なら 'w-10' になる。
+    安定した識別子ではない (変換をやり直すと値が変わる)。その役割は
+    ref_mlit_plateau が担う。
+    """
+
+    def _parse(self, bare_importer, xml):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(xml)
+        return importer.parse_osm_file_safe(osm_file)
+
+    def test_way_derived_building_is_prefixed_with_w(self, bare_importer):
+        nodes, buildings = self._parse(bare_importer, _SYNTH_OSM)
+        by_way = {b['way_id']: b for b in buildings}
+        assert by_way['-20']['plateau_id'] == 'w-20'
+
+    def test_way_id_itself_is_not_rewritten(self, bare_importer):
+        """`way_id` は親子解決のキーなので、前置してはいけない。"""
+        nodes, buildings = self._parse(bare_importer, _SYNTH_OSM)
+        assert all(not b['way_id'].startswith('w') for b in buildings)
+
+    def test_multipolygon_derived_building_is_prefixed_with_r(self, bare_importer):
+        nodes, buildings = self._parse(bare_importer, _HOLE_OSM)
+        assert len(buildings) == 1
+        assert buildings[0]['plateau_id'] == 'r-30'

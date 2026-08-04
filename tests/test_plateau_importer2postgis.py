@@ -679,3 +679,102 @@ class TestWayIdNamespacePerFile:
 
         # row index 7 = plateau_id
         assert sorted(row[7] for row in buildings_data) == ['-10', '-10', '-20', '-20']
+
+
+# ----------------------------------------------------------------------
+# ref:MLIT_PLATEAU の保存 (#30)
+# ----------------------------------------------------------------------
+
+class TestRefMlitPlateau:
+    """CityGML の建物 ID (ref:MLIT_PLATEAU) を DB に保存する。
+
+    変換器は way にこの ID (例 '13206-bldg-11049') を付けるが、タグ変換が
+    使うタグだけを拾う方式のため取り出されず、保存されていなかった。
+    サーバ側の逆追跡と、1つの relation に何棟分の建物が混ざっているかの
+    判定に使う。API 出力には載せない。
+    """
+
+    def test_tag_is_extracted(self, bare_importer):
+        importer = bare_importer(citycode='13206')
+        result = importer.convert_building_tags_enhanced(
+            {'building': 'yes', 'ref:MLIT_PLATEAU': '13206-bldg-11049'}, 'mesh.osm'
+        )
+        assert result['ref_mlit_plateau'] == '13206-bldg-11049'
+
+    def test_absent_tag_is_none(self, bare_importer):
+        """合成された外形にはこのタグが無いことがある。欠損は異常ではない。"""
+        importer = bare_importer(citycode='13206')
+        result = importer.convert_building_tags_enhanced({'building': 'yes'}, 'mesh.osm')
+        assert result['ref_mlit_plateau'] is None
+
+    def _osm_with_ref(self):
+        return textwrap.dedent("""\
+        <?xml version="1.0" encoding="UTF-8"?>
+        <osm version="0.6">
+          <node id="-1" lat="33.0" lon="133.0"/>
+          <node id="-2" lat="33.0001" lon="133.0"/>
+          <node id="-3" lat="33.0001" lon="133.0001"/>
+          <node id="-4" lat="33.0" lon="133.0001"/>
+          <node id="-5" lat="33.00005" lon="133.00005"/>
+          <node id="-6" lat="33.00008" lon="133.00005"/>
+          <node id="-7" lat="33.00008" lon="133.00008"/>
+          <node id="-8" lat="33.00005" lon="133.00008"/>
+          <way id="-10">
+            <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
+            <tag k="building" v="yes"/>
+            <tag k="ref:MLIT_PLATEAU" v="13206-bldg-11049"/>
+          </way>
+          <way id="-20">
+            <nd ref="-5"/><nd ref="-6"/><nd ref="-7"/><nd ref="-8"/><nd ref="-5"/>
+            <tag k="building:part" v="yes"/>
+            <tag k="ref:MLIT_PLATEAU" v="13206-bldg-11049"/>
+          </way>
+        </osm>
+        """)
+
+    def _rows(self, bare_importer):
+        importer = bare_importer(citycode='13206')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(self._osm_with_ref())
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['node_refs'] = [f'{key}:{r}' for r in b['node_refs']]
+        rows, _, _ = importer.process_buildings_safe(all_nodes, buildings)
+        return rows
+
+    def test_outline_row_carries_the_id(self, bare_importer):
+        rows = self._rows(bare_importer)
+        # 行のレイアウトは INSERT の列順。ref_mlit_plateau は building_part の次。
+        assert rows[0][24] == '13206-bldg-11049'
+
+    def test_part_row_carries_the_id(self, bare_importer):
+        """部分立体にも保存する。relation 内の建物の混在を判定するのに要る。"""
+        rows = self._rows(bare_importer)
+        assert len(rows) == 2
+        assert rows[1][24] == '13206-bldg-11049'
+
+    def test_both_insert_statements_list_the_column(self):
+        """INSERT は 2 箇所ある。片方を落とすと静かに NULL が入る。"""
+        import re
+        src = (Path(__file__).parent.parent / 'plateau_importer2postgis.py').read_text()
+        inserts = re.findall(
+            r'INSERT INTO plateau_buildings\s*\((.*?)\)\s*VALUES', src, re.S
+        )
+        assert len(inserts) == 2, f'INSERT の数が変わった: {len(inserts)}'
+        for cols in inserts:
+            assert 'ref_mlit_plateau' in cols
+
+    def test_insert_column_count_matches_the_row(self, bare_importer):
+        """列数・プレースホルダ数・行の長さが揃っていること。"""
+        import re
+        src = (Path(__file__).parent.parent / 'plateau_importer2postgis.py').read_text()
+        cols = re.search(
+            r'INSERT INTO plateau_buildings\s*\((.*?)\)\s*VALUES', src, re.S
+        ).group(1)
+        n_cols = len([c for c in cols.replace('\n', ' ').split(',') if c.strip()])
+        template = re.search(r'template="\((.*?)\)",', src, re.S).group(1)
+        n_placeholders = template.count('%s')
+        assert n_cols == n_placeholders
+        assert len(self._rows(bare_importer)[0]) == n_cols

@@ -124,13 +124,17 @@ class PlateauImporter2PostGIS:
                 cur.execute("""
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name='plateau_buildings'
-                      AND column_name IN ('building_part', 'parent_building_id')
+                      AND column_name IN ('building_part', 'parent_building_id',
+                                          'ref_mlit_plateau')
                 """)
                 existing = {row[0] for row in cur.fetchall()}
                 added = []
                 if 'building_part' not in existing:
                     cur.execute("ALTER TABLE plateau_buildings ADD COLUMN building_part TEXT")
                     added.append('building_part')
+                if 'ref_mlit_plateau' not in existing:
+                    cur.execute("ALTER TABLE plateau_buildings ADD COLUMN ref_mlit_plateau TEXT")
+                    added.append('ref_mlit_plateau')
                 if 'parent_building_id' not in existing:
                     cur.execute(
                         "ALTER TABLE plateau_buildings "
@@ -507,6 +511,7 @@ class PlateauImporter2PostGIS:
             'tourism': None,
             'leisure': None,
             'landuse': None,
+            'ref_mlit_plateau': None,
             'source_dataset': f"plateau_{self.citycode}_{source_info}",
             'city_code': self.citycode if self.citycode and self.citycode != "unknown" else None,
         }
@@ -537,6 +542,11 @@ class PlateauImporter2PostGIS:
                 pass
 
         # 建物名称
+        # CityGML の建物 ID。サーバ側の逆追跡と、1 つの relation に何棟分の
+        # 建物が混ざっているかの判定に使う (#30)。API 出力には載せない。
+        # 合成された外形には付かないことがあるので、欠損は異常ではない。
+        result['ref_mlit_plateau'] = tags.get('ref:MLIT_PLATEAU')
+
         name = tags.get('name') or tags.get('name:ja')
         if name:
             result['name'] = name[:100]
@@ -743,6 +753,7 @@ class PlateauImporter2PostGIS:
                                 converted_tags.get('landuse'),      # landuse
                                 converted_tags.get('city_code'),    # city_code
                                 building_part_value,                # building_part
+                                converted_tags.get('ref_mlit_plateau'),  # ref_mlit_plateau
                                 polygon_wkt,                        # geom用WKT
                                 polygon_wkt                         # centroid用WKT
                             ))
@@ -960,11 +971,12 @@ class PlateauImporter2PostGIS:
                      amenity, shop, tourism, leisure, landuse,
                      city_code,
                      building_part,
+                     ref_mlit_plateau,
                      geom, centroid)
                     VALUES %s
                     """,
                     buildings_data,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
                     page_size=1000
                 )
                 logger.info("✅ 建物投入完了")
@@ -1214,11 +1226,12 @@ class PlateauImporter2PostGIS:
                      amenity, shop, tourism, leisure, landuse,
                      city_code,
                      building_part,
+                     ref_mlit_plateau,
                      geom, centroid)
                     VALUES %s
                     """,
                     buildings_data,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 4326), ST_Centroid(ST_GeomFromText(%s, 4326)))",
                     page_size=1000
                 )
                 logger.info("✅ 建物投入完了")

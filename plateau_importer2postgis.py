@@ -524,6 +524,10 @@ class PlateauImporter2PostGIS:
                 parent_outline_way_id = part_to_outline.get(way_id) if is_part else None
                 buildings.append({
                     'way_id': way_id,
+                    # 変換出力のどの要素から来たかの記録。osmEntity.id.fromOSM と
+                    # 同じ書き方で、way -10 なら 'w-10'。way_id 自体は親子解決の
+                    # キーなので生のまま残す。
+                    'plateau_id': f'w{way_id}',
                     'tags': tags,
                     'node_refs': nd_refs,
                     'rings': [nd_refs],
@@ -551,6 +555,7 @@ class PlateauImporter2PostGIS:
                     rings.append(inner_refs)
             buildings.append({
                 'way_id': rel_id,
+                'plateau_id': f'r{rel_id}',
                 'tags': rel_tags,
                 'node_refs': outer_refs,
                 'rings': rings,
@@ -848,7 +853,7 @@ class PlateauImporter2PostGIS:
                                 converted_tags.get('building_levels'),  # building_levels
                                 None,                               # building_levels_underground
                                 converted_tags.get('source_dataset'),   # source_dataset
-                                building['way_id'],                 # plateau_id
+                                building['plateau_id'],             # plateau_id
                                 polygon_wkt,                        # geometry_wkt
                                 converted_tags.get('name'),         # name
                                 addr_full,                          # addr_full

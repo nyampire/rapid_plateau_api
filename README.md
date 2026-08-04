@@ -138,7 +138,7 @@ LOD2 の建物は、外形と屋根などの部分から成ります。API は�
 | ele | float | 標高 (m) |
 | building_levels | int | 階数 |
 | source_dataset | text | データソース識別子 (`plateau_{citycode}_{file}`) |
-| plateau_id | text | Plateau 元データの way ID |
+| plateau_id | text | 変換出力の元要素。way 由来は `w-123`、multipolygon 由来は `r-456`。変換をやり直すと値が変わるため安定した識別子ではない（それは `ref_mlit_plateau`） |
 | name | text | 建物名称 |
 | addr_full | text | 住所 (通り名+番地の結合) |
 | addr_housenumber | text | 番地 |

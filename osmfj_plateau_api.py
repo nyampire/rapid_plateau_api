@@ -605,16 +605,25 @@ class OSMFJPlateauAPI:
                     # ない孤立点としてクライアントに描画される)。全 ring の
                     # 検証が通るまで _make_way_elem を一切呼ばないことで、
                     # 失敗時に途中まで作った要素が response に残る余地を無く
-                    # す。これは下の broad except (この関数の末尾) が拾う
-                    # ケースでも同様に効く。
+                    # す。
+                    #
+                    # ring 0 が rings に無い場合の outer_way_id 解決 (下記
+                    # KeyError) はこの分離の対象外 (別途 whole-branch review
+                    # で扱う)。ただしその KeyError 自体は way_id の算出
+                    # (副作用なし) を _make_way_elem の呼び出しより前に
+                    # 済ませてあるため、発生するなら _make_way_elem が1度も
+                    # 呼ばれる前に起こる。よって下の broad except がこの
+                    # ケースを拾っても、この building 分の <node> は1つも
+                    # response に残らない。
                     ring_valid_nodes: Dict[int, List[Dict]] = {}
                     ring_failed = False
                     for ring_no in sorted(rings):
                         valid_nodes = _valid_nodes_from_ring(rings[ring_no])
                         if len(valid_nodes) < 3:
-                            logger.warning(
-                                f"建物処理エラー {building_db_id}: "
-                                f"ring {ring_no} の有効ノードが不足 ({len(valid_nodes)})"
+                            logger.info(
+                                f"建物スキップ {building_db_id}: "
+                                f"ring {ring_no} の有効ノードが不足 ({len(valid_nodes)}), "
+                                f"building 全体を破棄"
                             )
                             ring_failed = True
                             break
@@ -623,15 +632,19 @@ class OSMFJPlateauAPI:
                     if ring_failed:
                         continue
 
-                    ring_way_ids: Dict[int, int] = {}
-                    ring_way_elems: List[ET.Element] = []
-                    for ring_no in sorted(rings):
-                        way_id = (-building_db_id if ring_no == 0
+                    # way_id の算出 (副作用なし) を先に済ませ、outer_way_id を
+                    # _make_way_elem 呼び出しより前に確定させる。
+                    ring_way_ids: Dict[int, int] = {
+                        ring_no: (-building_db_id if ring_no == 0
                                   else self.RING_ID_OFFSET - building_db_id * 100 - ring_no)
-                        ring_way_ids[ring_no] = way_id
-                        ring_way_elems.append(_make_way_elem(way_id, ring_valid_nodes[ring_no]))
-
+                        for ring_no in rings
+                    }
                     outer_way_id = ring_way_ids[0]
+
+                    ring_way_elems = [
+                        _make_way_elem(ring_way_ids[ring_no], ring_valid_nodes[ring_no])
+                        for ring_no in sorted(rings)
+                    ]
                     all_ways.extend(ring_way_elems)
                     emitted_db_ids.add(building_db_id)
                     # relation 構築の準備 (outer way の id は単一 way の場合と同じ規則)

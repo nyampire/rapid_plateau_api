@@ -759,6 +759,22 @@ class TestMultipolygonOutput:
         assert root.find('relation') is None
         assert len(root.findall('way')) == 1
 
+    def test_invalid_ring_leaves_no_orphan_nodes(self, api):
+        """1環でも検証に失敗したら、他の環の <node> も含めて building 全体を出さない。
+
+        ring 0 (外形) は有効なまま ring 1 (穴) だけを検証失敗させる (3点未満に
+        削る)。検証 (_valid_nodes_from_ring) と生成 (_make_way_elem) を2パスに
+        分離した理由そのものを守るテスト: 1パスに戻して ring 0 の way を先に
+        作ってしまうと、ring 1 の検証失敗時に ring 0 の <node> だけが way から
+        参照されないまま response に残る (孤立点としてクライアントに描画される)。
+        """
+        b = self._hole_building()
+        b['nodes'] = [n for n in b['nodes'] if n['ring_id'] == 0 or n['sequence_id'] < 2]
+        root = ET.fromstring(api.buildings_to_osm_xml([b]))
+        assert root.findall('node') == []
+        assert root.findall('way') == []
+        assert root.findall('relation') == []
+
     def test_multipolygon_relation_id_does_not_collide_with_parts_relation(self, api):
         """courtyard を持つ outline が、同時に building:part の parent でもある場合。
 

@@ -8,6 +8,7 @@ plateau_importer2postgis.py のユニットテスト
 """
 
 import io
+import logging
 import os
 import shutil
 import textwrap
@@ -1123,3 +1124,94 @@ class TestPlateauIdCarriesTheElementType:
         nodes, buildings = self._parse(bare_importer, _HOLE_OSM)
         assert len(buildings) == 1
         assert buildings[0]['plateau_id'] == 'r-30'
+
+
+# ----------------------------------------------------------------------
+# 内側リングの最大本数を取り込みレポートに出す (importer source-fidelity task 4)
+# ----------------------------------------------------------------------
+
+class TestRingCountIsReported:
+    """内側リングの最大本数を取り込みログに出す。
+
+    API の way id 採番は環番号が 1000 未満であることを前提にしている。
+    取り込み側は何も捨てないので、本数が上限に近づいていないかを
+    人が見られるようにしておく。
+    """
+
+    def test_max_inner_ring_count_is_logged(self, bare_importer, caplog):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(_HOLE_OSM)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+
+        with caplog.at_level(logging.INFO):
+            importer.process_buildings_safe(all_nodes, buildings)
+
+        assert any('内側リングの最大本数' in r.message for r in caplog.records)
+        assert any('内側リングの最大本数: 1' in r.message for r in caplog.records)
+
+    def _many_ring_osm(self, inner_rings):
+        """内側リングを任意の本数だけ持つ multipolygon を組み立てる。"""
+        nodes, ways, members = [], [], []
+        nid = -1
+
+        def square(lat, lon, d):
+            nonlocal nid
+            refs = []
+            for dlat, dlon in ((0, 0), (d, 0), (d, d), (0, d)):
+                nodes.append(f'<node id="{nid}" lat="{lat + dlat}" lon="{lon + dlon}"/>')
+                refs.append(nid)
+                nid -= 1
+            return refs
+
+        outer = square(33.0, 133.0, 0.5)
+        ways.append('<way id="-10">'
+                    + ''.join(f'<nd ref="{r}"/>' for r in outer + outer[:1])
+                    + '</way>')
+        members.append('<member type="way" ref="-10" role="outer"/>')
+        for r in range(1, inner_rings + 1):
+            wid = -1000 - r
+            refs = square(33.0 + 0.0001 * r, 133.0 + 0.0001 * r, 0.00002)
+            ways.append(f'<way id="{wid}">'
+                        + ''.join(f'<nd ref="{x}"/>' for x in refs + refs[:1])
+                        + '</way>')
+            members.append(f'<member type="way" ref="{wid}" role="inner"/>')
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n<osm version="0.6">'
+            + ''.join(nodes) + ''.join(ways)
+            + '<relation id="-30">' + ''.join(members)
+            + '<tag k="type" v="multipolygon"/><tag k="building" v="yes"/></relation>'
+            + '</osm>'
+        )
+
+    def _process(self, bare_importer, xml):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(xml)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        return importer, importer.process_buildings_safe(all_nodes, buildings)
+
+    def test_building_with_1000_rings_is_still_imported(self, bare_importer):
+        """上限は API の制約なので、取り込みでは何も捨てない。
+
+        API が出力できない本数でも DB には入る。式を直せば次のリクエストから
+        出るという設計を、取り込み側で担保する。
+        """
+        xml = self._many_ring_osm(1000)
+        _, (buildings_data, nodes_data, _) = self._process(bare_importer, xml)
+        assert len(buildings_data) == 1, '環が多い建物が取り込みで捨てられている'
+        assert max(row[7] for row in nodes_data) == 1000, '環番号が 1000 まで無い'
+
+    def test_max_ring_count_reflects_1000_rings(self, bare_importer, caplog):
+        xml = self._many_ring_osm(1000)
+        with caplog.at_level(logging.INFO):
+            self._process(bare_importer, xml)
+        assert any('内側リングの最大本数: 1000' in r.message for r in caplog.records)

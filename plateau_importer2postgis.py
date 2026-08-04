@@ -714,6 +714,7 @@ class PlateauImporter2PostGIS:
             "error": 0,             # 例外発生
         }
         skipped_buildings = []  # スキップした建物の詳細記録
+        max_inner_rings = 0        # 観測した内側リングの最大本数
 
         for i, building in enumerate(all_buildings, 1):
             try:
@@ -735,6 +736,7 @@ class PlateauImporter2PostGIS:
                 # 既存の面積・重複チェック（下段）に任せるのでここでは判定しない。
                 ring_coords = []
                 building_nodes = []
+                max_inner_rings = max(max_inner_rings, len(building['rings']) - 1)
                 for ring_no, refs in enumerate(building['rings']):
                     ring_pts = []
                     ring_nodes = []
@@ -1001,6 +1003,7 @@ class PlateauImporter2PostGIS:
                     }
                     logger.info(f"     - {reason_labels.get(reason, reason)}: {count:,}件")
         logger.info(f"   総ノード: {len(nodes_data):,}件")
+        logger.info(f"   内側リングの最大本数: {max_inner_rings}")
 
         # スキップした建物の詳細をJSONファイルに出力
         if skipped_buildings:

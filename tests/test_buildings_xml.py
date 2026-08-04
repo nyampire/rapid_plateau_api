@@ -683,3 +683,73 @@ class TestValidStartDate:
         import osmfj_plateau_api as m
         assert m._valid_start_date('2020-05-01') is True
         assert m._valid_start_date('0001-01-01') is False
+
+
+class TestMultipolygonOutput:
+    """穴のある建物は type=multipolygon で返す。
+
+    タグは relation に付ける。変換器の出力形式と同じにする。
+    """
+
+    def _hole_building(self):
+        def ring(base, lat, lon, d, r):
+            return [{'id': base + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': r}
+                    for i, (la, lo) in enumerate([
+                        (lat, lon), (lat + d, lon), (lat + d, lon + d), (lat, lon + d)])]
+        return {
+            'id': 1, 'building': 'public', 'height': 14.6, 'building_part': None,
+            'parent_building_id': None,
+            'nodes': ring(100, 33.0, 133.0, 0.001, 0) + ring(200, 33.0003, 133.0003, 0.0004, 1),
+        }
+
+    def test_relation_is_multipolygon(self, api):
+        root = ET.fromstring(api.buildings_to_osm_xml([self._hole_building()]))
+        rel = root.find('relation')
+        assert rel is not None, 'relation が出ていない'
+        tags = {t.get('k'): t.get('v') for t in rel.findall('tag')}
+        assert tags.get('type') == 'multipolygon'
+        assert tags.get('building') == 'public'
+
+    def test_roles_are_outer_and_inner(self, api):
+        root = ET.fromstring(api.buildings_to_osm_xml([self._hole_building()]))
+        roles = sorted(m.get('role') for m in root.find('relation').findall('member'))
+        assert roles == ['inner', 'outer']
+
+    def test_ways_carry_no_building_tag(self, api):
+        root = ET.fromstring(api.buildings_to_osm_xml([self._hole_building()]))
+        for w in root.findall('way'):
+            tags = {t.get('k') for t in w.findall('tag')}
+            assert 'building' not in tags, 'タグは relation に付ける'
+
+    def test_building_without_hole_is_still_one_way(self, api):
+        b = self._hole_building()
+        b['nodes'] = [n for n in b['nodes'] if n['ring_id'] == 0]
+        root = ET.fromstring(api.buildings_to_osm_xml([b]))
+        assert root.find('relation') is None
+        assert len(root.findall('way')) == 1
+
+    def test_multipolygon_relation_id_does_not_collide_with_parts_relation(self, api):
+        """courtyard を持つ outline が、同時に building:part の parent でもある場合。
+
+        両方とも従来は RELATION_ID_OFFSET を共用していたため、同じ id の
+        <relation> が 2 つ出てしまっていた (type=multipolygon と
+        type=building)。別 offset (MULTIPOLYGON_RELATION_ID_OFFSET) を割り
+        当てて解消したことを確認する。
+        """
+        outline = self._hole_building()  # id=1, 穴あり, parent_building_id=None
+        part = {
+            'id': 2, 'building': None, 'height': 5.0, 'building_part': 'yes',
+            'parent_building_id': 1,
+            'nodes': [{'id': 300 + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': 0}
+                      for i, (la, lo) in enumerate([
+                          (33.0, 133.0), (33.0002, 133.0), (33.0002, 133.0002), (33.0, 133.0002)])],
+        }
+        root = ET.fromstring(api.buildings_to_osm_xml([outline, part]))
+        relations = root.findall('relation')
+        ids = [r.get('id') for r in relations]
+        assert len(ids) == len(set(ids)), f'relation id が重複している: {ids}'
+
+        types = sorted(
+            t.get('v') for r in relations for t in r.findall('tag') if t.get('k') == 'type'
+        )
+        assert types == ['building', 'multipolygon']

@@ -27,6 +27,10 @@ plateau_importer2postgis.py  ダウンロードしたデータを PostGIS にイ
 osmfj_plateau_api.py         PostGIS から Rapid 向けに OSM XML を配信 (FastAPI)
 ```
 
+取り込みの入力は citygml-osm が CityGML から変換した `.osm` である。
+その出力の性質と、取り込み側でどこまで対処できるかは
+[docs/converter-output.md](docs/converter-output.md) にまとめてある。
+
 ## 必要環境
 
 - Python 3.9+

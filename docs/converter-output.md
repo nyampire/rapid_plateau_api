@@ -45,6 +45,7 @@ javadoc に明記された意図的な設計で、v2.3.1 から変わってい�
 | **`outer` を持たない multipolygon が出る** | **直せない** — 保存する外形が存在しない |
 | **合成外形にしか無いタグがある** | **ほぼ影響なし** — 実測で大半は他の要素にも同じ値がある |
 | **余分な合成 part ができる (上流 #151)** | **未対処** — 判別する手立てが無い |
+| **Lod1Solid 由来の巨大 part が独立して出る** | **API 出口で対処中** — #33 で判定条件を定めている |
 
 以下、「直せない」「未対処」のものを詳しく書く。
 
@@ -117,6 +118,25 @@ WARNING を出してスキップする。
 
 ---
 
+## Lod1Solid 由来の巨大 part
+
+CityGML の `lod1Solid` (建物全体の押し出し) が、独立した `building:part` として出力されることがある。
+outline とほぼ同じ位置・形状・高さ・階数を持つので、`type=building` の relation の中で
+outline と巨大 part が並ぶ形になる。
+
+OSM の [Simple 3D buildings](https://wiki.openstreetmap.org/wiki/Simple_3D_buildings) は
+立体どうしが共通面を持って重なることを避けるとしているので、この形は慣習に沿わない。
+
+DB 全体 (12.66M outline) の調査では約 18 万 outline (1.4%) が該当する。
+判定条件と対処は [#33](https://github.com/nyampire/rapid_plateau_api/issues/33) にある。
+outline との重心距離とハウスドルフ距離が小さいことが決め手で、
+これで本物の wing (別位置の棟) と分離できる。
+
+上流 #149 の修正 (`lod1Solid` があるとき `lod2Solid` と `bldg:boundedBy` を無視する) は
+このパターンには効かない。ローカルの jar で再現を確認している。**上流に未報告。**
+
+---
+
 ## 余分な合成 part (上流 #151)
 
 作者は v3.0.6 で解決と回答しているが、報告者が挙げた周南市の 4 建物
@@ -145,6 +165,10 @@ part が 7 個 (実在 4 + 合成 3) 出力され、報告内容と一致した�
 **multipolygon には建物 ID が 1 つも付かない。**
 元データ側は欠かしていない (周南市・毛呂山町の実測でいずれも欠落 0) ので、変換の過程で置き換わっている。
 
+この挙動は上流 [#150](https://github.com/yuuhayashi/citygml-osm/issues/150) に挙がっている。
+同じ周南市 51310655 のメッシュが例として使われており、v3 で中空部分を multipolygon に変換する
+ようにした結果だと作者が説明している。**こちらから報告することは無い。**
+
 ### 影響
 
 DB の `plateau_buildings.ref_mlit_plateau` 列に **2 系統の識別子が混ざる**。
@@ -167,6 +191,28 @@ DB の `plateau_buildings.ref_mlit_plateau` 列に **2 系統の識別子が混�
 
 コホート比較では、上流データも同種の不整合を同オーダーで持つ (1.67% 対 自前 3.0.6 で 1.15%)。
 **再取り込みを済ませれば、この不確かさ自体が消える。**
+
+---
+
+## 上流 Issue との対応 (2026-08-06 時点)
+
+上流リポジトリは [yuuhayashi/citygml-osm](https://github.com/yuuhayashi/citygml-osm)。
+**報告する前にこの表を確認する。**同じことが既に挙がっていることがある。
+
+| この文書で扱っていること | 上流 Issue | 状態 |
+|---|---|---|
+| multipolygon の識別子が `gml:id` になる | [#150](https://github.com/yuuhayashi/citygml-osm/issues/150) OPEN | **既出。**例が周南市 51310655 で本文書の実測と同じデータ。v3 で multipolygon 変換を入れた結果と作者が説明済み |
+| `building` / `building:part` のキーが不安定 | [#146](https://github.com/yuuhayashi/citygml-osm/issues/146) / [#147](https://github.com/yuuhayashi/citygml-osm/issues/147) OPEN | 症状は既出。ただし**向きが逆**で、上流は「`building:part` であるべき way が `building` になっている」を報告している |
+| 余分な合成 part | [#151](https://github.com/yuuhayashi/citygml-osm/issues/151) CLOSED | 「v3.0.6 で解決」とあるが**再現する**。未報告 |
+| `outer` を持たない multipolygon | 該当なし | 未報告 |
+| Lod1Solid 由来の巨大 part | 該当なし | 未報告 |
+
+### 報告しないと決めたもの
+
+**融合の設計そのもの。** 接する独立建物を 1 つの relation にまとめる挙動は javadoc に明記された
+意図的な設計で、上流のテスト 8 件がそれを固定している。
+不具合報告ではなく設計変更の提案になるため、こちらからは持ち込まない。
+取り込み側で選別する形で完結させている。
 
 ---
 

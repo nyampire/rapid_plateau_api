@@ -1567,3 +1567,83 @@ class TestTwinMultipolygonAndWayAreOneBuilding:
         assert xml != _TWIN_OSM, '置換対象の文字列が一致していない'
         buildings_data, _, _ = self._rows(bare_importer, xml)
         assert len(buildings_data) == 2, 'リングが違うのに統合されている'
+
+
+class TestCitygmlOsmCourtyardFixtures:
+    """中庭のある建物まわりの出力 contract を固定する。
+
+    上流 citygml-osm のコードをそのまま使う方針なので、バージョンを上げると
+    出力が変わりうる。**本当の risk は取り込み側の仮定ではなく、変換器の出力が
+    黙って変わること。**とくに「合成外形は建物 ID を持たない」は上流 #149 が
+    `newOutline.removeTag` を削除しており崩れうる。崩れると実在しない建物が
+    DB に入るが、今それを検出する手段が無い。
+
+    fixture が失敗したら、まず変換器の出力が変わっていないかを疑うこと。
+    測り直す手順は docs/converter-output.md にある。
+
+    **落ちるのは「こちらが壊れる変化」だけである。**出力を 4 通りに変えて確かめた:
+    二重出力がやむ / 型が `building:part` の値から消える / `outer` 無しに outer が付く
+    の 3 つは落ちる。降格がやんで `building` キーが戻る変化は落ちない。
+    取り込みは `building` と `building:part` の両方を受けるので困らないからである。
+    回避策を撤去してよいかの判断は、実データで twin が 0 件になったかで行う。
+    """
+
+    FIX = (Path(__file__).parent / 'fixtures' / 'citygml-osm'
+           / 'v3_courtyard_shapes.osm')
+
+    def _rows(self, bare_importer):
+        importer = bare_importer(citycode='35215')
+        nodes, buildings = importer.parse_osm_file_safe(self.FIX)
+        key = importer._file_key(self.FIX)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        return importer.process_buildings_safe(all_nodes, buildings)
+
+    def _by_name(self, buildings_data, name):
+        hits = [r for r in buildings_data
+                if any(isinstance(x, str) and x == name for x in r)]
+        return hits
+
+    def test_the_fixture_parses_and_yields_the_expected_buildings(self, bare_importer):
+        """fixture が壊れていると、以下の「無いこと」を見る検査が空振りで通る。
+
+        XML が読めないと parse_osm_file_safe は WARNING を出して空を返すだけなので、
+        件数を先に固定しておく。中庭建物 1 棟 + 型つき way 1 棟 = 2 棟。
+        """
+        rows, _, _ = self._rows(bare_importer)
+        assert len(rows) == 2, f'fixture から {len(rows)} 棟。XML が壊れていないか確認'
+
+    def test_demoted_multipolygon_is_a_building(self, bare_importer):
+        """A: building キーが無くても建物として扱う。"""
+        rows, _, _ = self._rows(bare_importer)
+        assert self._by_name(rows, 'テスト中庭建物'), '降格した中庭建物が落ちている'
+
+    def test_the_twin_pair_is_one_building_with_its_hole_and_id(self, bare_importer):
+        """B: 形は multipolygon から、識別子は way から。1 棟にまとまる。"""
+        rows, _, _ = self._rows(bare_importer)
+        hits = self._by_name(rows, 'テスト中庭建物')
+        assert len(hits) == 1, f'二重出力が {len(hits)} 棟になっている'
+        assert hits[0][8].count('(') >= 3, '中庭が塗り潰されている'
+        assert '35215-bldg-25793' in hits[0], '建物 ID が gml:id に置き換わっている'
+
+    def test_the_type_comes_from_the_building_part_value(self, bare_importer):
+        """C: 融合はキーだけを変えて値は残す。"""
+        rows, _, _ = self._rows(bare_importer)
+        hits = [r for r in rows if '35215-bldg-11111' in r]
+        assert len(hits) == 1
+        assert hits[0][1] == 'house', f'型が {hits[0][1]!r} に潰れている'
+
+    def test_a_multipolygon_without_an_outer_is_skipped(self, bare_importer):
+        """D: 外形が無いので保存できない。落ちずにスキップすること。"""
+        rows, _, _ = self._rows(bare_importer)
+        assert not self._by_name(rows, '外形のない建物'), (
+            '外形の無い multipolygon から建物が作られている')
+
+    def test_the_upstream_extensions_are_still_ignored(self, bare_importer):
+        """`area` / `fix` / `visible` / `<complete>` は OSM のタグではない。"""
+        importer = bare_importer(citycode='35215')
+        _, buildings = importer.parse_osm_file_safe(self.FIX)
+        for b in buildings:
+            for k in ('area', 'fix', 'visible', 'complete'):
+                assert k not in b['tags'], f'{k} がタグとして読まれている'

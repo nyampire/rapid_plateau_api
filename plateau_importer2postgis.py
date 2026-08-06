@@ -19,6 +19,7 @@ import logging
 from typing import List, Dict, Tuple, Set, Optional
 import time
 import hashlib
+import math
 import re
 from collections import defaultdict
 
@@ -32,6 +33,39 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# 極小ポリゴンとみなす面積の上限 (m²)。
+#
+# 本番 1,489 万棟の実データの最小面積は 0.3 m² なので、この値は実データに触れない。
+# 1 m² 未満の 2,264 件を無作為に抽出して細長さ (周長 ÷ √面積) を測ると 4.0〜8.1 で、
+# 正方形の 4.0 に近い。degenerate な細片なら数十から数百になる。
+# つまり本番に degenerate な多角形は無く、この番人が実際に捕まえるものは存在しない。
+# それでも面積ゼロに近い多角形は PostGIS 上も無効になるので、番人としては残す。
+TINY_AREA_M2 = 0.1
+
+# 緯度 1 度あたりの距離 (m)。建物規模では緯度による変化を無視できる。
+_METERS_PER_DEGREE_LAT = 111320.0
+
+
+def _triangle_area_m2(coords):
+    """三角形の面積を m² で返す。
+
+    `coords` は (lon, lat) のタプルの列で、先頭 3 点を使う。
+
+    座標が経緯度なので、shoelace をそのまま使うと単位が度の二乗になる。
+    緯度 1 度はおよそ 111,320 m、経度 1 度は緯度によって縮む (111,320 × cos(緯度))。
+    建物規模の多角形なら、この補正で誤差は 1% を大きく下回る。
+
+    PostGIS を使う案は、この判定が INSERT の前に走るので合わない。
+    shapely や pyproj を足す案は、importer が標準ライブラリと psycopg2 だけで
+    動いている構成を崩す。
+    """
+    (x1, y1), (x2, y2), (x3, y3) = coords[0], coords[1], coords[2]
+    area_deg2 = abs((x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)) / 2)
+    lat_rad = math.radians((y1 + y2 + y3) / 3)
+    meters_per_degree_lon = _METERS_PER_DEGREE_LAT * math.cos(lat_rad)
+    return area_deg2 * _METERS_PER_DEGREE_LAT * meters_per_degree_lon
+
 
 class PlateauImporter2PostGIS:
     def __init__(self,
@@ -793,14 +827,14 @@ class PlateauImporter2PostGIS:
 
                     # 面積チェック（極小ポリゴン除外）
                     if len(coords) >= 4:
-                        # 簡易面積計算
                         area_check = True
+                        area = None
                         if len(coords) == 4:  # 三角形
-                            x1, y1 = coords[0]
-                            x2, y2 = coords[1]
-                            x3, y3 = coords[2]
-                            area = abs((x1*(y2-y3) + x2*(y3-y1) + x3*(y1-y2))/2)
-                            if area < 0.000001:  # 極小面積
+                            # 従来はここで度の二乗のまま 1e-6 と比べていた。
+                            # 1e-6 度² は緯度 34 度でおよそ 10,190 m² にあたり、
+                            # 1 万 m² 未満の三角形がすべて落ちていた (#44)。
+                            area = _triangle_area_m2(coords)
+                            if area < TINY_AREA_M2:
                                 area_check = False
 
                         if area_check:

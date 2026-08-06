@@ -91,6 +91,49 @@ WARNING を出してスキップする。
 
 **上流に未報告。**原因の確定まで保留 (「報告の進め方」参照)。
 
+### 原因 (2026-08-06 特定、citygml-osm 3.0.6 素のビルドで確認)
+
+`CityModelParser` の `gml:exterior` の処理にある。
+
+```java
+else {
+    // Issue #137: 同じ位置の solid way が既にある外形は捨てる
+    this.osm.removeWay(elementWay);
+    this.elementWay = null;          // ← ここで null になる
+}
+...
+if ((multipolygon != null) && (elementWay != null)) {
+    ...
+    this.multipolygon.addMember(outer, "outer");   // ← 通らない
+}
+```
+
+外形が Issue #137 の重複判定で捨てられると `elementWay` が null になり、
+**multipolygon に `outer` が付かない**。`gml:interior` 側は後から `inner` を足すので、
+穴だけを持つ multipolygon が残る。
+
+計測で確認した事実 (周南市 51311567、1 メッシュ):
+
+- `EXTERIOR DROPPED` は 182 回起きる。**そのうち出力に outer 無しで残るのは 1 件だけ**
+- 残り 181 件は後段で `outer` を付け直されるか、`BuildingGarbage` に回収される
+- 問題の relation は `outer` を**付けられたことも外されたこともない** (計測で両方 0 件)。
+  `addMember` の `way == null` による黙った取りこぼしでもない (0 件)
+
+**最初は `OutlineFactory` の inner 追加ループが原因だと読んだが、そこに guard を入れても
+出力は 1 バイトも変わらなかった。**読みだけで決めず、計測して原因に行き着いた。
+
+### 直せる見込み
+
+**ある。**原因が 1 箇所に特定でき、素のビルドで再現・計測できている。
+考えられる直し方は 2 つ。
+
+1. 外形を捨てるとき、同じ位置にある既存の way を `outer` に使う
+   (`existSamePositionWay` は真偽しか返さないので、該当 way を取れるようにする必要がある)
+2. 外形を捨てた multipolygon は組み立てをやめる
+
+どちらも上流のテストを壊さないかの確認が要る。ベースラインは 110 件中 4 件失敗
+(コードではなく、テストが参照する gml がリポジトリに無いことによる)。
+
 ---
 
 ## 合成外形にしか無いタグ
@@ -203,7 +246,7 @@ DB の `plateau_buildings.ref_mlit_plateau` 列に **2 系統の識別子が混�
 
 | 現象 | 取り込みでの回避 | 変換器で直すと |
 |---|---|---|
-| `outer` を持たない multipolygon が出る | **回避できない**。保存する外形が無い | 唯一の解。取り込みは何も変えなくてよい |
+| `outer` を持たない multipolygon が出る | **回避できない**。保存する外形が無い | 唯一の解。**原因は特定済み** (Issue #137 の重複判定で `elementWay` が null になる) |
 | 同じ建物を way と multipolygon の 2 つで出す | 統合できる (下記) | 統合の仕組みごと不要になる |
 | multipolygon に建物 ID でなく `gml:id` が付く | twin がある 27/40 でのみ回復できる。**残り 13 は回復できない** | 識別子が 1 系統になり、`ref_mlit_plateau` の 2 系統問題も消える |
 | 中庭のある建物が `building:part` に降格する | 値を型として読めば回避できる | タグの意味が素直になる。上流 #146 / #147 と同じ領域 |

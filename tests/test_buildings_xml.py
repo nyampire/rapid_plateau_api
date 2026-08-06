@@ -448,6 +448,11 @@ def _make_part(part_id, parent_id, **tags):
         'nodes': nodes,
         'building_part': 'yes',
         'parent_building_id': parent_id,
+        # Default to a normal, valid child row: it intersects its parent
+        # outline. Orphan parts (parent_id=None) get intersects_parent=None
+        # below since they have no parent to test against; tests exercising
+        # the drop-on-NULL/False behavior pass intersects_parent explicitly.
+        'intersects_parent': None if parent_id is None else True,
     }
     d.update(tags)
     return d
@@ -683,3 +688,105 @@ class TestValidStartDate:
         import osmfj_plateau_api as m
         assert m._valid_start_date('2020-05-01') is True
         assert m._valid_start_date('0001-01-01') is False
+
+
+class TestDropPartsNotIntersectingParent:
+    """記録上の親と交差しない部分立体は出力しない。
+
+    importer の way 番号衝突により、部分立体が数 km 離れた別の建物に
+    紐づいている行が本番に 16,175 件ある。そのまま出すと、小さな範囲の
+    要求に対して遠方のジオメトリが返る。
+    """
+
+    def _square(self, base_id, lat, lon, d=0.0002):
+        return [
+            {'id': base_id + i, 'lat': la, 'lon': lo, 'sequence_id': i}
+            for i, (la, lo) in enumerate([
+                (lat, lon), (lat + d, lon), (lat + d, lon + d), (lat, lon + d)
+            ])
+        ]
+
+    def test_non_intersecting_part_is_not_emitted(self, api):
+        buildings = [
+            {'id': 1, 'building': 'yes', 'building_part': None,
+             'parent_building_id': None, 'intersects_parent': None,
+             'nodes': self._square(100, 33.0, 133.0)},
+            {'id': 2, 'building': None, 'building_part': 'yes',
+             'parent_building_id': 1, 'intersects_parent': False,
+             'nodes': self._square(200, 34.0, 134.0)},
+        ]
+
+        root = ET.fromstring(api.buildings_to_osm_xml(buildings))
+
+        way_ids = {w.get('id') for w in root.findall('way')}
+        assert '-2' not in way_ids
+        assert '-1' in way_ids
+
+    def test_intersecting_part_is_kept(self, api):
+        buildings = [
+            {'id': 1, 'building': 'yes', 'building_part': None,
+             'parent_building_id': None, 'intersects_parent': None,
+             'nodes': self._square(100, 33.0, 133.0)},
+            {'id': 2, 'building': None, 'building_part': 'yes',
+             'parent_building_id': 1, 'intersects_parent': True,
+             'nodes': self._square(200, 33.0, 133.0, d=0.0001)},
+        ]
+
+        root = ET.fromstring(api.buildings_to_osm_xml(buildings))
+
+        way_ids = {w.get('id') for w in root.findall('way')}
+        assert '-2' in way_ids
+
+    def test_part_with_null_intersects_parent_is_still_emitted(self, api):
+        # ST_Intersects returns NULL (not false) when a geometry involved is
+        # NULL. NULL means "cannot tell", not "does not intersect". The OSM
+        # output is built from the node ring, not from `geom`, so a part with
+        # a broken or missing `geom` still emits correctly — dropping it would
+        # discard sound data. tests/test_representative_point.py pins the same
+        # contract end to end against a real database.
+        buildings = [
+            {'id': 1, 'building': 'yes', 'building_part': None,
+             'parent_building_id': None, 'intersects_parent': None,
+             'nodes': self._square(100, 33.0, 133.0)},
+            {'id': 2, 'building': None, 'building_part': 'yes',
+             'parent_building_id': 1, 'intersects_parent': None,
+             'nodes': self._square(200, 34.0, 134.0)},
+        ]
+
+        root = ET.fromstring(api.buildings_to_osm_xml(buildings))
+
+        way_ids = {w.get('id') for w in root.findall('way')}
+        assert '-2' in way_ids
+        assert '-1' in way_ids
+
+    def test_outline_row_with_null_intersects_parent_is_still_emitted(self, api):
+        # Outlines carry intersects_parent = None by design (they have no
+        # parent to intersect against) and must never be dropped.
+        buildings = [
+            {'id': 1, 'building': 'yes', 'building_part': None,
+             'parent_building_id': None, 'intersects_parent': None,
+             'nodes': self._square(100, 33.0, 133.0)},
+        ]
+
+        root = ET.fromstring(api.buildings_to_osm_xml(buildings))
+
+        way_ids = {w.get('id') for w in root.findall('way')}
+        assert '-1' in way_ids
+
+    def test_orphan_part_with_null_intersects_parent_is_still_emitted(self, api):
+        # Orphan parts (building_part='yes', parent_building_id None) also
+        # carry intersects_parent = None by design — they have no recorded
+        # parent to test against. Their handling is a separate open issue
+        # and must be unaffected by this fix.
+        buildings = [
+            {'id': 2, 'building': None, 'building_part': 'yes',
+             'parent_building_id': None, 'intersects_parent': None,
+             'nodes': self._square(200, 34.0, 134.0)},
+        ]
+
+        root = ET.fromstring(api.buildings_to_osm_xml(buildings))
+
+        way_ids = {w.get('id') for w in root.findall('way')}
+        assert '-2' in way_ids
+
+

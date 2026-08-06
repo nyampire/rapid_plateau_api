@@ -1,0 +1,99 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!--
+  Synthetic citygml-osm v3.x output snippet: the courtyard-building shapes
+  measured on Shunan (35215) with citygml-osm 3.0.6 in 2026-08.
+
+  Pins four properties the importer depends on. If an upstream version bump
+  changes any of them, TestCitygmlOsmCourtyardFixtures fails instead of the
+  change landing silently in a reimport.
+
+  A. Demoted multipolygon (-300)
+     Fusion demotes a courtyard building to `building:part`. It carries no
+     `building` key. Treating that as "not a building" drops the whole
+     building: its outer/inner member ways carry no tags, so they are dropped
+     too. 44 of 161 multipolygons were demoted in the measured city.
+
+  B. Twin pair (-200 way / -300 relation)
+     The same building is emitted twice: a way with the flattened ring and the
+     `uro:buildingID`, and a multipolygon with the hole and only the `gml:id`.
+     Each carries what the other lacks. 27 of 40 demoted multipolygons had a
+     twin; all 27 matched the same source building.
+     Note the twin's ring starts at a different node and runs the other way
+     round; ring comparison must absorb both.
+
+  C. Type carried in the `building:part` value (-400)
+     Fusion changes the key but keeps the value. `building:part=house` ways had
+     source usage 411, exactly like `building=house` ways, across all 12 types.
+
+  D. Multipolygon with no `outer` member (-600)
+     The converter sometimes emits inner rings with no outer. Nothing can be
+     stored; the importer must warn and skip rather than crash or invent a
+     shape. 4 of 161 in the measured city.
+-->
+<osm version='0.6' generator='citygml-osm 3.0.6'>
+  <bounds minlat='34.04' minlon='131.81' maxlat='34.05' maxlon='131.82' />
+
+  <!-- A/B: courtyard building, emitted twice -->
+  <node id='-10' visible='true' lat='34.04010' lon='131.81010' />
+  <node id='-11' visible='true' lat='34.04020' lon='131.81010' />
+  <node id='-12' visible='true' lat='34.04020' lon='131.81020' />
+  <node id='-13' visible='true' lat='34.04010' lon='131.81020' />
+  <node id='-14' visible='true' lat='34.04013' lon='131.81013' />
+  <node id='-15' visible='true' lat='34.04017' lon='131.81013' />
+  <node id='-16' visible='true' lat='34.04017' lon='131.81017' />
+  <node id='-17' visible='true' lat='34.04013' lon='131.81017' />
+
+  <!-- the flattened twin: has the building ID, has lost the hole -->
+  <way id='-200' area='yes' fix='3' visible='true'>
+    <nd ref='-10'/><nd ref='-11'/><nd ref='-12'/><nd ref='-13'/><nd ref='-10'/>
+    <tag k='building:part' v='public'/>
+    <tag k='name' v='テスト中庭建物'/>
+    <tag k='height' v='10.9'/>
+    <tag k='ref:MLIT_PLATEAU' v='35215-bldg-25793'/>
+  </way>
+  <!-- the multipolygon's outer: same ring, different start node and direction -->
+  <way id='-201' area='yes' visible='true'>
+    <nd ref='-12'/><nd ref='-11'/><nd ref='-10'/><nd ref='-13'/><nd ref='-12'/>
+  </way>
+  <way id='-202' area='yes' visible='true'>
+    <nd ref='-14'/><nd ref='-15'/><nd ref='-16'/><nd ref='-17'/><nd ref='-14'/>
+  </way>
+  <relation id='-300' visible='true'>
+    <member type='way' ref='-201' role='outer'/>
+    <member type='way' ref='-202' role='inner'/>
+    <tag k='type' v='multipolygon'/>
+    <tag k='building:part' v='public'/>
+    <tag k='name' v='テスト中庭建物'/>
+    <tag k='height' v='10.9'/>
+    <tag k='ref:MLIT_PLATEAU' v='bldg_2621ed43-ee4a-45ff-87b5-3fb42e2f8f05'/>
+    <complete>true</complete>
+  </relation>
+
+  <!-- C: demoted way whose type lives in the building:part value -->
+  <node id='-20' visible='true' lat='34.04030' lon='131.81030' />
+  <node id='-21' visible='true' lat='34.04040' lon='131.81030' />
+  <node id='-22' visible='true' lat='34.04040' lon='131.81040' />
+  <node id='-23' visible='true' lat='34.04030' lon='131.81040' />
+  <way id='-400' area='yes' visible='true'>
+    <nd ref='-20'/><nd ref='-21'/><nd ref='-22'/><nd ref='-23'/><nd ref='-20'/>
+    <tag k='building:part' v='house'/>
+    <tag k='height' v='6.2'/>
+    <tag k='ref:MLIT_PLATEAU' v='35215-bldg-11111'/>
+  </way>
+
+  <!-- D: multipolygon with inner rings only, no outer -->
+  <node id='-30' visible='true' lat='34.04050' lon='131.81050' />
+  <node id='-31' visible='true' lat='34.04055' lon='131.81050' />
+  <node id='-32' visible='true' lat='34.04055' lon='131.81055' />
+  <node id='-33' visible='true' lat='34.04050' lon='131.81055' />
+  <way id='-500' area='yes' visible='true'>
+    <nd ref='-30'/><nd ref='-31'/><nd ref='-32'/><nd ref='-33'/><nd ref='-30'/>
+  </way>
+  <relation id='-600' visible='true'>
+    <member type='way' ref='-500' role='inner'/>
+    <tag k='type' v='multipolygon'/>
+    <tag k='building:part' v='yes'/>
+    <tag k='name' v='外形のない建物'/>
+    <tag k='height' v='14.6'/>
+  </relation>
+</osm>

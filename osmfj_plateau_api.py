@@ -182,13 +182,22 @@ class OSMFJPlateauAPI:
                         b.parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
-                        COUNT(*) OVER () AS pre_dedup_count
+                        COUNT(*) OVER () AS pre_dedup_count,
+                        NULL::boolean AS intersects_parent
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
                       AND b.building_part IS NULL
                       {city_boundary_filter}
                     ORDER BY {dedup_key}, {dedup_tiebreaker}
                     LIMIT %s
+                ),
+                bbox_outline_geom AS (
+                    -- 交差判定と包含判定に外形のジオメトリが要る。
+                    -- bbox_outlines に geom を足すと UNION ALL の列が増えて
+                    -- Python まで運ばれるので、判定用に別で引く。
+                    SELECT bo.id, ST_MakeValid(pb.geom) AS geom
+                    FROM bbox_outlines bo
+                    JOIN plateau_buildings pb ON pb.id = bo.id
                 ),
                 related_parts AS (
                     -- 上記 outline に紐づく part (bbox 内外を問わず全て)
@@ -201,9 +210,10 @@ class OSMFJPlateauAPI:
                         b.parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
-                        0 AS pre_dedup_count
+                        0 AS pre_dedup_count,
+                        ST_Intersects(ST_MakeValid(b.geom), g.geom) AS intersects_parent
                     FROM plateau_buildings b
-                    WHERE b.parent_building_id IN (SELECT id FROM bbox_outlines)
+                    JOIN bbox_outline_geom g ON g.id = b.parent_building_id
                 ),
                 orphan_parts AS (
                     -- bbox 内で relation 無しの building:part
@@ -217,7 +227,8 @@ class OSMFJPlateauAPI:
                         b.parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
-                        0 AS pre_dedup_count
+                        0 AS pre_dedup_count,
+                        NULL::boolean AS intersects_parent
                     FROM plateau_buildings b
                     WHERE b.building_part = 'yes'
                       AND b.parent_building_id IS NULL
@@ -246,6 +257,7 @@ class OSMFJPlateauAPI:
                     ub.parent_building_id,
                     ub.representative_point,
                     ub.pre_dedup_count,
+                    ub.intersects_parent,
                     bn.nodes
                 FROM all_buildings ub
                 LEFT JOIN LATERAL (
@@ -444,6 +456,36 @@ class OSMFJPlateauAPI:
         processed_buildings = 0
         total_nodes_created = 0
 
+        # importer の way 番号衝突により、部分立体が別のメッシュの外形に
+        # 紐づいている行がある。記録上の親と交差しないものは親子ではありえない
+        # ので出力しない。本番では 43,280 件の親子の不整合のうち 16,175 件が
+        # これで、重心距離は中央値 1,786m、最大 30,258m。#41 で importer は
+        # 修正済みだが、既存データは再取り込みまで残る。
+        #
+        # 撤去条件: 全都市の再取り込みが済み、本番で下記が 0 件になったとき。
+        #   SELECT count(*) FROM plateau_buildings p
+        #   JOIN plateau_buildings o ON p.parent_building_id = o.id
+        #   WHERE p.building_part IS NOT NULL AND o.building_part IS NULL
+        #     AND NOT ST_Intersects(ST_MakeValid(p.geom), ST_MakeValid(o.geom));
+        # 除外件数をログに出しているのは、応答側でも発火しなくなったことを
+        # 確認できないと撤去に踏み切れないため。
+        #
+        # intersects_parent は True/False/NULL の三値。落とすのは False だけで、
+        # NULL は落とさない。NULL は ST_Intersects が入力ジオメトリの一方
+        # (または両方) が NULL のときに返す値で、「交差していない」ではなく
+        # 「判定できない」を意味する。geom 列が壊れていてもノード列が正常なら
+        # 出力は正しく作れるため、判定できないことを理由に建物を捨てると正常な
+        # データを失う (tests/test_representative_point.py が固定している契約)。
+        # 外形行と孤立部分立体も設計上 NULL を持つ。
+        dropped_far_parts = 0
+        kept_buildings = []
+        for b in buildings:
+            if b.get('intersects_parent') is False:
+                dropped_far_parts += 1
+                continue
+            kept_buildings.append(b)
+        buildings = kept_buildings
+
         for building in buildings:
             try:
                 nodes = building.get('nodes', [])
@@ -592,6 +634,9 @@ class OSMFJPlateauAPI:
             f"XML生成完了: {processed_buildings}件 (way: {len(all_ways)}, "
             f"relation: {len(all_relations)}), {total_nodes_created}ノード"
         )
+        # 0 件のときも出す。撤去してよいかは「発火しなくなったこと」で判断する
+        # ので、0 が記録に残らないと不在を証明できない。
+        logger.info(f"出口補正: 親と交差しない部分立体を除外 {dropped_far_parts}件")
 
         try:
             xml_string = ET.tostring(osm, encoding='unicode', method='xml')

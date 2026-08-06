@@ -1310,3 +1310,152 @@ class TestTriangleImport:
         # 底辺 0.9 m (0.00001 度)、高さ 0.11 m (0.000001 度) で約 0.05 m²
         buildings_data, _, _ = self._import(bare_importer, 0.00001, 0.000001)
         assert len(buildings_data) == 0, 'degenerate な三角形が取り込まれている'
+
+
+# ----------------------------------------------------------------------
+# 融合で building:part に降格した建物 (#39 の続き)
+# ----------------------------------------------------------------------
+
+_DEMOTED_MP_OSM = textwrap.dedent("""\
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="-1" lat="33.0" lon="133.0"/>
+  <node id="-2" lat="33.001" lon="133.0"/>
+  <node id="-3" lat="33.001" lon="133.001"/>
+  <node id="-4" lat="33.0" lon="133.001"/>
+  <node id="-5" lat="33.0003" lon="133.0003"/>
+  <node id="-6" lat="33.0007" lon="133.0003"/>
+  <node id="-7" lat="33.0007" lon="133.0007"/>
+  <node id="-8" lat="33.0003" lon="133.0007"/>
+  <way id="-10">
+    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
+  </way>
+  <way id="-20">
+    <nd ref="-5"/><nd ref="-6"/><nd ref="-7"/><nd ref="-8"/><nd ref="-5"/>
+  </way>
+  <relation id="-30">
+    <member type="way" ref="-10" role="outer"/>
+    <member type="way" ref="-20" role="inner"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="building:part" v="public"/>
+    <tag k="name" v="市立秋月小学校"/>
+    <tag k="height" v="17.4"/>
+  </relation>
+</osm>
+""")
+
+
+class TestDemotedMultipolygonIsABuilding:
+    """融合は中庭のある建物を building:part に降格させる。
+
+    降格しても実在建物であることは変わらない。`building` キーが無いことを理由に
+    落とすと、建物ごと DB から消える。周南市 81 メッシュの実測では
+    multipolygon 161 個のうち 44 個が降格しており、そのうち 12 個は形も
+    どこにも残らず、6 個は名前も失われていた。学校・病院・特養が含まれる。
+
+    way 側の判定 (`is_building or is_part`) は元から両方を受けている。
+    multipolygon 側だけが `building` キーを要求していた非対称を揃える。
+    """
+
+    def _rows(self, bare_importer, xml=_DEMOTED_MP_OSM):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(xml)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        return importer.process_buildings_safe(all_nodes, buildings)
+
+    def test_demoted_multipolygon_is_collected(self, bare_importer):
+        buildings_data, _, _ = self._rows(bare_importer)
+        assert len(buildings_data) == 1, '降格した中庭建物が取り込まれていない'
+
+    def test_it_keeps_its_courtyard(self, bare_importer):
+        buildings_data, _, _ = self._rows(bare_importer)
+        wkt = buildings_data[0][8]
+        assert wkt.count('(') >= 3, f'内側リングが無い: {wkt[:80]}'
+
+    def test_its_name_reaches_the_database(self, bare_importer):
+        buildings_data, _, _ = self._rows(bare_importer)
+        assert '市立秋月小学校' in buildings_data[0], '名前が保存されていない'
+
+
+class TestDemotedTypeIsTheBuildingType:
+    """変換器は融合のときキーだけを building から building:part に変え、値は残す。
+
+    周南市 81 メッシュ・66,319 棟の実測で、`building:part=house` の way は
+    元データの用途 411、`building=house` の way も 411 と一致した。
+    12 の型すべてで最頻用途が一致する。値の読み替えは推測ではない。
+    """
+
+    def _building_value(self, bare_importer, tags_xml):
+        importer = bare_importer(citycode='35215')
+        original = '    <tag k="building:part" v="public"/>\n'
+        assert original in _DEMOTED_MP_OSM, '置換対象の文字列が一致していない'
+        xml = _DEMOTED_MP_OSM.replace(original, tags_xml)
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(xml)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        buildings_data, _, _ = importer.process_buildings_safe(all_nodes, buildings)
+        assert buildings_data, '建物が取り込まれていない'
+        return buildings_data[0][1]
+
+    def test_demoted_type_becomes_the_building_type(self, bare_importer):
+        assert self._building_value(
+            bare_importer, '    <tag k="building:part" v="public"/>\n') == 'public'
+
+    def test_demoted_yes_stays_yes(self, bare_importer):
+        assert self._building_value(
+            bare_importer, '    <tag k="building:part" v="yes"/>\n') == 'yes'
+
+    def test_building_tag_wins_when_both_are_present(self, bare_importer):
+        assert self._building_value(
+            bare_importer,
+            '    <tag k="building" v="school"/>\n'
+            '    <tag k="building:part" v="public"/>\n') == 'school'
+
+
+class TestDemotedWayKeepsItsType:
+    """way 側も同じ降格を受ける。周南市 81 メッシュで 5,287 本、
+    うち 3,372 本が house / public / industrial などの型を持つ。
+    これらは取り込まれてはいるが building=yes に潰されていた。
+    """
+
+    def _building_value(self, bare_importer, part_value):
+        importer = bare_importer(citycode='35215')
+        xml = textwrap.dedent(f"""\
+            <?xml version="1.0" encoding="UTF-8"?>
+            <osm version="0.6">
+              <node id="-1" lat="33.0" lon="133.0"/>
+              <node id="-2" lat="33.001" lon="133.0"/>
+              <node id="-3" lat="33.001" lon="133.001"/>
+              <node id="-4" lat="33.0" lon="133.001"/>
+              <way id="-10">
+                <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
+                <tag k="building:part" v="{part_value}"/>
+                <tag k="ref:MLIT_PLATEAU" v="35215-bldg-1"/>
+              </way>
+            </osm>
+            """)
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(xml)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        buildings_data, _, _ = importer.process_buildings_safe(all_nodes, buildings)
+        assert buildings_data, '建物が取り込まれていない'
+        return buildings_data[0][1]
+
+    def test_demoted_house_way_is_stored_as_house(self, bare_importer):
+        assert self._building_value(bare_importer, 'house') == 'house'
+
+    def test_demoted_yes_way_stays_yes(self, bare_importer):
+        assert self._building_value(bare_importer, 'yes') == 'yes'

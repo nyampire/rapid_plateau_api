@@ -446,8 +446,11 @@ class PlateauImporter2PostGIS:
         # 親子関係を作ると実在しない建物を親にすることになるため、作らない。
         part_to_outline = {}
 
-        # building タグを持つ type=multipolygon は、穴のある建物である。
+        # 建物を表す type=multipolygon は、穴のある建物である。
         # outer を外側、inner を内側のリングとして 1 棟にまとめる。
+        # building だけでなく building:part も見る。融合は中庭のある建物を
+        # building:part に降格させるが、降格しても実在建物であることは変わらない。
+        # way 側の判定 (is_building or is_part) と同じ形にそろえている。
         # inner の way には building:part=yes が付くが、これは建物ではなく穴なので
         # 独立した建物として収集しない (mp_inner_way_ids)。outer も同様に、
         # 単独の建物として重複収集しないよう mp_outer_way_ids に記録する。
@@ -456,7 +459,9 @@ class PlateauImporter2PostGIS:
         for rel_elem in root.findall('relation'):
             rel_tags = {t.get('k'): t.get('v') for t in rel_elem.findall('tag')
                         if t.get('k') and t.get('v')}
-            if rel_tags.get('type') != 'multipolygon' or 'building' not in rel_tags:
+            if rel_tags.get('type') != 'multipolygon':
+                continue
+            if 'building' not in rel_tags and 'building:part' not in rel_tags:
                 continue
             outer, inners = [], []
             for m in rel_elem.findall('member'):
@@ -630,7 +635,12 @@ class PlateauImporter2PostGIS:
         }
 
         # 基本建物タイプ
-        building_type = tags.get('building', 'yes')
+        # 融合はキーを building から building:part に変えるが、値は残す。
+        # 周南市 81 メッシュ 66,319 棟の実測で、building:part=house の way は
+        # 元データの用途 411、building=house の way も 411 と一致した。12 の型
+        # すべてで最頻用途が一致する。よって building が無ければ building:part の
+        # 値を型として読む。両方あるときは building を優先する。
+        building_type = tags.get('building') or tags.get('building:part') or 'yes'
         if building_type and building_type != 'no':
             result['building'] = building_type
 

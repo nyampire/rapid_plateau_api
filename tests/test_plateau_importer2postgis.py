@@ -1220,3 +1220,93 @@ class TestRingCountIsReported:
         with caplog.at_level(logging.INFO):
             self._process(bare_importer, xml)
         assert any('内側リングの最大本数: 1000' in r.message for r in caplog.records)
+
+
+class TestTriangleAreaInSquareMeters:
+    """三角形の面積判定を m² で行う。
+
+    従来は shoelace の結果 (度の二乗) を閾値 1e-6 とそのまま比べていた。
+    1e-6 度² は緯度 34 度でおよそ 10,190 m² にあたるので、1 万 m² 未満の
+    三角形がすべて落ちていた。周南市の 2 メッシュでは実在の建物が 2 棟
+    (およそ 670 m² と 16.5 m²) 落ちていた。
+
+    本番 1,489 万棟の実データの最小面積は 0.3 m² なので、閾値 0.1 m² は
+    実データに触れない。degenerate に対する番人としては残る。
+    """
+
+    def _tri(self, lon, lat, dlon, dlat):
+        """(lon, lat) を直角の頂点とする直角三角形。閉鎖点を含めて 4 点。"""
+        p0 = (lon, lat)
+        p1 = (lon + dlon, lat)
+        p2 = (lon, lat + dlat)
+        return [p0, p1, p2, p0]
+
+    def test_area_is_returned_in_square_meters(self):
+        # 緯度 34 度、経度方向 0.0001 度、緯度方向 0.0001 度の直角三角形。
+        # 緯度 1 度 = 111,320 m、経度 1 度 = 111,320 * cos(34°) = 92,296 m。
+        # 底辺 9.23 m、高さ 11.13 m、面積 = 9.23 * 11.13 / 2 ≈ 51.4 m²
+        from plateau_importer2postgis import _triangle_area_m2
+        got = _triangle_area_m2(self._tri(135.0, 34.0, 0.0001, 0.0001))
+        assert 50 < got < 53, f'm² になっていない: {got}'
+
+    def test_longitude_shrinks_with_latitude(self):
+        """同じ度数の三角形が、緯度によって違う m² になる。"""
+        from plateau_importer2postgis import _triangle_area_m2
+        south = _triangle_area_m2(self._tri(135.0, 26.0, 0.0001, 0.0001))
+        north = _triangle_area_m2(self._tri(135.0, 44.0, 0.0001, 0.0001))
+        assert south > north, '経度方向の縮尺補正が効いていない'
+
+    def test_threshold_is_a_tenth_of_a_square_meter(self):
+        from plateau_importer2postgis import TINY_AREA_M2
+        assert TINY_AREA_M2 == 0.1
+
+
+_TRIANGLE_OSM_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="-1" lat="{lat0}" lon="{lon0}"/>
+  <node id="-2" lat="{lat1}" lon="{lon1}"/>
+  <node id="-3" lat="{lat2}" lon="{lon2}"/>
+  <way id="-10">
+    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-1"/>
+    <tag k="building" v="yes"/>
+    <tag k="ref:MLIT_PLATEAU" v="35215-bldg-1"/>
+  </way>
+</osm>
+"""
+
+
+class TestTriangleImport:
+    """三角形の建物が面積で落ちるかどうか。"""
+
+    def _import(self, bare_importer, dlon, dlat, lat=34.0, lon=135.0):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(_TRIANGLE_OSM_TEMPLATE.format(
+            lat0=lat, lon0=lon,
+            lat1=lat, lon1=lon + dlon,
+            lat2=lat + dlat, lon2=lon,
+        ))
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        return importer.process_buildings_safe(all_nodes, buildings)
+
+    def test_small_real_building_is_imported(self, bare_importer):
+        # およそ 16 m² の三角形。実測で落ちていた大きさ。
+        # 底辺 5.5 m (0.00006 度)、高さ 5.6 m (0.00005 度) で約 15.4 m²
+        buildings_data, _, _ = self._import(bare_importer, 0.00006, 0.00005)
+        assert len(buildings_data) == 1, '実在の三角形が落ちている'
+
+    def test_larger_real_building_is_imported(self, bare_importer):
+        # およそ 620 m² の三角形。実測で落ちていたもう一方 (約 670 m²) に近い大きさ。
+        # 底辺 36.9 m (0.0004 度)、高さ 33.4 m (0.0003 度)。
+        buildings_data, _, _ = self._import(bare_importer, 0.0004, 0.0003)
+        assert len(buildings_data) == 1
+
+    def test_degenerate_triangle_is_dropped(self, bare_importer):
+        # 0.1 m² を下回る三角形。ほぼ潰れた形。
+        # 底辺 0.9 m (0.00001 度)、高さ 0.11 m (0.000001 度) で約 0.05 m²
+        buildings_data, _, _ = self._import(bare_importer, 0.00001, 0.000001)
+        assert len(buildings_data) == 0, 'degenerate な三角形が取り込まれている'

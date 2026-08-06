@@ -414,6 +414,31 @@ class PlateauImporter2PostGIS:
         logger.info(f"✅ 展開完了: {processed_count}件処理, {len(osm_files)}個のOSMファイル")
         return osm_files
 
+    @staticmethod
+    def _ring_key(nd_refs):
+        """閉じたリングを、始点の位置と向きの違いを吸収した形にする。
+
+        同じリングでも、出力される way によって始点と向きが違うことがある。
+        ノード id の列をそのまま比べると別物に見えるので、最小の id を先頭に回し、
+        逆向きと比べて小さいほうを選ぶ。
+
+        リングとして成り立たないもの (2 点未満) は None を返す。
+        """
+        if not nd_refs:
+            return None
+        refs = list(nd_refs)
+        if len(refs) >= 2 and refs[0] == refs[-1]:
+            refs = refs[:-1]      # 閉鎖点を落とす
+        if len(refs) < 3:
+            return None
+        best = None
+        for seq in (refs, refs[::-1]):
+            i = seq.index(min(seq))
+            rotated = tuple(seq[i:] + seq[:i])
+            if best is None or rotated < best:
+                best = rotated
+        return best
+
     def parse_osm_file_safe(self, osm_file: Path) -> Tuple[Dict, List]:
         """安全なOSMファイル解析（修復済み技術）
 
@@ -484,6 +509,32 @@ class PlateauImporter2PostGIS:
                     f"outer member が {len(outer)} 個 (期待値 1)"
                 )
         mp_outer_way_ids = {mp[2] for mp in mp_buildings}
+
+        # 変換器は穴のある建物を 2 つの要素で出すことがある。
+        # 穴を潰した way は建物 ID を持ち、穴のある multipolygon は gml:id しか持たない。
+        # 片方ずつしか持っていないので、外側リングが一致する組を 1 棟に統合する。
+        # ジオメトリは multipolygon から、識別子は way から取る。
+        #
+        # 統合しないと、way のループが先に走るぶん穴無しが先に登録され、multipolygon は
+        # 重複ジオメトリ判定 (外側リングのみでハッシュする) に当たって捨てられる。
+        # 建物としては入るが中庭が塗り潰される。
+        #
+        # 撤去条件: 変換器が 1 棟を 1 要素で出すようになり、実データで twin が 0 件に
+        # なったとき。周南市 81 メッシュでは降格 multipolygon 40 件のうち 27 件が該当し、
+        # 27 件すべてで元データの gml:id -> uro:buildingID が way の ref と一致した。
+        # building タグ付きの multipolygon 117 件には 1 件も無い。
+        # 座標検証を通す前の生の nd 列。リングの照合はノード id で行うので、
+        # 検証で 1 点でも落ちると別のリングに見えてしまう。生のまま比べる。
+        raw_way_nd_refs = {
+            w.get('id'): [nd.get('ref') for nd in w.findall('nd')]
+            for w in root.findall('way')
+        }
+        twin_ref_by_rel_id = {}
+        mp_ring_key_to_rel_id = {}
+        for rel_id, _rel_tags, outer_way_id, _inners in mp_buildings:
+            key = self._ring_key(raw_way_nd_refs.get(outer_way_id))
+            if key is not None:
+                mp_ring_key_to_rel_id[key] = rel_id
 
         # ノード収集（座標検証付き）
         for node_elem in root.findall('node'):
@@ -560,6 +611,14 @@ class PlateauImporter2PostGIS:
             if (is_building or is_part) and not ref_mlit:
                 continue
 
+            # 穴を潰した相方 (twin) なら、独立した建物として収集しない。
+            # 代わりに識別子を multipolygon 側に渡し、1 棟として保存する。
+            twin_rel_id = mp_ring_key_to_rel_id.get(
+                self._ring_key(raw_way_nd_refs.get(way_id)))
+            if twin_rel_id is not None:
+                twin_ref_by_rel_id[twin_rel_id] = ref_mlit
+                continue
+
             # 最低3点でポリゴン形成
             if len(nd_refs) >= 3:
                 # part の場合は parent_outline_way_id を解決
@@ -595,6 +654,11 @@ class PlateauImporter2PostGIS:
                 inner_refs = all_way_nd_refs.get(inner_way_id)
                 if inner_refs:
                     rings.append(inner_refs)
+            # 相方の way があれば、その建物 ID を使う。multipolygon 自身は gml:id しか
+            # 持たないので、統合しないと安定識別子が失われる。
+            twin_ref = twin_ref_by_rel_id.get(rel_id)
+            if twin_ref:
+                rel_tags = dict(rel_tags, **{'ref:MLIT_PLATEAU': twin_ref})
             buildings.append({
                 'way_id': rel_id,
                 'plateau_id': f'r{rel_id}',

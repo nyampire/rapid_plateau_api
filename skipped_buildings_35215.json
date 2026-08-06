@@ -1,43 +1,43 @@
 {
   "citycode": "35215",
-  "total_buildings": 1800,
-  "processed": 1798,
+  "total_buildings": 1,
+  "processed": 0,
   "skipped": 1,
-  "duplicates": 1,
+  "duplicates": 0,
   "skip_summary": {
     "tiny_area": 1
   },
   "skipped_buildings": [
     {
       "reason": "tiny_area",
-      "way_id": "-109684",
-      "source_file": "51310680_bldg_6697_op.osm",
+      "way_id": "-10",
+      "source_file": "mesh.osm",
       "num_coords": 4,
-      "area": 0.08297632540808285,
+      "area": 0.051367758002665354,
       "coords": [
         [
-          131.75229496864443,
-          34.073434962298386
+          135.0,
+          34.0
         ],
         [
-          131.7522949394872,
-          34.07343516506047
+          135.00001,
+          34.0
         ],
         [
-          131.752373560974,
-          34.07344291342677
+          135.0,
+          34.000001
         ],
         [
-          131.75229496864443,
-          34.073434962298386
+          135.0,
+          34.0
         ]
       ],
       "tags": {
-        "height": "3"
+        "building": "yes"
       },
       "probable_cause": "CityGML",
       "probable_cause_detail": "元CityGMLのgml:posList座標値の問題。座標が重複・近接しているか、EPSG変換時の精度損失により面積がほぼゼロになっている。OSM変換ツールは座標をそのまま変換するため、.osmファイル側の問題ではない。",
-      "diagnosis": "ポリゴンの面積が極小 (area=0.0830m^2 < TINY_AREA_M2=0.1m^2)。頂点座標が同一地点に集中しているか、CityGMLのLOD0フットプリントが正しく生成されていない可能性。",
+      "diagnosis": "ポリゴンの面積が極小 (area=0.0514m^2 < TINY_AREA_M2=0.1m^2)。頂点座標が同一地点に集中しているか、CityGMLのLOD0フットプリントが正しく生成されていない可能性。",
       "citygml_check": "元CityGMLのbldg:lod0FootPrint (またはbldg:lod0RoofEdge) 内のgml:posList座標値に重複や極端な近接がないか確認。EPSG変換時の精度損失も要確認。",
       "qgis_check": "QGISで当該座標付近を表示し、ジオメトリの妥当性チェック (ベクタ > ジオメトリツール > 妥当性チェック) を実行。"
     }

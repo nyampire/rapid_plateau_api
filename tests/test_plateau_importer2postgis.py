@@ -1459,3 +1459,111 @@ class TestDemotedWayKeepsItsType:
 
     def test_demoted_yes_way_stays_yes(self, bare_importer):
         assert self._building_value(bare_importer, 'yes') == 'yes'
+
+
+# ----------------------------------------------------------------------
+# 二重出力の統合 (穴を潰した way と 穴のある multipolygon)
+# ----------------------------------------------------------------------
+
+_TWIN_OSM = textwrap.dedent("""\
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="-1" lat="33.0" lon="133.0"/>
+  <node id="-2" lat="33.001" lon="133.0"/>
+  <node id="-3" lat="33.001" lon="133.001"/>
+  <node id="-4" lat="33.0" lon="133.001"/>
+  <node id="-5" lat="33.0003" lon="133.0003"/>
+  <node id="-6" lat="33.0007" lon="133.0003"/>
+  <node id="-7" lat="33.0007" lon="133.0007"/>
+  <node id="-8" lat="33.0003" lon="133.0007"/>
+  <way id="-10">
+    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
+    <tag k="building:part" v="public"/>
+    <tag k="name" v="白鳩学園育成館"/>
+    <tag k="height" v="10.9"/>
+    <tag k="ref:MLIT_PLATEAU" v="35215-bldg-25793"/>
+  </way>
+  <way id="-20">
+    <nd ref="-3"/><nd ref="-4"/><nd ref="-1"/><nd ref="-2"/><nd ref="-3"/>
+  </way>
+  <way id="-30">
+    <nd ref="-5"/><nd ref="-6"/><nd ref="-7"/><nd ref="-8"/><nd ref="-5"/>
+  </way>
+  <relation id="-40">
+    <member type="way" ref="-20" role="outer"/>
+    <member type="way" ref="-30" role="inner"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="building:part" v="public"/>
+    <tag k="name" v="白鳩学園育成館"/>
+    <tag k="height" v="10.9"/>
+    <tag k="ref:MLIT_PLATEAU" v="bldg_2621ed43-ee4a-45ff-87b5-3fb42e2f8f05"/>
+  </relation>
+</osm>
+""")
+
+
+class TestTwinMultipolygonAndWayAreOneBuilding:
+    """変換器は穴のある建物を 2 つの要素で出す。
+
+    穴を潰した way は建物 ID を持ち、穴のある multipolygon は gml:id しか持たない。
+    **片方ずつしか持っていない。**どちらを捨てても何かを失う。
+
+    周南市 81 メッシュの実測: 降格した multipolygon 40 件のうち 27 件に相手の way がある。
+    27 件すべてで、元データの gml:id -> uro:buildingID が相手の way の
+    ref:MLIT_PLATEAU と一致した。タグの食い違いも twin の重複も 0 件。
+    building タグ付きの multipolygon 117 件には相手の way が 1 つも無い。
+
+    way のループが先に走るので、統合しないと穴無しが先に登録され、multipolygon は
+    重複ジオメトリ判定 (外側リングのみでハッシュする) に当たって捨てられる。
+    つまり建物としては入るが中庭が塗り潰される。
+
+    フィクスチャの way -10 と way -20 は、始点の位置が違う同じリングにしてある。
+    実データでも出力順は揃っていないので、比較は始点と向きの違いを吸収する必要がある。
+
+    撤去条件: 変換器が 1 棟を 1 要素で出すようになり、実データで twin が 0 件になったとき。
+    """
+
+    def _rows(self, bare_importer, xml=_TWIN_OSM):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(xml)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        return importer.process_buildings_safe(all_nodes, buildings)
+
+    def test_the_pair_becomes_one_building(self, bare_importer):
+        buildings_data, _, _ = self._rows(bare_importer)
+        assert len(buildings_data) == 1, '二重出力が 2 棟として保存されている'
+
+    def test_the_courtyard_survives(self, bare_importer):
+        """ジオメトリは multipolygon 側から取る。"""
+        buildings_data, _, _ = self._rows(bare_importer)
+        wkt = buildings_data[0][8]
+        assert wkt.count('(') >= 3, f'中庭が塗り潰されている: {wkt[:80]}'
+
+    def test_the_building_id_survives(self, bare_importer):
+        """識別子は way 側から取る。multipolygon は gml:id しか持たない。"""
+        buildings_data, _, _ = self._rows(bare_importer)
+        assert '35215-bldg-25793' in buildings_data[0], (
+            '建物 ID が失われている (gml:id を保存してしまっている可能性)')
+
+    def test_a_multipolygon_without_a_twin_keeps_its_own_identifier(self, bare_importer):
+        """相手の way が無い 13/40 は gml:id のまま。取り込みでは埋められない。"""
+        xml = _TWIN_OSM.replace(
+            '    <tag k="ref:MLIT_PLATEAU" v="35215-bldg-25793"/>\n', '')
+        assert xml != _TWIN_OSM, '置換対象の文字列が一致していない'
+        buildings_data, _, _ = self._rows(bare_importer, xml)
+        assert len(buildings_data) == 1
+        assert 'bldg_2621ed43-ee4a-45ff-87b5-3fb42e2f8f05' in buildings_data[0]
+
+    def test_a_way_with_a_different_ring_is_not_merged(self, bare_importer):
+        """外側リングが一致しない way は別の建物。統合してはいけない。"""
+        xml = _TWIN_OSM.replace(
+            '    <nd ref="-3"/><nd ref="-4"/><nd ref="-1"/><nd ref="-2"/><nd ref="-3"/>\n',
+            '    <nd ref="-5"/><nd ref="-6"/><nd ref="-7"/><nd ref="-8"/><nd ref="-5"/>\n')
+        assert xml != _TWIN_OSM, '置換対象の文字列が一致していない'
+        buildings_data, _, _ = self._rows(bare_importer, xml)
+        assert len(buildings_data) == 2, 'リングが違うのに統合されている'

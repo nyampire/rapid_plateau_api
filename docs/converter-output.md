@@ -8,6 +8,8 @@ PLATEAU の CityGML は [citygml-osm](https://github.com/yuuhayashi/citygml-osm)
 
 個別タスクの設計は `docs/superpowers/specs/` にある。この文書はそれらをまたぐ恒久的な参照である。
 
+上流に何を相談するか、どこまで判っているかは [upstream-consultation.md](upstream-consultation.md) にまとめてある。
+
 ---
 
 ## 先に知っておくこと: 融合
@@ -135,7 +137,11 @@ if ((multipolygon != null) && (elementWay != null)) {
 `OutlineFactory` の直後に、`outer` が無く `inner` を持つ multipolygon を拾い、
 すべての `inner` を含み**建物 ID を持つ** way を `outer` にする。
 
-出力の変化は member の追加 2 件だけで、node も way もタグも 1 つも変わらない。
+`outer` にする way は、タグを空にしてから member にし、`ref:MLIT_PLATEAU` は relation に移す。
+`OutlineFactory` がマルチポリゴンを作るときと同じ手順で、上流 #135 / #140 の規約に沿う。
+
+出力の変化は way 2 本 (タグが空になった) と relation 2 つ (`outer` と識別子を得た) だけで、
+node は 1 つも変わらず、way と relation の数も変わらない。
 上流テストは 110 件中 4 件失敗のまま、失敗するテストも同じである
 (コードではなく、テストが参照する gml がリポジトリに無いことによる)。
 
@@ -151,17 +157,23 @@ if ((multipolygon != null) && (elementWay != null)) {
 建物 ID を持つのは 2 本だけで、残る 2 本は融合外形である。
 融合外形は複数の建物にまたがるので、1 棟の外形にはできない。付けないのが正しい。
 
-### 直したうえで残っている課題
+### 取り込みまで通した結果
 
-`outer` にした way は `building` と建物 ID を持ったままで、
-このリポジトリ自身の [Issue #40](https://github.com/yuuhayashi/citygml-osm/issues/40) の規約
-(`outer` メンバー way にタグを付けない) に反する。
-既存の `outer` メンバー way は 157 本すべてタグを持たない。
+**建物 ID を保ったまま中庭が入る。取り込み側の変更は要らない。**
 
-そのため取り込みは、この修正だけでは**中庭と引き換えに建物 ID を失う**。
-way 収集ループが multipolygon の `outer` になった way を twin 判定より手前で捨てるためで、
-これは取り込み側の欠落である。現行の変換出力では発火しない
-(`outer` メンバー way がタグを持たないため)。
+| | 修正前 | 修正後 |
+|---|---|---|
+| 保存 | way 由来 | multipolygon 由来 |
+| `ref_mlit_plateau` | 建物 ID | **建物 ID のまま** |
+| 穴の数 | 0 | **2** |
+| そのメッシュの建物数 | 変わらない | 変わらない |
+
+**最初の版は `outer` の way のタグを残していて、そこで建物 ID を失っていた。**
+way 収集ループが multipolygon の `outer` になった way を twin 判定より手前で捨てるためである。
+規約に沿った版では識別子が relation 側に乗るので、この経路を通らない。
+
+この修正で `outer` を得た 2 件の multipolygon は、`gml:id` ではなく**建物 ID** を持つ。
+way から移したためで、multipolygon が建物 ID を持てないわけではない。
 
 ---
 
@@ -239,9 +251,16 @@ part が 7 個 (実在 4 + 合成 3) 出力され、報告内容と一致した�
 **multipolygon には建物 ID が 1 つも付かない。**
 元データ側は欠かしていない (周南市・毛呂山町の実測でいずれも欠落 0) ので、変換の過程で置き換わっている。
 
-この挙動は上流 [#150](https://github.com/yuuhayashi/citygml-osm/issues/150) に挙がっている。
-同じ周南市 51310655 のメッシュが例として使われており、v3 で中空部分を multipolygon に変換する
-ようにした結果だと作者が説明している。**こちらから報告することは無い。**
+上流 [#150](https://github.com/yuuhayashi/citygml-osm/issues/150) が隣接するが、**同じことは挙がっていない**
+(2026-08-07 に本文を読んで確認)。#150 が報告しているのは、4th スクリプトが relation の
+`ref:MLIT_PLATEAU` を `source=MLIT_PLATEAU` に変換しない、という別の問題である。
+例に使われている値がたまたま `bldg_<uuid>` 形式なだけで、
+**「値が建物 ID ではなく `gml:id` である」ことを欠陥として述べている人はいない。**
+
+作者は同じ Issue のコメントで、v2 以前は PLATEAU のマルチポリゴン構造を正しく変換できておらず、
+v3 で中空部分を `relation=multipolygon` に変換するよう修正した、と説明している。
+
+**これを欠陥として扱うかは未決。**判断の材料は [upstream-consultation.md](upstream-consultation.md) にある。
 
 ### 影響
 
@@ -335,7 +354,8 @@ DB の `plateau_buildings.ref_mlit_plateau` 列に **2 系統の識別子が混�
 
 | この文書で扱っていること | 上流 Issue | 状態 |
 |---|---|---|
-| multipolygon の識別子が `gml:id` になる | [#150](https://github.com/yuuhayashi/citygml-osm/issues/150) OPEN | **既出。**例が周南市 51310655 で本文書の実測と同じデータ。v3 で multipolygon 変換を入れた結果と作者が説明済み |
+| multipolygon の識別子が `gml:id` になる | [#150](https://github.com/yuuhayashi/citygml-osm/issues/150) OPEN が隣接 | **既出ではない** (2026-08-07 に本文で確認)。#150 は 4th のタグ変換漏れの報告で、値の形は誰も挙げていない。欠陥として扱うかも未決 |
+| `outer` の way にタグを付けてよいか | [#135](https://github.com/yuuhayashi/citygml-osm/issues/135) / [#140](https://github.com/yuuhayashi/citygml-osm/issues/140) CLOSED | **既出。**付けないのが規約。`outer` メンバー way 157 本すべてタグ 0 個なのはこの結果。上の修正もこれに沿わせた |
 | `building` / `building:part` のキーが不安定 | [#146](https://github.com/yuuhayashi/citygml-osm/issues/146) / [#147](https://github.com/yuuhayashi/citygml-osm/issues/147) OPEN | 症状は既出。ただし**向きが逆**で、上流は「`building:part` であるべき way が `building` になっている」を報告している |
 | 余分な合成 part | [#151](https://github.com/yuuhayashi/citygml-osm/issues/151) CLOSED | 「v3.0.6 で解決」とあるが**再現する**。未報告 |
 | `outer` を持たない multipolygon | 該当なし | 未報告。**修正を作って計測済み** (2026-08-07)。Issue #40 の規約との食い違いが未解決 |

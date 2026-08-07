@@ -9,3 +9,6 @@ plateau_data/
 htmlcov/
 CLAUDE.md
 .superpowers/
+
+# 取り込みが吐くスキップ集計 (実行成果物)
+skipped_buildings_*.json

@@ -27,6 +27,10 @@ plateau_importer2postgis.py  ダウンロードしたデータを PostGIS にイ
 osmfj_plateau_api.py         PostGIS から Rapid 向けに OSM XML を配信 (FastAPI)
 ```
 
+取り込みの入力は citygml-osm が CityGML から変換した `.osm` である。
+その出力の性質と、取り込み側でどこまで対処できるかは
+[docs/converter-output.md](docs/converter-output.md) にまとめてある。
+
 ## 必要環境
 
 - Python 3.9+
@@ -138,7 +142,7 @@ LOD2 の建物は、外形と屋根などの部分から成ります。API は�
 | ele | float | 標高 (m) |
 | building_levels | int | 階数 |
 | source_dataset | text | データソース識別子 (`plateau_{citycode}_{file}`) |
-| plateau_id | text | Plateau 元データの way ID |
+| plateau_id | text | 変換出力の元要素。way 由来は `w-123`、multipolygon 由来は `r-456`。変換をやり直すと値が変わるため安定した識別子ではない（それは `ref_mlit_plateau`） |
 | name | text | 建物名称 |
 | addr_full | text | 住所 (通り名+番地の結合) |
 | addr_housenumber | text | 番地 |
@@ -169,7 +173,8 @@ Indexes:
 | id | serial | 主キー |
 | osm_id | bigint | ノード ID (負の値) |
 | building_id | int | 建物 ID (外部キー → plateau_buildings.id) |
-| sequence_id | int | ノード順序 |
+| sequence_id | int | ノード順序 (環ごとに 0 から再開) |
+| ring_id | int NOT NULL DEFAULT 0 | 環の種別。0=外環、1以上=内環 (穴) |
 | lat | float | 緯度 |
 | lon | float | 経度 |
 | geom | geometry | ポイント |

@@ -134,8 +134,12 @@ Rapid editor の zoom 5-14 で対応エリアを表示するため、
 
 ## 既存の制約・既知の問題
 
+**変換器の出力に由来するものは [docs/converter-output.md](docs/converter-output.md) にまとめてある。**
+取り込みで対処済みのもの、取り込みでは直せないもの、実測値、再取り込み後の確認項目を扱う。
+
 | 問題 | 回避策 |
 |---|---|
+| `outer` を持たない multipolygon はジオメトリを組めない | スキップして WARNING。[詳細](docs/converter-output.md) |
 | `plateau_importer2postgis.py` は coverage REFRESH を自動実行しない | インポート後に手動 `plateau_coverage.py --refresh` |
 | `osmfj_plateau_api.py` の `api = OSMFJPlateauAPI()` グローバルがテストを煩雑にする | 将来的に DI 化を検討 |
 | `plateau_importer2postgis.py` / `plateau_downloader.py` にテストなし | 別途追加検討 |

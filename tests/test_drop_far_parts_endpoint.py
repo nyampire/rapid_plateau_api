@@ -82,8 +82,8 @@ class TestFarPartIsNotServed:
 
         root = ET.fromstring(res.text)
         way_ids = {w.get('id') for w in root.findall('way')}
-        assert '-1' in way_ids, '外形が返っていない'
-        assert '-2' in way_ids, '正しい部分立体が落ちている'
+        assert str(-(1 * 1000)) in way_ids, '外形が返っていない'
+        assert str(-(2 * 1000)) in way_ids, '正しい部分立体が落ちている'
         assert '-3' not in way_ids, '取り違えられた部分立体が返っている'
 
         # 応答が要求範囲を大きくはみ出していないこと
@@ -106,5 +106,5 @@ class TestFarPartIsNotServed:
         rel = root.find('relation')
         assert rel is not None, 'relation が作られていない'
         refs = {m.get('ref') for m in rel.findall('member')}
-        assert '-2' in refs
+        assert str(-(2 * 1000)) in refs
         assert '-3' not in refs, 'relation に遠方の部分立体が残っている'

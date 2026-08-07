@@ -267,8 +267,9 @@ class OSMFJPlateauAPI:
                             'osm_id', n.osm_id,
                             'lat', n.lat,
                             'lon', n.lon,
-                            'sequence_id', n.sequence_id
-                        ) ORDER BY n.sequence_id
+                            'sequence_id', n.sequence_id,
+                            'ring_id', n.ring_id
+                        ) ORDER BY n.ring_id, n.sequence_id
                     ) as nodes
                     FROM plateau_building_nodes n
                     WHERE n.building_id = ub.id
@@ -337,10 +338,44 @@ class OSMFJPlateauAPI:
         finally:
             conn.close()
 
-    # OSM XML 上での relation ID の生成オフセット。
-    # building の DB id は正値、way の出力 id は -building_db_id なので、
-    # relation の id は更に -1_000_000 でオフセットして衝突を避ける。
-    RELATION_ID_OFFSET = -1_000_000
+    # 合成 OSM id の採番。型ごとに (建物id, 役割) から一意に決める。
+    #
+    #   way      : -(建物id * WAY_ID_RING_MULTIPLIER + 環番号)
+    #   relation : -(建物id * RELATION_ID_KIND_MULTIPLIER + 種別)
+    #
+    # 環番号は外側リングが 0、内側リングが 1 から。種別は下の 2 定数。
+    #
+    # 単射である理由: 環番号が乗数未満なら商と余りが一意に決まるので、
+    # 値が一致するには建物 id と役割の両方が一致するしかない。
+    # 種別は {1, 2} の 2 値で乗数 10 未満なので、relation 側は前提なしに
+    # 成立する。way 側の前提は「環番号 < WAY_ID_RING_MULTIPLIER」の一つだけで、
+    # これを越えると建物 N の環が建物 N+1 の通常 way id を奪う。
+    # 上限は出力側で守る (buildings_to_osm_xml)。
+    #
+    # OSM の id は型ごとに独立しており、Rapid も entityID を型の頭文字付きで
+    # 作る (osmEntity.id.fromOSM) ので、way と relation の間では衝突しない。
+    # 確認が要るのは同じ型の中だけである。
+    #
+    # 桁: way id の上限は乗数がどう変わっても「plateau_buildings.id の上限 ×
+    # WAY_ID_RING_MULTIPLIER」で決まる。現行の乗数 1000 では
+    # 2.1e9 × 1000 = 2.1e12 で、JavaScript の安全整数 9e15 の約 4000 分の
+    # 1 に収まる。先に尽きるのは plateau_buildings.id の方で、これは
+    # SERIAL (int4) なので上限は 2,147,483,647 (DEPLOY.md のスキーマ参照)。
+    # 再取り込みは都市ごとに行が削除されるだけでシーケンスは戻らないため、
+    # 全都市 1 周あたり約 1,490 万ずつ増える。int4 を使い切るまでには
+    # 約 144 周かかり、JS の安全整数に達するよりずっと早い。
+    WAY_ID_RING_MULTIPLIER = 1000
+    RELATION_ID_KIND_MULTIPLIER = 10
+    RELATION_KIND_BUILDING = 1
+    RELATION_KIND_MULTIPOLYGON = 2
+
+    def _way_id(self, building_db_id: int, ring_no: int = 0) -> int:
+        """way の合成 OSM id。ring_no 0 が外側リング (穴の無い建物もこれ)。"""
+        return -(building_db_id * self.WAY_ID_RING_MULTIPLIER + ring_no)
+
+    def _relation_id(self, building_db_id: int, kind: int) -> int:
+        """relation の合成 OSM id。kind は RELATION_KIND_* のいずれか。"""
+        return -(building_db_id * self.RELATION_ID_KIND_MULTIPLIER + kind)
 
     def _emit_building_tags(self, parent_elem, building: Dict, is_part: bool):
         """way / relation 共通のタグを追加するヘルパー。
@@ -425,8 +460,18 @@ class OSMFJPlateauAPI:
         parts_by_parent_db_id: Dict[int, List[int]] = {}
         # parent_db_id → outline の building dict (タグ duplicate のため)
         outline_by_db_id: Dict[int, Dict] = {}
-        # DB id of buildings that successfully emitted a way (失敗除外)
-        emitted_db_ids = set()
+        # 発行済みの (型, id) を記録する。同じ型で同じ id が二度出たら、
+        # 採番式の単射性が壊れている。式の証明が将来の変更で崩れたときの網。
+        emitted_element_ids = set()
+
+        def _register_element_id(kind, element_id):
+            key = (kind, element_id)
+            if key in emitted_element_ids:
+                logger.warning(
+                    f"⚠️ 合成 id の衝突: {kind} id {element_id} が同じレスポンスに"
+                    f"二度出た。採番式を確認すること"
+                )
+            emitted_element_ids.add(key)
 
         # Emit a single <node> for each unique (lat, lon) across the WHOLE
         # response and reuse its id from every way that touches that coordinate.
@@ -486,102 +531,241 @@ class OSMFJPlateauAPI:
             kept_buildings.append(b)
         buildings = kept_buildings
 
+        def _valid_nodes_from_ring(ring_nodes: List[Dict]) -> List[Dict]:
+            """1 環分の生ノード行を、座標検証・ポリゴン閉鎖除去した順序付きリストにする。"""
+            valid = []
+            for node in ring_nodes:
+                if node and 'lat' in node and 'lon' in node and 'id' in node:
+                    try:
+                        lat = float(node['lat'])
+                        lon = float(node['lon'])
+                        node_db_id = int(node['id'])
+                        if -90 <= lat <= 90 and -180 <= lon <= 180:
+                            valid.append({'lat': lat, 'lon': lon, 'id': node_db_id})
+                    except (ValueError, TypeError):
+                        continue
+
+            if len(valid) >= 2:
+                first_node = valid[0]
+                last_node = valid[-1]
+                is_closed = (abs(first_node['lat'] - last_node['lat']) < 1e-7 and
+                             abs(first_node['lon'] - last_node['lon']) < 1e-7)
+                if is_closed:
+                    valid = valid[:-1]
+            return valid
+
+        def _make_way_elem(way_id: int, valid_nodes: List[Dict]) -> ET.Element:
+            """検証済みノード列から、response 全体で node を共有する <way> を組み立てる。"""
+            nonlocal total_nodes_created
+
+            way_elem = ET.Element('way')
+            way_elem.set('id', str(way_id))
+            way_elem.set('visible', 'true')
+            way_elem.set('version', '1')
+            way_elem.set('changeset', '1')
+            way_elem.set('timestamp', timestamp)
+            way_elem.set('user', 'osmfj-plateau')
+            way_elem.set('uid', '1')
+
+            first_node_id = None
+
+            # Look up / register the canonical node id for each coordinate
+            # in the response-wide map. The first way to touch a coordinate
+            # registers its id; every later way — whether a part of the same
+            # building or a separate neighbouring building — reuses it, so
+            # coincident corners resolve to a single shared <node>.
+            for i, node_data in enumerate(valid_nodes):
+                key = _coord_key(node_data['lat'], node_data['lon'])
+                canonical_id = coord_to_nid.get(key)
+                if canonical_id is None:
+                    canonical_id = -node_data['id']
+                    coord_to_nid[key] = canonical_id
+
+                if canonical_id not in emitted_node_ids:
+                    emitted_node_ids.add(canonical_id)
+                    node_elem = ET.Element('node')
+                    node_elem.set('id', str(canonical_id))
+                    node_elem.set('visible', 'true')
+                    node_elem.set('version', '1')
+                    node_elem.set('changeset', '1')
+                    node_elem.set('timestamp', timestamp)
+                    node_elem.set('user', 'osmfj-plateau')
+                    node_elem.set('uid', '1')
+                    node_elem.set('lat', f"{node_data['lat']:.7f}")
+                    node_elem.set('lon', f"{node_data['lon']:.7f}")
+                    all_nodes.append(node_elem)
+                    total_nodes_created += 1
+
+                nd_elem = ET.SubElement(way_elem, 'nd')
+                nd_elem.set('ref', str(canonical_id))
+
+                if i == 0:
+                    first_node_id = canonical_id
+
+            # ポリゴンを閉じる
+            nd_elem = ET.SubElement(way_elem, 'nd')
+            nd_elem.set('ref', str(first_node_id))
+
+            return way_elem
+
         for building in buildings:
             try:
                 nodes = building.get('nodes', [])
                 if not nodes or nodes == [None] or not any(nodes):
                     continue
 
-                # 有効なノードをフィルタ（DBのIDを保持）
-                valid_nodes = []
+                # 環ごとに分ける。ring_id が無い行は 0 とみなす (移行中のデータ)。
+                rings: Dict[int, List[Dict]] = {}
                 for node in nodes:
-                    if node and 'lat' in node and 'lon' in node and 'id' in node:
-                        try:
-                            lat = float(node['lat'])
-                            lon = float(node['lon'])
-                            node_db_id = int(node['id'])
-                            if -90 <= lat <= 90 and -180 <= lon <= 180:
-                                valid_nodes.append({'lat': lat, 'lon': lon, 'id': node_db_id})
-                        except (ValueError, TypeError):
-                            continue
-
-                if len(valid_nodes) < 3:
+                    if not node:
+                        continue
+                    rings.setdefault(node.get('ring_id', 0) or 0, []).append(node)
+                if not rings:
                     continue
 
-                # ポリゴン閉鎖チェック
-                first_node = valid_nodes[0]
-                last_node = valid_nodes[-1]
-                is_closed = (abs(first_node['lat'] - last_node['lat']) < 1e-7 and
-                            abs(first_node['lon'] - last_node['lon']) < 1e-7)
-                if is_closed:
-                    valid_nodes = valid_nodes[:-1]
-
-                # Way要素作成（DBのIDを使用）
                 building_db_id = building.get('id')
-                way_id = -building_db_id
                 is_part = (building.get('building_part') == 'yes')
                 parent_id = building.get('parent_building_id')
 
-                way_elem = ET.Element('way')
-                way_elem.set('id', str(way_id))
-                way_elem.set('visible', 'true')
-                way_elem.set('version', '1')
-                way_elem.set('changeset', '1')
-                way_elem.set('timestamp', timestamp)
-                way_elem.set('user', 'osmfj-plateau')
-                way_elem.set('uid', '1')
+                if len(rings) <= 1:
+                    # 穴の無い建物: 従来通り単一 way として出力する。
+                    valid_nodes = _valid_nodes_from_ring(next(iter(rings.values())))
+                    if len(valid_nodes) < 3:
+                        continue
 
-                first_node_id = None
+                    way_id = self._way_id(building_db_id)
+                    way_elem = _make_way_elem(way_id, valid_nodes)
 
-                # Look up / register the canonical node id for each coordinate
-                # in the response-wide map. The first way to touch a coordinate
-                # registers its id; every later way — whether a part of the same
-                # building or a separate neighbouring building — reuses it, so
-                # coincident corners resolve to a single shared <node>.
-                for i, node_data in enumerate(valid_nodes):
-                    key = _coord_key(node_data['lat'], node_data['lon'])
-                    canonical_id = coord_to_nid.get(key)
-                    if canonical_id is None:
-                        canonical_id = -node_data['id']
-                        coord_to_nid[key] = canonical_id
+                    # タグ追加 (outline/simple vs part で異なる)
+                    self._emit_building_tags(way_elem, building, is_part)
 
-                    if canonical_id not in emitted_node_ids:
-                        emitted_node_ids.add(canonical_id)
-                        node_elem = ET.Element('node')
-                        node_elem.set('id', str(canonical_id))
-                        node_elem.set('visible', 'true')
-                        node_elem.set('version', '1')
-                        node_elem.set('changeset', '1')
-                        node_elem.set('timestamp', timestamp)
-                        node_elem.set('user', 'osmfj-plateau')
-                        node_elem.set('uid', '1')
-                        node_elem.set('lat', f"{node_data['lat']:.7f}")
-                        node_elem.set('lon', f"{node_data['lon']:.7f}")
-                        all_nodes.append(node_elem)
-                        total_nodes_created += 1
+                    all_ways.append(way_elem)
+                    _register_element_id('way', way_id)
+                    # relation 構築の準備
+                    if is_part and parent_id is not None:
+                        parts_by_parent_db_id.setdefault(parent_id, []).append(way_id)
+                    elif not is_part:
+                        outline_by_db_id[building_db_id] = building
 
-                    nd_elem = ET.SubElement(way_elem, 'nd')
-                    nd_elem.set('ref', str(canonical_id))
+                    processed_buildings += 1
 
-                    if i == 0:
-                        first_node_id = canonical_id
+                else:
+                    # 穴のある建物: 環ごとにタグ無し way を作り、
+                    # type=multipolygon の relation でまとめる。タグは relation にだけ付ける。
+                    #
+                    # 検証 (副作用なし) と生成 (_make_way_elem が all_nodes /
+                    # total_nodes_created に副作用を持つ) を2パスに分離する。
+                    # 1パスに混ぜていた頃は、ring 0 の way を作った直後に
+                    # ring 1 の検証が失敗すると、ring 0 の <node> だけが
+                    # response に残ってしまっていた (どの way からも参照され
+                    # ない孤立点としてクライアントに描画される)。全 ring の
+                    # 検証が通るまで _make_way_elem を一切呼ばないことで、
+                    # 失敗時に途中まで作った要素が response に残る余地を無く
+                    # す。
+                    #
+                    # ring 0 が rings に無い場合の outer_way_id 解決 (下記
+                    # KeyError) はこの分離の対象外 (別途 whole-branch review
+                    # で扱う)。ただしその KeyError 自体は way_id の算出
+                    # (副作用なし) を _make_way_elem の呼び出しより前に
+                    # 済ませてあるため、発生するなら _make_way_elem が1度も
+                    # 呼ばれる前に起こる。よって下の broad except がこの
+                    # ケースを拾っても、この building 分の <node> は1つも
+                    # response に残らない。
 
-                # ポリゴンを閉じる
-                nd_elem = ET.SubElement(way_elem, 'nd')
-                nd_elem.set('ref', str(first_node_id))
+                    # 環番号が乗数に達すると、この建物の環が次の建物の通常
+                    # way id を奪う。奪われた側は編集画面から黙って消えるので、
+                    # 出力しないほうを選ぶ。DB には保存されているので、
+                    # 採番式を直せば次のリクエストから出る。
+                    max_ring_no = max(rings)
+                    if max_ring_no >= self.WAY_ID_RING_MULTIPLIER:
+                        logger.warning(
+                            f"⚠️ 建物をレスポンスから除外 {building_db_id}: "
+                            f"内側リングが環番号 {max_ring_no} まであり、way id の"
+                            f"採番範囲 ({self.WAY_ID_RING_MULTIPLIER}) を超える。"
+                            f"DB には保存されている"
+                        )
+                        continue
 
-                # タグ追加 (outline/simple vs part で異なる)
-                self._emit_building_tags(way_elem, building, is_part)
+                    ring_valid_nodes: Dict[int, List[Dict]] = {}
+                    ring_failed = False
+                    for ring_no in sorted(rings):
+                        valid_nodes = _valid_nodes_from_ring(rings[ring_no])
+                        if len(valid_nodes) < 3:
+                            logger.info(
+                                f"建物スキップ {building_db_id}: "
+                                f"ring {ring_no} の有効ノードが不足 ({len(valid_nodes)}), "
+                                f"building 全体を破棄"
+                            )
+                            ring_failed = True
+                            break
+                        ring_valid_nodes[ring_no] = valid_nodes
 
-                all_ways.append(way_elem)
-                emitted_db_ids.add(building_db_id)
-                # relation 構築の準備
-                if is_part and parent_id is not None:
-                    parts_by_parent_db_id.setdefault(parent_id, []).append(way_id)
-                elif not is_part:
-                    outline_by_db_id[building_db_id] = building
+                    if ring_failed:
+                        continue
 
-                processed_buildings += 1
+                    # way_id の算出 (副作用なし) を先に済ませ、outer_way_id を
+                    # _make_way_elem 呼び出しより前に確定させる。
+                    ring_way_ids: Dict[int, int] = {
+                        ring_no: self._way_id(building_db_id, ring_no)
+                        for ring_no in rings
+                    }
+                    outer_way_id = ring_way_ids[0]
+
+                    ring_way_elems = [
+                        _make_way_elem(ring_way_ids[ring_no], ring_valid_nodes[ring_no])
+                        for ring_no in sorted(rings)
+                    ]
+                    all_ways.extend(ring_way_elems)
+                    for ring_no in sorted(rings):
+                        _register_element_id('way', ring_way_ids[ring_no])
+                    # relation 構築の準備 (outer way の id は単一 way の場合と同じ規則)
+                    if is_part and parent_id is not None:
+                        parts_by_parent_db_id.setdefault(parent_id, []).append(outer_way_id)
+                    elif not is_part:
+                        # 穴を持つ outline を outline_by_db_id にも登録する。
+                        # 下の「parts を持つ outline」ループが、この building_db_id を
+                        # parent_building_id に持つ building:part 行を同じバッチで見つけた
+                        # 場合、type=building relation をもう1つ作ってしまい、この building
+                        # について type=multipolygon と type=building の2つのタグ付き
+                        # relation が出力される (テストでのみ再現、
+                        # test_multipolygon_relation_id_does_not_collide_with_parts_relation
+                        # 参照)。
+                        #
+                        # 実データではこの組み合わせは起こらない: parent_building_id は
+                        # importer の親子マップからのみ埋まるが、このプラン Task 1 で新規
+                        # import は親子リンクを作らなくなった (常に空)。ring_id > 0 は
+                        # Task 3 の multipolygon 経路でのみ作られる。同じ import 実行・同じ
+                        # ファイルに由来する以上、1行は「古い行 (親リンクを持ちうる。
+                        # ring_id はカラムのデフォルト値で全て 0)」か「新しい行 (ring を
+                        # 持ちうる。親リンクは常に無い)」のどちらかであり、両方は成立し
+                        # 得ない。そのため、ここで two-relation を防ぐ分岐は入れていない
+                        # (この前提が崩れたら要見直し)。
+                        outline_by_db_id[building_db_id] = building
+
+                    rel_elem = ET.Element('relation')
+                    rel_elem.set('id', str(self._relation_id(
+                        building_db_id, self.RELATION_KIND_MULTIPOLYGON)))
+                    rel_elem.set('visible', 'true')
+                    rel_elem.set('version', '1')
+                    rel_elem.set('changeset', '1')
+                    rel_elem.set('timestamp', timestamp)
+                    rel_elem.set('user', 'osmfj-plateau')
+                    rel_elem.set('uid', '1')
+                    for ring_no in sorted(rings):
+                        m = ET.SubElement(rel_elem, 'member')
+                        m.set('type', 'way')
+                        m.set('ref', str(ring_way_ids[ring_no]))
+                        m.set('role', 'outer' if ring_no == 0 else 'inner')
+                    type_tag = ET.SubElement(rel_elem, 'tag')
+                    type_tag.set('k', 'type')
+                    type_tag.set('v', 'multipolygon')
+                    self._emit_building_tags(rel_elem, building, is_part)
+                    _register_element_id(
+                        'relation',
+                        self._relation_id(building_db_id, self.RELATION_KIND_MULTIPOLYGON))
+                    all_relations.append(rel_elem)
+
+                    processed_buildings += 1
 
             except Exception as e:
                 logger.warning(f"建物処理エラー {building.get('id', 'unknown')}: {e}")
@@ -595,7 +779,8 @@ class OSMFJPlateauAPI:
                 # → relation を作らず、parts は単独 way として残す
                 continue
             rel_elem = ET.Element('relation')
-            rel_elem.set('id', str(self.RELATION_ID_OFFSET - parent_db_id))
+            rel_elem.set('id', str(self._relation_id(
+                parent_db_id, self.RELATION_KIND_BUILDING)))
             rel_elem.set('visible', 'true')
             rel_elem.set('version', '1')
             rel_elem.set('changeset', '1')
@@ -603,7 +788,7 @@ class OSMFJPlateauAPI:
             rel_elem.set('user', 'osmfj-plateau')
             rel_elem.set('uid', '1')
             # outline メンバー
-            outline_way_id = -parent_db_id
+            outline_way_id = self._way_id(parent_db_id)
             m = ET.SubElement(rel_elem, 'member')
             m.set('type', 'way')
             m.set('ref', str(outline_way_id))
@@ -619,6 +804,8 @@ class OSMFJPlateauAPI:
             type_tag.set('k', 'type')
             type_tag.set('v', 'building')
             self._emit_building_tags(rel_elem, outline, is_part=False)
+            _register_element_id(
+                'relation', self._relation_id(parent_db_id, self.RELATION_KIND_BUILDING))
 
             all_relations.append(rel_elem)
 

@@ -375,16 +375,18 @@ def test_representative_point_omitted_for_broken_part_geometry(
     root = ET.fromstring(resp.content)
 
     ways_by_id = {w.get('id'): w for w in root.findall('way')}
-    outline_way = ways_by_id.get(str(-outline_id))
-    part_way = ways_by_id.get(str(-part_id))
+    # way id は building_db_id * 1000 (ring 0)。詳細は osmfj_plateau_api.py の
+    # _way_id / WAY_ID_RING_MULTIPLIER 参照。
+    outline_way = ways_by_id.get(str(-(outline_id * 1000)))
+    part_way = ways_by_id.get(str(-(part_id * 1000)))
 
     # Both ways must be present: the broken-geometry part must survive
     # `related_parts`' WHERE and be emitted by `buildings_to_osm_xml`
     # (it has a valid 4-point node ring, independent of `geom`).
     assert outline_way is not None, \
-        f"outline way -{outline_id} missing from response ways: {sorted(ways_by_id)}"
+        f"outline way -{outline_id * 1000} missing from response ways: {sorted(ways_by_id)}"
     assert part_way is not None, \
-        f"broken-geometry part way -{part_id} missing from response ways " \
+        f"broken-geometry part way -{part_id * 1000} missing from response ways " \
         f"(related_parts should not filter it out): {sorted(ways_by_id)}"
 
     assert 'representative_point' in _tags(outline_way), \

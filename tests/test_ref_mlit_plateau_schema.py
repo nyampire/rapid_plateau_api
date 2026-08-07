@@ -50,6 +50,31 @@ class TestEnsureSchemaAddsRefColumn:
         importer._ensure_schema()
         assert 'ref_mlit_plateau' in self._columns(conn)
 
+    def test_ring_id_is_added_to_nodes(
+        self, fresh_plateau_full_schema, integration_db_url, tmp_path, monkeypatch
+    ):
+        conn = fresh_plateau_full_schema
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE plateau_building_nodes DROP COLUMN IF EXISTS ring_id")
+        conn.commit()
+
+        monkeypatch.setattr(PlateauImporter2PostGIS, '_test_connection', lambda self: None)
+        monkeypatch.setattr(
+            PlateauImporter2PostGIS, '_initialize_id_counters', lambda self: None
+        )
+        data_dir = tmp_path / '35215'
+        data_dir.mkdir()
+        importer = PlateauImporter2PostGIS(
+            data_dir=str(data_dir), postgres_url=integration_db_url, citycode='35215'
+        )
+        importer._ensure_schema()
+
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'plateau_building_nodes'
+        """)
+        assert 'ring_id' in {r[0] for r in cur.fetchall()}
+
 
 @pytest.mark.integration
 class TestInsertActuallyStoresTheId:

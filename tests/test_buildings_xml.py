@@ -4,6 +4,7 @@ osmfj_plateau_api.py の buildings エンドポイントと buildings_to_osm_xml
 主要な機能なのにテストがなかったため新規追加。
 """
 
+import logging
 import sys
 import xml.etree.ElementTree as ET
 from unittest.mock import MagicMock, patch
@@ -173,7 +174,7 @@ class TestBuildingsToOsmXml:
         root = ET.fromstring(xml_str)
 
         way = root.find('way')
-        assert way.get('id') == '-42'  # building_id を負にしたもの
+        assert way.get('id') == str(-(42 * 1000))  # building_id * 1000 を負にしたもの
 
         for node in root.findall('node'):
             node_id = int(node.get('id'))
@@ -508,10 +509,10 @@ class TestBuildingsToOsmXmlRelations:
         members = rel.findall('member')
         roles = [(m.get('type'), m.get('ref'), m.get('role')) for m in members]
         # outline メンバー
-        assert ('way', '-1', 'outline') in roles
+        assert ('way', str(-(1 * 1000)), 'outline') in roles
         # part メンバー
-        assert ('way', '-2', 'part') in roles
-        assert ('way', '-3', 'part') in roles
+        assert ('way', str(-(2 * 1000)), 'part') in roles
+        assert ('way', str(-(3 * 1000)), 'part') in roles
 
     def test_relation_tags_duplicate_outline_tags(self, api):
         """relation には type=building と outline のタグを duplicate"""
@@ -529,17 +530,17 @@ class TestBuildingsToOsmXmlRelations:
         assert 'building:part' not in tags
 
     def test_relation_id_negative_and_distinct_from_ways(self, api):
-        """relation の id は -1_000_000 - outline_db_id で way と衝突しない"""
+        """relation の id は -(outline_db_id * 10 + 1) で way と衝突しない"""
         outline = _make_building(building_id=42)
         p = _make_part(part_id=100, parent_id=42)
         xml_str = api.buildings_to_osm_xml([outline, p])
         root = ET.fromstring(xml_str)
         rel = root.find('relation')
         rel_id = int(rel.get('id'))
-        # way id は -outline_db_id, -part_db_id
+        assert rel_id == -(42 * 10 + 1)
+        # way id は -outline_db_id*1000, -part_db_id*1000
         way_ids = {int(w.get('id')) for w in root.findall('way')}
         assert rel_id not in way_ids
-        assert rel_id < -1_000_000  # オフセット適用済み
 
     def test_part_without_outline_in_batch_emits_part_only(self, api):
         """parent が同じバッチに含まれない場合、part は単独 way、relation 無し"""
@@ -566,7 +567,7 @@ class TestBuildingsToOsmXmlRelations:
             for m in r.findall('member'):
                 if m.get('role') == 'outline':
                     outline_refs.add(m.get('ref'))
-        assert outline_refs == {'-1', '-10'}
+        assert outline_refs == {str(-(1 * 1000)), str(-(10 * 1000))}
 
 
 class TestBuildingsToOsmXmlNodeSharing:
@@ -609,8 +610,8 @@ class TestBuildingsToOsmXmlNodeSharing:
             assert len(matches) == 1, f"shared coord ({lat},{lon}) emitted {len(matches)} times: {matches}"
 
         # Both outline and part should reference the SAME node id at each shared coord
-        outline_way = next(w for w in root.findall('way') if w.get('id') == '-1')
-        part_way = next(w for w in root.findall('way') if w.get('id') == '-2')
+        outline_way = next(w for w in root.findall('way') if w.get('id') == str(-(1 * 1000)))
+        part_way = next(w for w in root.findall('way') if w.get('id') == str(-(2 * 1000)))
         outline_refs = [nd.get('ref') for nd in outline_way.findall('nd')]
         part_refs = [nd.get('ref') for nd in part_way.findall('nd')]
 
@@ -719,8 +720,8 @@ class TestDropPartsNotIntersectingParent:
         root = ET.fromstring(api.buildings_to_osm_xml(buildings))
 
         way_ids = {w.get('id') for w in root.findall('way')}
-        assert '-2' not in way_ids
-        assert '-1' in way_ids
+        assert str(-(2 * 1000)) not in way_ids
+        assert str(-(1 * 1000)) in way_ids
 
     def test_intersecting_part_is_kept(self, api):
         buildings = [
@@ -735,7 +736,7 @@ class TestDropPartsNotIntersectingParent:
         root = ET.fromstring(api.buildings_to_osm_xml(buildings))
 
         way_ids = {w.get('id') for w in root.findall('way')}
-        assert '-2' in way_ids
+        assert str(-(2 * 1000)) in way_ids
 
     def test_part_with_null_intersects_parent_is_still_emitted(self, api):
         # ST_Intersects returns NULL (not false) when a geometry involved is
@@ -756,8 +757,8 @@ class TestDropPartsNotIntersectingParent:
         root = ET.fromstring(api.buildings_to_osm_xml(buildings))
 
         way_ids = {w.get('id') for w in root.findall('way')}
-        assert '-2' in way_ids
-        assert '-1' in way_ids
+        assert str(-(2 * 1000)) in way_ids
+        assert str(-(1 * 1000)) in way_ids
 
     def test_outline_row_with_null_intersects_parent_is_still_emitted(self, api):
         # Outlines carry intersects_parent = None by design (they have no
@@ -771,7 +772,7 @@ class TestDropPartsNotIntersectingParent:
         root = ET.fromstring(api.buildings_to_osm_xml(buildings))
 
         way_ids = {w.get('id') for w in root.findall('way')}
-        assert '-1' in way_ids
+        assert str(-(1 * 1000)) in way_ids
 
     def test_orphan_part_with_null_intersects_parent_is_still_emitted(self, api):
         # Orphan parts (building_part='yes', parent_building_id None) also
@@ -787,6 +788,294 @@ class TestDropPartsNotIntersectingParent:
         root = ET.fromstring(api.buildings_to_osm_xml(buildings))
 
         way_ids = {w.get('id') for w in root.findall('way')}
-        assert '-2' in way_ids
+        assert str(-(2 * 1000)) in way_ids
 
 
+class TestMultipolygonOutput:
+    """穴のある建物は type=multipolygon で返す。
+
+    タグは relation に付ける。変換器の出力形式と同じにする。
+    """
+
+    def _hole_building(self):
+        def ring(base, lat, lon, d, r):
+            return [{'id': base + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': r}
+                    for i, (la, lo) in enumerate([
+                        (lat, lon), (lat + d, lon), (lat + d, lon + d), (lat, lon + d)])]
+        return {
+            'id': 1, 'building': 'public', 'height': 14.6, 'building_part': None,
+            'parent_building_id': None,
+            'nodes': ring(100, 33.0, 133.0, 0.001, 0) + ring(200, 33.0003, 133.0003, 0.0004, 1),
+        }
+
+    def test_relation_is_multipolygon(self, api):
+        root = ET.fromstring(api.buildings_to_osm_xml([self._hole_building()]))
+        rel = root.find('relation')
+        assert rel is not None, 'relation が出ていない'
+        tags = {t.get('k'): t.get('v') for t in rel.findall('tag')}
+        assert tags.get('type') == 'multipolygon'
+        assert tags.get('building') == 'public'
+
+    def test_roles_are_outer_and_inner(self, api):
+        root = ET.fromstring(api.buildings_to_osm_xml([self._hole_building()]))
+        roles = sorted(m.get('role') for m in root.find('relation').findall('member'))
+        assert roles == ['inner', 'outer']
+
+    def test_outer_role_is_ring0_way_and_inner_role_is_hole_way(self, api):
+        """role の値だけでなく、role がどの way を指すかまで確認する。
+
+        sorted(role) だけを見る旧テストは 'outer'/'inner' の割り当てが逆転
+        していても (ring 0 に inner を振っても) 素通りしてしまう。ここでは
+        outer メンバーが ring 0 (外形) の way を、inner メンバーが穴の座標を
+        含む way を指していることをそれぞれ確認する。
+        """
+        building = self._hole_building()
+        root = ET.fromstring(api.buildings_to_osm_xml([building]))
+        rel = root.find('relation')
+        members = {m.get('role'): m.get('ref') for m in rel.findall('member')}
+        assert set(members) == {'outer', 'inner'}
+
+        # outer 側の way id は単一 way のときと同じ規則 (ring 0) であるはず。
+        # これは ring 0 (外形) の way にしか成り立たない。
+        assert members['outer'] == str(-(building['id'] * 1000))
+
+        # inner 側の way は、穴 (ring_id == 1) の座標をすべて含んでいるはず。
+        node_coord_by_id = {
+            n.get('id'): (n.get('lat'), n.get('lon')) for n in root.findall('node')
+        }
+        hole_nodes = [n for n in building['nodes'] if n['ring_id'] == 1]
+        hole_coords = {(f"{n['lat']:.7f}", f"{n['lon']:.7f}") for n in hole_nodes}
+
+        inner_way = next(w for w in root.findall('way') if w.get('id') == members['inner'])
+        inner_way_coords = {
+            node_coord_by_id[nd.get('ref')] for nd in inner_way.findall('nd')
+        }
+        assert hole_coords <= inner_way_coords
+
+    def test_ways_carry_no_building_tag(self, api):
+        root = ET.fromstring(api.buildings_to_osm_xml([self._hole_building()]))
+        for w in root.findall('way'):
+            tags = {t.get('k') for t in w.findall('tag')}
+            assert 'building' not in tags, 'タグは relation に付ける'
+
+    def test_building_without_hole_is_still_one_way(self, api):
+        b = self._hole_building()
+        b['nodes'] = [n for n in b['nodes'] if n['ring_id'] == 0]
+        root = ET.fromstring(api.buildings_to_osm_xml([b]))
+        assert root.find('relation') is None
+        assert len(root.findall('way')) == 1
+
+    def test_invalid_ring_leaves_no_orphan_nodes(self, api):
+        """1環でも検証に失敗したら、他の環の <node> も含めて building 全体を出さない。
+
+        ring 0 (外形) は有効なまま ring 1 (穴) だけを検証失敗させる (3点未満に
+        削る)。検証 (_valid_nodes_from_ring) と生成 (_make_way_elem) を2パスに
+        分離した理由そのものを守るテスト: 1パスに戻して ring 0 の way を先に
+        作ってしまうと、ring 1 の検証失敗時に ring 0 の <node> だけが way から
+        参照されないまま response に残る (孤立点としてクライアントに描画される)。
+        """
+        b = self._hole_building()
+        b['nodes'] = [n for n in b['nodes'] if n['ring_id'] == 0 or n['sequence_id'] < 2]
+        root = ET.fromstring(api.buildings_to_osm_xml([b]))
+        assert root.findall('node') == []
+        assert root.findall('way') == []
+        assert root.findall('relation') == []
+
+    def test_multipolygon_relation_id_does_not_collide_with_parts_relation(self, api):
+        """1 建物が「穴を持つ outline」かつ「part の親」のとき、2 つの
+        relation の id が別であることを確認する。
+
+        採番は type=building が -(建物id * 10 + 1)、type=multipolygon が
+        -(建物id * 10 + 2) なので、同じ建物でも種別の桁で分かれる。
+
+        なお、この入力の組み合わせは DB には存在しえない。
+        parent_building_id を埋める親マップは取り込み側で常に空であり、
+        ring_id >= 1 は multipolygon 経路からしか出ない。両者は同じ
+        取り込み実行で決まるので、1 行が両方を持つことはない。
+        この assert は 2 つの relation が出る形を正しいと認めるものではなく、
+        id が別であることだけを固定している。
+        """
+        outline = self._hole_building()  # id=1, 穴あり, parent_building_id=None
+        part = {
+            'id': 2, 'building': None, 'height': 5.0, 'building_part': 'yes',
+            'parent_building_id': 1,
+            'nodes': [{'id': 300 + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': 0}
+                      for i, (la, lo) in enumerate([
+                          (33.0, 133.0), (33.0002, 133.0), (33.0002, 133.0002), (33.0, 133.0002)])],
+        }
+        root = ET.fromstring(api.buildings_to_osm_xml([outline, part]))
+        relations = root.findall('relation')
+        ids = [r.get('id') for r in relations]
+        assert len(ids) == len(set(ids)), f'relation id が重複している: {ids}'
+
+        types = sorted(
+            t.get('v') for r in relations for t in r.findall('tag') if t.get('k') == 'type'
+        )
+        assert types == ['building', 'multipolygon']
+
+
+class TestSyntheticIdScheme:
+    """合成 OSM id は (建物id, 役割) から型ごとに一意に決まる。
+
+    way      : -(建物id * 1000 + 環番号)
+    relation : -(建物id * 10   + 種別)
+
+    定数 offset 方式は建物 id が offset の桁に達すると族の帯が重なる。
+    本番の建物 id は約 1,490 万で、旧方式の relation オフセット (-1,000,000) を
+    既に越えていた。
+    """
+
+    def _hole_building(self, db_id=1, inner_rings=1):
+        def ring(base, lat, lon, d, r):
+            return [{'id': base + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': r}
+                    for i, (la, lo) in enumerate([
+                        (lat, lon), (lat + d, lon), (lat + d, lon + d), (lat, lon + d)])]
+        nodes = ring(1000, 33.0, 133.0, 0.01, 0)
+        for r in range(1, inner_rings + 1):
+            nodes += ring(1000 + r * 10, 33.0 + 0.0005 * r, 133.0 + 0.0005 * r, 0.0002, r)
+        return {
+            'id': db_id, 'building': 'public', 'height': 14.6, 'building_part': None,
+            'parent_building_id': None, 'nodes': nodes,
+        }
+
+    def _plain_building(self, db_id):
+        return {
+            'id': db_id, 'building': 'yes', 'height': 5.0, 'building_part': None,
+            'parent_building_id': None,
+            'nodes': [{'id': db_id * 100 + i, 'lat': la, 'lon': lo,
+                       'sequence_id': i, 'ring_id': 0}
+                      for i, (la, lo) in enumerate([
+                          (34.0, 134.0), (34.01, 134.0), (34.01, 134.01), (34.0, 134.01)])],
+        }
+
+    def test_plain_way_id_uses_the_ring_multiplier(self, api):
+        root = ET.fromstring(api.buildings_to_osm_xml([self._plain_building(7)]))
+        assert root.find('way').get('id') == str(-(7 * 1000))
+
+    def test_inner_ring_way_ids_follow_the_ring_number(self, api):
+        b = self._hole_building(db_id=7, inner_rings=2)
+        root = ET.fromstring(api.buildings_to_osm_xml([b]))
+        members = {m.get('role'): [] for m in root.find('relation').findall('member')}
+        for m in root.find('relation').findall('member'):
+            members[m.get('role')].append(m.get('ref'))
+        assert members['outer'] == [str(-(7 * 1000 + 0))]
+        assert sorted(members['inner']) == sorted(
+            [str(-(7 * 1000 + 1)), str(-(7 * 1000 + 2))]
+        )
+
+    def test_multipolygon_relation_id_uses_kind_two(self, api):
+        root = ET.fromstring(api.buildings_to_osm_xml([self._hole_building(db_id=7)]))
+        assert root.find('relation').get('id') == str(-(7 * 10 + 2))
+
+    def test_building_relation_id_uses_kind_one(self, api):
+        outline = self._plain_building(7)
+        part = self._plain_building(8)
+        part['building_part'] = 'yes'
+        part['parent_building_id'] = 7
+        root = ET.fromstring(api.buildings_to_osm_xml([outline, part]))
+        rel = root.find('relation')
+        assert rel.get('id') == str(-(7 * 10 + 1))
+        members = {m.get('role'): m.get('ref') for m in rel.findall('member')}
+        assert members['outline'] == str(-(7 * 1000))
+        assert members['part'] == str(-(8 * 1000))
+
+    def test_ids_are_unique_within_each_type(self, api):
+        """旧方式で衝突していた組を含めても、型の中で重複しない。
+
+        旧方式では type=building relation の id (-1_000_000 - id_C) と
+        type=multipolygon relation の id (-3_000_000 - id_A) が
+        id_C == id_A + 2_000_000 のときに一致した。
+        courtyard 建物 (id_A) を db_id=5 に固定し、その衝突相手 id_C =
+        2,000,005 を parts parent にして type=building relation を
+        実際に発生させる。プレーンな建物のままでは type=building
+        relation が出ないので衝突の検証にならない。
+        """
+        buildings = [self._hole_building(db_id=5)]
+        for db_id in (1, 2, 3, 100):
+            buildings.append(self._plain_building(db_id))
+        colliding_outline = self._plain_building(2_000_005)
+        colliding_part = self._plain_building(2_000_006)
+        colliding_part['building_part'] = 'yes'
+        colliding_part['parent_building_id'] = 2_000_005
+        buildings += [colliding_outline, colliding_part]
+        outline = self._plain_building(9)
+        part = self._plain_building(10)
+        part['building_part'] = 'yes'
+        part['parent_building_id'] = 9
+        buildings += [outline, part]
+
+        root = ET.fromstring(api.buildings_to_osm_xml(buildings))
+        way_ids = [w.get('id') for w in root.findall('way')]
+        rel_ids = [r.get('id') for r in root.findall('relation')]
+        assert len(way_ids) == len(set(way_ids)), f'way id が重複: {way_ids}'
+        assert len(rel_ids) == len(set(rel_ids)), f'relation id が重複: {rel_ids}'
+
+
+class TestRingLimitAndIdUniqueness:
+    """環番号の上限は API の出力側だけで守る。
+
+    上限は id の採番式の制約であって、データの制約ではない。
+    取り込み側は何も捨てないので、式を直せば次のリクエストから出る。
+    """
+
+    def _hole_building(self, db_id=1, inner_rings=1):
+        def ring(base, lat, lon, d, r):
+            return [{'id': base + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': r}
+                    for i, (la, lo) in enumerate([
+                        (lat, lon), (lat + d, lon), (lat + d, lon + d), (lat, lon + d)])]
+        nodes = ring(10 ** 7, 33.0, 133.0, 0.5, 0)
+        for r in range(1, inner_rings + 1):
+            base = 10 ** 7 + r * 10
+            nodes += ring(base, 33.0 + 0.0001 * r, 133.0 + 0.0001 * r, 0.00002, r)
+        return {
+            'id': db_id, 'building': 'public', 'height': 14.6, 'building_part': None,
+            'parent_building_id': None, 'nodes': nodes,
+        }
+
+    def test_ring_999_is_served(self, api):
+        b = self._hole_building(db_id=3, inner_rings=999)
+        root = ET.fromstring(api.buildings_to_osm_xml([b]))
+        assert root.find('relation') is not None, '環 999 本の建物が出ていない'
+        way_ids = {w.get('id') for w in root.findall('way')}
+        assert str(-(3 * 1000 + 999)) in way_ids
+
+    def test_ring_1000_is_dropped_from_the_response(self, api, caplog):
+        b = self._hole_building(db_id=3, inner_rings=1000)
+        with caplog.at_level(logging.WARNING):
+            root = ET.fromstring(api.buildings_to_osm_xml([b]))
+        assert root.find('relation') is None, '環 1000 本の建物が出力されている'
+        assert root.findall('way') == [], '一部の way だけ残っている'
+        assert root.findall('node') == [], '参照されないノードが残っている'
+        assert any('1000' in r.message for r in caplog.records), '警告が出ていない'
+
+    def test_other_buildings_survive_when_one_is_dropped(self, api):
+        big = self._hole_building(db_id=3, inner_rings=1000)
+        ok = {
+            'id': 4, 'building': 'yes', 'height': 5.0, 'building_part': None,
+            'parent_building_id': None,
+            'nodes': [{'id': 900 + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': 0}
+                      for i, (la, lo) in enumerate([
+                          (35.0, 135.0), (35.01, 135.0), (35.01, 135.01), (35.0, 135.01)])],
+        }
+        root = ET.fromstring(api.buildings_to_osm_xml([big, ok]))
+        assert [w.get('id') for w in root.findall('way')] == [str(-(4 * 1000))]
+
+    def test_duplicate_id_is_reported(self, api, caplog, monkeypatch):
+        """採番式が壊れたときの網。式を潰して衝突を作り、警告が出ることを見る。
+
+        現在の式では同型の id が衝突しないので、衝突そのものは作れない。
+        検知の経路が生きていることだけを確かめる。
+        """
+        monkeypatch.setattr(type(api), '_way_id',
+                            lambda self, building_db_id, ring_no=0: -1)
+        b1 = {
+            'id': 1, 'building': 'yes', 'height': 5.0, 'building_part': None,
+            'parent_building_id': None,
+            'nodes': [{'id': 10 + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': 0}
+                      for i, (la, lo) in enumerate([
+                          (36.0, 136.0), (36.01, 136.0), (36.01, 136.01), (36.0, 136.01)])],
+        }
+        b2 = dict(b1, id=2)
+        with caplog.at_level(logging.WARNING):
+            api.buildings_to_osm_xml([b1, b2])
+        assert any('衝突' in r.message for r in caplog.records), '重複が報告されていない'

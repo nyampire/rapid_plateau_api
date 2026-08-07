@@ -19,6 +19,7 @@ import logging
 from typing import List, Dict, Tuple, Set, Optional
 import time
 import hashlib
+import math
 import re
 from collections import defaultdict
 
@@ -32,6 +33,42 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# 極小ポリゴンとみなす面積の上限 (m²)。
+#
+# 本番 1,489 万棟の実データ (2026-08-06 計測、#44) の最小面積は 0.3 m² なので、この値は実データに触れない。
+# 1 m² 未満の 2,264 件を無作為に抽出して細長さ (周長 ÷ √面積) を測ると 4.0〜8.1 で、
+# 正方形の 4.0 に近い。degenerate な細片なら数十から数百になる。
+# つまり本番に degenerate な多角形は無く、この番人が実際に捕まえるものは存在しない。
+# それでも面積ゼロに近い多角形は PostGIS 上も無効になるので、番人としては残す。
+TINY_AREA_M2 = 0.1
+
+# 緯度 1 度あたりの距離 (m)。建物規模では緯度による変化を無視できる。
+_METERS_PER_DEGREE_LAT = 111320.0
+
+
+def _triangle_area_m2(coords):
+    """三角形の面積を m² で返す。
+
+    `coords` は (lon, lat) のタプルの列で、先頭 3 点を使う。
+
+    座標が経緯度なので、shoelace をそのまま使うと単位が度の二乗になる。
+    緯度 1 度はおよそ 111,320 m、経度 1 度は緯度によって縮む (111,320 × cos(緯度))。
+    建物規模の多角形なら、この補正で誤差は 1% を大きく下回る。
+    111,320 m は赤道上の値で実際の緯度 1 度は日本の緯度帯 (24〜46 度) で
+    110,760〜111,150 m の範囲。この差による面積の系統誤差は緯度 34 度で約 +0.25%、
+    24 度で約 +0.45% (経度側の縮小分と部分的に相殺するため、緯度側の誤差単独より小さい)。
+
+    PostGIS を使う案は、この判定が INSERT の前に走るので合わない。
+    shapely や pyproj を足す案は、importer が標準ライブラリと psycopg2 だけで
+    動いている構成を崩す。
+    """
+    (x1, y1), (x2, y2), (x3, y3) = coords[0], coords[1], coords[2]
+    area_deg2 = abs((x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)) / 2)
+    lat_rad = math.radians((y1 + y2 + y3) / 3)
+    meters_per_degree_lon = _METERS_PER_DEGREE_LAT * math.cos(lat_rad)
+    return area_deg2 * _METERS_PER_DEGREE_LAT * meters_per_degree_lon
+
 
 class PlateauImporter2PostGIS:
     def __init__(self,
@@ -122,20 +159,22 @@ class PlateauImporter2PostGIS:
             try:
                 cur = conn.cursor()
                 cur.execute("""
-                    SELECT column_name FROM information_schema.columns
-                    WHERE table_name='plateau_buildings'
-                      AND column_name IN ('building_part', 'parent_building_id',
-                                          'ref_mlit_plateau')
+                    SELECT table_name, column_name FROM information_schema.columns
+                    WHERE (table_name='plateau_buildings'
+                           AND column_name IN ('building_part', 'parent_building_id',
+                                               'ref_mlit_plateau'))
+                       OR (table_name='plateau_building_nodes'
+                           AND column_name = 'ring_id')
                 """)
-                existing = {row[0] for row in cur.fetchall()}
+                existing = {(row[0], row[1]) for row in cur.fetchall()}
                 added = []
-                if 'building_part' not in existing:
+                if ('plateau_buildings', 'building_part') not in existing:
                     cur.execute("ALTER TABLE plateau_buildings ADD COLUMN building_part TEXT")
                     added.append('building_part')
-                if 'ref_mlit_plateau' not in existing:
+                if ('plateau_buildings', 'ref_mlit_plateau') not in existing:
                     cur.execute("ALTER TABLE plateau_buildings ADD COLUMN ref_mlit_plateau TEXT")
                     added.append('ref_mlit_plateau')
-                if 'parent_building_id' not in existing:
+                if ('plateau_buildings', 'parent_building_id') not in existing:
                     cur.execute(
                         "ALTER TABLE plateau_buildings "
                         "ADD COLUMN parent_building_id INTEGER "
@@ -147,6 +186,12 @@ class PlateauImporter2PostGIS:
                         "WHERE parent_building_id IS NOT NULL"
                     )
                     added.append('parent_building_id')
+                if ('plateau_building_nodes', 'ring_id') not in existing:
+                    cur.execute(
+                        "ALTER TABLE plateau_building_nodes "
+                        "ADD COLUMN ring_id INTEGER NOT NULL DEFAULT 0"
+                    )
+                    added.append('ring_id')
                 if added:
                     conn.commit()
                     logger.info(f"🗂️ スキーマ拡張: {', '.join(added)} を追加")
@@ -369,14 +414,43 @@ class PlateauImporter2PostGIS:
         logger.info(f"✅ 展開完了: {processed_count}件処理, {len(osm_files)}個のOSMファイル")
         return osm_files
 
+    @staticmethod
+    def _ring_key(nd_refs):
+        """閉じたリングを、始点の位置と向きの違いを吸収した形にする。
+
+        同じリングでも、出力される way によって始点と向きが違うことがある。
+        ノード id の列をそのまま比べると別物に見えるので、最小の id を先頭に回し、
+        逆向きと比べて小さいほうを選ぶ。
+
+        リングとして成り立たないもの (2 点未満) は None を返す。
+        """
+        if not nd_refs:
+            return None
+        refs = list(nd_refs)
+        if len(refs) >= 2 and refs[0] == refs[-1]:
+            refs = refs[:-1]      # 閉鎖点を落とす
+        if len(refs) < 3:
+            return None
+        best = None
+        for seq in (refs, refs[::-1]):
+            i = seq.index(min(seq))
+            rotated = tuple(seq[i:] + seq[:i])
+            if best is None or rotated < best:
+                best = rotated
+        return best
+
     def parse_osm_file_safe(self, osm_file: Path) -> Tuple[Dict, List]:
         """安全なOSMファイル解析（修復済み技術）
 
-        building:part 対応:
-        - <relation type=building> をパースし、role=outline/role=part の way を識別
-        - building タグを持つ way は単純な building、または relation の outline
-        - building:part タグを持つ way は part (relation 経由でも単独でも対応)
-        - 各 building/part に対し building_part フラグと parent_outline_way_id を付与
+        building / building:part 対応 (importer source-fidelity task 1):
+        - <relation type=building> は読まない。融合で作られた合成 outline と
+          その親子関係を取り込まないため。よって parent_outline_way_id は
+          常に None、is_part は常に False になる。
+        - `ref:MLIT_PLATEAU` タグを持たない building/building:part way は
+          融合で作られた合成形状とみなし、取り込まない。
+        - `ref:MLIT_PLATEAU` を持つ way は building:part タグが付いていても
+          実在する独立した建物として扱う（変換器は CityGML の BuildingPart
+          を読まないため、真の部分立体は出力に存在しない）。
         """
         try:
             tree = ET.parse(osm_file)
@@ -390,32 +464,77 @@ class PlateauImporter2PostGIS:
         nodes = {}
         buildings = []
 
-        # relation 解析: type=building の relation から
-        # part_way_id → parent_outline_way_id のマップを構築
+        # type=building の relation は読まない。
+        # この relation は「接触する建物を融合したまとまり」であり、outline は
+        # 融合で作られた形状、part は取り込まれた実在建物である。元データの
+        # BuildingPart に由来するものではない（変換器はそれを読んでいない）。
+        # 親子関係を作ると実在しない建物を親にすることになるため、作らない。
         part_to_outline = {}
+
+        # 建物を表す type=multipolygon は、穴のある建物である。
+        # outer を外側、inner を内側のリングとして 1 棟にまとめる。
+        # building だけでなく building:part も見る。融合は中庭のある建物を
+        # building:part に降格させるが、降格しても実在建物であることは変わらない。
+        # way 側の判定 (is_building or is_part) と同じ形にそろえている。
+        # inner の way には building:part=yes が付くが、これは建物ではなく穴なので
+        # 独立した建物として収集しない (mp_inner_way_ids)。outer も同様に、
+        # 単独の建物として重複収集しないよう mp_outer_way_ids に記録する。
+        mp_inner_way_ids = set()
+        mp_buildings = []
         for rel_elem in root.findall('relation'):
-            rel_tags = {}
-            for tag_elem in rel_elem.findall('tag'):
-                k = tag_elem.get('k')
-                v = tag_elem.get('v')
-                if k and v:
-                    rel_tags[k] = v
-            if rel_tags.get('type') != 'building':
+            rel_tags = {t.get('k'): t.get('v') for t in rel_elem.findall('tag')
+                        if t.get('k') and t.get('v')}
+            if rel_tags.get('type') != 'multipolygon':
                 continue
-            outline_way_id = None
-            part_way_ids = []
+            if 'building' not in rel_tags and 'building:part' not in rel_tags:
+                continue
+            outer, inners = [], []
             for m in rel_elem.findall('member'):
                 if m.get('type') != 'way':
                     continue
-                role = m.get('role')
-                ref = m.get('ref')
-                if role == 'outline':
-                    outline_way_id = ref
-                elif role == 'part':
-                    part_way_ids.append(ref)
-            if outline_way_id:
-                for pwid in part_way_ids:
-                    part_to_outline[pwid] = outline_way_id
+                if m.get('role') == 'outer':
+                    outer.append(m.get('ref'))
+                elif m.get('role') == 'inner':
+                    inners.append(m.get('ref'))
+                    mp_inner_way_ids.add(m.get('ref'))
+            if len(outer) == 1:
+                mp_buildings.append((rel_elem.get('id'), rel_tags, outer[0], inners))
+            else:
+                # outer が 0 個または複数個の relation はここで組み立てを諦める。
+                # inner way はこの building から除外済み (穴として消える)、outer way は
+                # (あれば) 通常の building way として別途収集されるので建物自体は残るが、
+                # 中庭が塞がれた状態になる。件数は稀と想定しているのでログに残す。
+                logger.warning(
+                    f"⚠️ multipolygon relation {rel_elem.get('id')} をスキップ: "
+                    f"outer member が {len(outer)} 個 (期待値 1)"
+                )
+        mp_outer_way_ids = {mp[2] for mp in mp_buildings}
+
+        # 変換器は穴のある建物を 2 つの要素で出すことがある。
+        # 穴を潰した way は建物 ID を持ち、穴のある multipolygon は gml:id しか持たない。
+        # 片方ずつしか持っていないので、外側リングが一致する組を 1 棟に統合する。
+        # ジオメトリは multipolygon から、識別子は way から取る。
+        #
+        # 統合しないと、way のループが先に走るぶん穴無しが先に登録され、multipolygon は
+        # 重複ジオメトリ判定 (外側リングのみでハッシュする) に当たって捨てられる。
+        # 建物としては入るが中庭が塗り潰される。
+        #
+        # 撤去条件: 変換器が 1 棟を 1 要素で出すようになり、実データで twin が 0 件に
+        # なったとき。周南市 81 メッシュでは降格 multipolygon 40 件のうち 27 件が該当し、
+        # 27 件すべてで元データの gml:id -> uro:buildingID が way の ref と一致した。
+        # building タグ付きの multipolygon 117 件には 1 件も無い。
+        # 座標検証を通す前の生の nd 列。リングの照合はノード id で行うので、
+        # 検証で 1 点でも落ちると別のリングに見えてしまう。生のまま比べる。
+        raw_way_nd_refs = {
+            w.get('id'): [nd.get('ref') for nd in w.findall('nd')]
+            for w in root.findall('way')
+        }
+        twin_ref_by_rel_id = {}
+        mp_ring_key_to_rel_id = {}
+        for rel_id, _rel_tags, outer_way_id, _inners in mp_buildings:
+            key = self._ring_key(raw_way_nd_refs.get(outer_way_id))
+            if key is not None:
+                mp_ring_key_to_rel_id[key] = rel_id
 
         # ノード収集（座標検証付き）
         for node_elem in root.findall('node'):
@@ -453,7 +572,12 @@ class PlateauImporter2PostGIS:
                 continue
 
         # 建物ウェイ収集 (building または building:part を持つ way が対象)
+        # way_id → nd_refs は multipolygon の outer/inner 解決にも使うので、
+        # タグの有無に関わらず全 way について記録する。
+        all_way_nd_refs = {}
         for way_elem in root.findall('way'):
+            way_id = way_elem.get('id')
+
             tags = {}
             for tag_elem in way_elem.findall('tag'):
                 key = tag_elem.get('k')
@@ -461,19 +585,39 @@ class PlateauImporter2PostGIS:
                 if key and value:
                     tags[key] = value
 
+            nd_refs = []
+            for nd_elem in way_elem.findall('nd'):
+                nd_ref = nd_elem.get('ref')
+                if nd_ref in nodes:
+                    nd_refs.append(nd_ref)
+            all_way_nd_refs[way_id] = nd_refs
+
+            # multipolygon の outer/inner として取り込み済みの way は、独立した
+            # 建物として重複収集しない。inner の building:part=yes は建物では
+            # なく穴を表すタグなので無視する。outer に building + ref:MLIT_PLATEAU
+            # が付いていても同様（実データで起こりうる）。
+            if way_id in mp_inner_way_ids or way_id in mp_outer_way_ids:
+                continue
+
             # 建物判定: building または building:part のいずれかがあれば対象
             is_building = bool(tags.get('building'))
             is_part = bool(tags.get('building:part'))
             if not (is_building or is_part):
                 continue
 
-            way_id = way_elem.get('id')
-            nd_refs = []
+            # 建物 ID を持たない建物 way は、融合で作られた合成形状である。
+            # 元データに対応する形状が無いので取り込まない (10 メッシュ 386 本で確認)。
+            ref_mlit = tags.get('ref:MLIT_PLATEAU')
+            if (is_building or is_part) and not ref_mlit:
+                continue
 
-            for nd_elem in way_elem.findall('nd'):
-                nd_ref = nd_elem.get('ref')
-                if nd_ref in nodes:
-                    nd_refs.append(nd_ref)
+            # 穴を潰した相方 (twin) なら、独立した建物として収集しない。
+            # 代わりに識別子を multipolygon 側に渡し、1 棟として保存する。
+            twin_rel_id = mp_ring_key_to_rel_id.get(
+                self._ring_key(raw_way_nd_refs.get(way_id)))
+            if twin_rel_id is not None:
+                twin_ref_by_rel_id[twin_rel_id] = ref_mlit
+                continue
 
             # 最低3点でポリゴン形成
             if len(nd_refs) >= 3:
@@ -481,14 +625,52 @@ class PlateauImporter2PostGIS:
                 parent_outline_way_id = part_to_outline.get(way_id) if is_part else None
                 buildings.append({
                     'way_id': way_id,
+                    # 変換出力のどの要素から来たかの記録。osmEntity.id.fromOSM と
+                    # 同じ書き方で、way -10 なら 'w-10'。way_id 自体は親子解決の
+                    # キーなので生のまま残す。
+                    'plateau_id': f'w{way_id}',
                     'tags': tags,
                     'node_refs': nd_refs,
+                    'rings': [nd_refs],
                     'source_file': osm_file.name,
                     'file_prefix': file_prefix,
                     'file_key': file_key,
-                    'is_part': is_part and not is_building,  # building:part のみで building タグ無し
+                    # 建物 ID を持つ way は、building:part に降格されていても
+                    # 元は独立した建物である。変換器は CityGML の BuildingPart を
+                    # 読まないので、真の部分立体は出力に存在しない。
+                    'is_part': False,
                     'parent_outline_way_id': parent_outline_way_id,
                 })
+
+        # multipolygon (穴のある建物) を 1 棟の建物としてまとめる。
+        # ref:MLIT_PLATEAU が無くても取り込む（変換器が relation では欠落させる
+        # ことがある。周南市 10 メッシュ 15 件中 5 件、実在の校舎を含む）。
+        for rel_id, rel_tags, outer_way_id, inner_way_ids in mp_buildings:
+            outer_refs = all_way_nd_refs.get(outer_way_id)
+            if not outer_refs or len(outer_refs) < 3:
+                continue
+            rings = [outer_refs]
+            for inner_way_id in inner_way_ids:
+                inner_refs = all_way_nd_refs.get(inner_way_id)
+                if inner_refs:
+                    rings.append(inner_refs)
+            # 相方の way があれば、その建物 ID を使う。multipolygon 自身は gml:id しか
+            # 持たないので、統合しないと安定識別子が失われる。
+            twin_ref = twin_ref_by_rel_id.get(rel_id)
+            if twin_ref:
+                rel_tags = dict(rel_tags, **{'ref:MLIT_PLATEAU': twin_ref})
+            buildings.append({
+                'way_id': rel_id,
+                'plateau_id': f'r{rel_id}',
+                'tags': rel_tags,
+                'node_refs': outer_refs,
+                'rings': rings,
+                'source_file': osm_file.name,
+                'file_prefix': file_prefix,
+                'file_key': file_key,
+                'is_part': False,
+                'parent_outline_way_id': None,
+            })
 
         return nodes, buildings
 
@@ -517,7 +699,12 @@ class PlateauImporter2PostGIS:
         }
 
         # 基本建物タイプ
-        building_type = tags.get('building', 'yes')
+        # 融合はキーを building から building:part に変えるが、値は残す。
+        # 周南市 81 メッシュ 66,319 棟の実測で、building:part=house の way は
+        # 元データの用途 411、building=house の way も 411 と一致した。12 の型
+        # すべてで最頻用途が一致する。よって building が無ければ building:part の
+        # 値を型として読む。両方あるときは building を優先する。
+        building_type = tags.get('building') or tags.get('building:part') or 'yes'
         if building_type and building_type != 'no':
             result['building'] = building_type
 
@@ -638,6 +825,7 @@ class PlateauImporter2PostGIS:
             "error": 0,             # 例外発生
         }
         skipped_buildings = []  # スキップした建物の詳細記録
+        max_inner_rings = 0        # 観測した内側リングの最大本数
 
         for i, building in enumerate(all_buildings, 1):
             try:
@@ -650,29 +838,54 @@ class PlateauImporter2PostGIS:
                 node_refs = building['node_refs']
                 source_file = building['source_file']
 
-                # 座標収集・ユニークID使用
-                coords = []
+                # 座標収集・ユニークID使用。環ごとに集める
+                # (rings[0] が外側、以降が内側=穴)。内側リングが閉鎖後4点未満
+                # (描画不可能な穴) なら、その環だけを丸ごと落として建物は残す。
+                # ここで落とすことで ring_coords と building_nodes の ring_id が
+                # 常に一致する（存在しない穴の ring_id が nodes 側にだけ残る、
+                # という不整合を作らない）。外側 (ring_no == 0) の妥当性は
+                # 既存の面積・重複チェック（下段）に任せるのでここでは判定しない。
+                ring_coords = []
                 building_nodes = []
-
-                for seq, original_node_ref in enumerate(node_refs):
-                    if original_node_ref in all_nodes:
+                max_inner_rings = max(max_inner_rings, len(building['rings']) - 1)
+                for ring_no, refs in enumerate(building['rings']):
+                    ring_pts = []
+                    ring_nodes = []
+                    for seq, original_node_ref in enumerate(refs):
+                        if original_node_ref not in all_nodes:
+                            continue
                         node_data = all_nodes[original_node_ref]
                         unique_node_id = node_data['unique_id']
                         lat = node_data['lat']
                         lon = node_data['lon']
 
-                        coords.append((lon, lat))
+                        ring_pts.append((lon, lat))
 
                         # ノードデータ（ユニークID使用）
-                        building_nodes.append((
+                        ring_nodes.append((
                             unique_node_id,        # id（負の値）
                             self.building_id_counter,  # building_id
                             seq,                   # sequence_id
                             lat,                   # lat
                             lon,                   # lon
                             lon,                   # ST_Point用 lon
-                            lat                    # ST_Point用 lat
+                            lat,                   # ST_Point用 lat
+                            ring_no,               # ring_id (0=外側、1以上=内側の穴)
                         ))
+
+                    if ring_no > 0:
+                        closed = list(ring_pts)
+                        if closed and closed[0] != closed[-1]:
+                            closed.append(closed[0])
+                        if len(closed) < 4:
+                            continue  # 壊れた内側リングを丸ごと捨てる
+
+                    ring_coords.append(ring_pts)
+                    building_nodes.extend(ring_nodes)
+
+                # 外側の環の座標。面積検算・重複判定は外側のみで行う
+                # (穴は面積や重複の対象にしない)。
+                coords = ring_coords[0] if ring_coords else []
 
                 # ポリゴン形成チェック
                 if len(coords) >= 3:
@@ -691,23 +904,40 @@ class PlateauImporter2PostGIS:
 
                     # 面積チェック（極小ポリゴン除外）
                     if len(coords) >= 4:
-                        # 簡易面積計算
                         area_check = True
+                        area = None
                         if len(coords) == 4:  # 三角形
-                            x1, y1 = coords[0]
-                            x2, y2 = coords[1]
-                            x3, y3 = coords[2]
-                            area = abs((x1*(y2-y3) + x2*(y3-y1) + x3*(y1-y2))/2)
-                            if area < 0.000001:  # 極小面積
+                            # 従来はここで度の二乗のまま 1e-6 と比べていた。
+                            # 1e-6 度² は緯度 34 度でおよそ 10,190 m² にあたり、
+                            # 1 万 m² 未満の三角形がすべて落ちていた (#44)。
+                            area = _triangle_area_m2(coords)
+                            if area < TINY_AREA_M2:
                                 area_check = False
 
                         if area_check:
                             # タグ変換
                             converted_tags = self.convert_building_tags_enhanced(tags, source_file)
 
-                            # WKT作成
-                            coords_str = ','.join([f"{lon} {lat}" for lon, lat in coords])
-                            polygon_wkt = f"POLYGON(({coords_str}))"
+                            # WKT作成。外側と内側をまとめて 1 つの POLYGON にする。
+                            # 内側リング (穴) は中庭であり、塗りつぶさない。壊れた
+                            # 内側リングは座標収集の時点で ring_coords から既に
+                            # 除外済み（building_nodes とのズレを作らないため）。
+                            # ここでの再チェックは念のための防御。外側
+                            # (ring_coords[0] = coords) は面積チェックを通過済み
+                            # なのでここでは常に有効。
+                            ring_wkts = []
+                            for ring in ring_coords:
+                                if not ring:
+                                    continue
+                                r = list(ring)
+                                if r[0] != r[-1]:
+                                    r.append(r[0])
+                                if len(r) < 4:
+                                    continue
+                                ring_wkts.append(
+                                    '(' + ','.join(f"{lon} {lat}" for lon, lat in r) + ')'
+                                )
+                            polygon_wkt = f"POLYGON({','.join(ring_wkts)})"
 
                             # 住所を結合
                             addr_parts = []
@@ -736,7 +966,7 @@ class PlateauImporter2PostGIS:
                                 converted_tags.get('building_levels'),  # building_levels
                                 None,                               # building_levels_underground
                                 converted_tags.get('source_dataset'),   # source_dataset
-                                building['way_id'],                 # plateau_id
+                                building['plateau_id'],             # plateau_id
                                 polygon_wkt,                        # geometry_wkt
                                 converted_tags.get('name'),         # name
                                 addr_full,                          # addr_full
@@ -790,7 +1020,7 @@ class PlateauImporter2PostGIS:
                                     "座標が重複・近接しているか、EPSG変換時の精度損失により"
                                     "面積がほぼゼロになっている。OSM変換ツールは座標をそのまま"
                                     "変換するため、.osmファイル側の問題ではない。",
-                                "diagnosis": "ポリゴンの面積が極小 (< 0.000001度^2, 約0.01m^2)。"
+                                "diagnosis": f"ポリゴンの面積が極小 (area={area:.4f}m^2 < TINY_AREA_M2={TINY_AREA_M2}m^2)。"
                                     "頂点座標が同一地点に集中しているか、CityGMLのLOD0フットプリントが正しく生成されていない可能性。",
                                 "citygml_check": "元CityGMLのbldg:lod0FootPrint (またはbldg:lod0RoofEdge) 内の"
                                     "gml:posList座標値に重複や極端な近接がないか確認。"
@@ -884,6 +1114,7 @@ class PlateauImporter2PostGIS:
                     }
                     logger.info(f"     - {reason_labels.get(reason, reason)}: {count:,}件")
         logger.info(f"   総ノード: {len(nodes_data):,}件")
+        logger.info(f"   内側リングの最大本数: {max_inner_rings}")
 
         # スキップした建物の詳細をJSONファイルに出力
         if skipped_buildings:
@@ -937,7 +1168,8 @@ class PlateauImporter2PostGIS:
             seen.add(key)
             db_building_id = osm_id_to_db_id[osm_building_id]
             mapped.append((node_data[0], db_building_id, node_data[2],
-                           node_data[3], node_data[4], node_data[5], node_data[6]))
+                           node_data[3], node_data[4], node_data[5], node_data[6],
+                           node_data[7]))
         return mapped, skipped, orphan
 
     def insert_to_database_batch(self, buildings_data: List, nodes_data: List,
@@ -1009,11 +1241,11 @@ class PlateauImporter2PostGIS:
                     execute_values(
                         cursor,
                         """
-                        INSERT INTO plateau_building_nodes (osm_id, building_id, sequence_id, lat, lon, geom)
+                        INSERT INTO plateau_building_nodes (osm_id, building_id, sequence_id, lat, lon, geom, ring_id)
                         VALUES %s
                         """,
                         mapped_nodes_data,
-                        template="(%s, %s, %s, %s, %s, ST_Point(%s, %s))",
+                        template="(%s, %s, %s, %s, %s, ST_Point(%s, %s), %s)",
                         page_size=5000
                     )
                 logger.info("✅ ノード投入完了")
@@ -1264,11 +1496,11 @@ class PlateauImporter2PostGIS:
                     execute_values(
                         cursor,
                         """
-                        INSERT INTO plateau_building_nodes (osm_id, building_id, sequence_id, lat, lon, geom)
+                        INSERT INTO plateau_building_nodes (osm_id, building_id, sequence_id, lat, lon, geom, ring_id)
                         VALUES %s
                         """,
                         mapped_nodes_data,
-                        template="(%s, %s, %s, %s, %s, ST_Point(%s, %s))",
+                        template="(%s, %s, %s, %s, %s, ST_Point(%s, %s), %s)",
                         page_size=5000
                     )
                 logger.info("✅ ノード投入完了")
@@ -1342,6 +1574,33 @@ class PlateauImporter2PostGIS:
                 f.write("\n✅ 高品質インポート成功\n")
 
         logger.info(f"📋 インポートレポート作成: {report_file}")
+
+    def _merge_parsed_file(self, all_nodes: Dict, all_buildings: List, osm_file: Path) -> Tuple[Dict, List]:
+        """1 ファイルを解析し、バッチ集計用の all_nodes / all_buildings に
+        ファイルキーで名前空間化してマージする（in-place）。
+
+        citygml-osm はメッシュファイルごとに node/way/relation の id を -1 から
+        振り直すため、ファイルをまたいで同じ id が衝突する。`node_refs` だけで
+        なく `rings`（穴のある建物の外側・内側の各リング）も同じキーで
+        prefix しないと、多角形リングの座標がバッチ統合後に一件も解決できず、
+        建物ごと静かに消える（PR #41 と同種の事故）。
+
+        Returns:
+            (nodes, buildings): このファイル単独の（名前空間化前の）解析結果。
+            呼び出し側の進捗ログ用。
+        """
+        nodes, buildings = self.parse_osm_file_safe(osm_file)
+
+        key_base = self._file_key(osm_file)
+        for original_id, node_data in nodes.items():
+            all_nodes[f"{key_base}:{original_id}"] = node_data
+
+        for building in buildings:
+            building['node_refs'] = [f"{key_base}:{ref}" for ref in building['node_refs']]
+            building['rings'] = [[f"{key_base}:{r}" for r in ring] for ring in building['rings']]
+            all_buildings.append(building)
+
+        return nodes, buildings
 
     def run_complete_import(self):
         """完全インポート実行（バッチ分割対応・大規模都市OOM対策）"""
@@ -1420,16 +1679,7 @@ class PlateauImporter2PostGIS:
                     file_num = batch_start + i
                     logger.info(f"📖 [{file_num:3d}/{len(osm_files)}] 解析中: {osm_file.name}")
 
-                    nodes, buildings = self.parse_osm_file_safe(osm_file)
-
-                    key_base = self._file_key(osm_file)
-                    for original_id, node_data in nodes.items():
-                        file_specific_key = f"{key_base}:{original_id}"
-                        all_nodes[file_specific_key] = node_data
-
-                    for building in buildings:
-                        building['node_refs'] = [f"{key_base}:{ref}" for ref in building['node_refs']]
-                        all_buildings.append(building)
+                    nodes, buildings = self._merge_parsed_file(all_nodes, all_buildings, osm_file)
 
                     logger.info(f"     結果: {len(nodes):,}ノード, {len(buildings):,}建物")
 

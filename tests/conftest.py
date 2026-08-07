@@ -79,7 +79,8 @@ def fresh_plateau_schema(integration_db_url):
         cur.execute('''
             CREATE TABLE plateau_building_nodes (
                 id SERIAL PRIMARY KEY,
-                building_id INTEGER REFERENCES plateau_buildings(id)
+                building_id INTEGER REFERENCES plateau_buildings(id),
+                ring_id INTEGER NOT NULL DEFAULT 0
             )
         ''')
     yield conn
@@ -157,7 +158,8 @@ def fresh_plateau_full_schema(integration_db_url):
                 lon DOUBLE PRECISION,
                 sequence_id INTEGER,
                 building_id INTEGER
-                    REFERENCES plateau_buildings(id) ON DELETE CASCADE
+                    REFERENCES plateau_buildings(id) ON DELETE CASCADE,
+                ring_id INTEGER NOT NULL DEFAULT 0
             )
         ''')
         cur.execute('''

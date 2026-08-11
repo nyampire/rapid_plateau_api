@@ -924,6 +924,7 @@ _HOLE_OSM = textwrap.dedent("""\
     <tag k="type" v="multipolygon"/>
     <tag k="building" v="public"/>
     <tag k="height" v="14.6"/>
+    <tag k="ref:MLIT_PLATEAU" v="bldg_1f0d1f4e-2a2e-4a6f-9d0c-9a3a2f4c6b11"/>
   </relation>
 </osm>
 """)
@@ -1026,6 +1027,7 @@ _HOLE_MALFORMED_INNER_OSM = textwrap.dedent("""\
     <member type="way" ref="-20" role="inner"/>
     <tag k="type" v="multipolygon"/>
     <tag k="building" v="public"/>
+    <tag k="ref:MLIT_PLATEAU" v="bldg_1f0d1f4e-2a2e-4a6f-9d0c-9a3a2f4c6b12"/>
   </relation>
 </osm>
 """)
@@ -1184,7 +1186,8 @@ class TestRingCountIsReported:
             '<?xml version="1.0" encoding="UTF-8"?>\n<osm version="0.6">'
             + ''.join(nodes) + ''.join(ways)
             + '<relation id="-30">' + ''.join(members)
-            + '<tag k="type" v="multipolygon"/><tag k="building" v="yes"/></relation>'
+            + '<tag k="type" v="multipolygon"/><tag k="building" v="yes"/>'
+            + '<tag k="ref:MLIT_PLATEAU" v="35215-bldg-77777"/></relation>'
             + '</osm>'
         )
 
@@ -1340,6 +1343,7 @@ _DEMOTED_MP_OSM = textwrap.dedent("""\
     <tag k="building:part" v="public"/>
     <tag k="name" v="市立秋月小学校"/>
     <tag k="height" v="17.4"/>
+    <tag k="ref:MLIT_PLATEAU" v="bldg_1f0d1f4e-2a2e-4a6f-9d0c-9a3a2f4c6b13"/>
   </relation>
 </osm>
 """)
@@ -1647,3 +1651,136 @@ class TestCitygmlOsmCourtyardFixtures:
         for b in buildings:
             for k in ('area', 'fix', 'visible', 'complete'):
                 assert k not in b['tags'], f'{k} がタグとして読まれている'
+
+
+# ----------------------------------------------------------------------
+# 識別子を持たない multipolygon は融合外形である
+# ----------------------------------------------------------------------
+
+_MERGE_OUTLINE_OSM = textwrap.dedent("""\
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="-1" lat="33.0" lon="133.0"/>
+  <node id="-2" lat="33.002" lon="133.0"/>
+  <node id="-3" lat="33.002" lon="133.002"/>
+  <node id="-4" lat="33.0" lon="133.002"/>
+  <node id="-5" lat="33.0012" lon="133.0012"/>
+  <node id="-6" lat="33.0016" lon="133.0012"/>
+  <node id="-7" lat="33.0016" lon="133.0016"/>
+  <node id="-8" lat="33.0012" lon="133.0016"/>
+  <node id="-11" lat="33.0002" lon="133.0002"/>
+  <node id="-12" lat="33.0008" lon="133.0002"/>
+  <node id="-13" lat="33.0008" lon="133.0008"/>
+  <node id="-14" lat="33.0002" lon="133.0008"/>
+  <way id="-10">
+    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>
+  </way>
+  <way id="-20">
+    <nd ref="-5"/><nd ref="-6"/><nd ref="-7"/><nd ref="-8"/><nd ref="-5"/>
+  </way>
+  <way id="-30">
+    <nd ref="-11"/><nd ref="-12"/><nd ref="-13"/><nd ref="-14"/><nd ref="-11"/>
+    <tag k="building:part" v="school"/>
+    <tag k="name" v="市立大津島小学校"/>
+    <tag k="ref:MLIT_PLATEAU" v="35215-bldg-22222"/>
+  </way>
+  <relation id="-40">
+    <member type="way" ref="-10" role="outer"/>
+    <member type="way" ref="-20" role="inner"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="building:part" v="school"/>
+    <tag k="name" v="市立大津島小学校"/>
+    <tag k="height" v="12.3"/>
+  </relation>
+  <relation id="-50">
+    <member type="relation" ref="-40" role="outline"/>
+    <member type="way" ref="-30" role="part"/>
+    <tag k="type" v="building"/>
+    <tag k="building" v="school"/>
+  </relation>
+</osm>
+""")
+
+
+class TestIdentifierlessMultipolygonIsAMergeOutline:
+    """識別子を持たない multipolygon は、融合された建物群の外形である。
+
+    変換器は融合のとき `ElementRelation.margeTagValue` で outline メンバーから
+    `ref:MLIT_PLATEAU` を外す。呼び出しは `RelationMarge.matomeru` の 1 箇所だけで、
+    融合の経路にしか無い。よって multipolygon が識別子を失うのは、
+    融合された relation の outline になったときに限られる。
+
+    実測でも 2 都市 2 年度で一致した。
+
+    | | 識別子なしで取り込まれる mp | うち他の建物を含む |
+    |---|---|---|
+    | 宇城市 43213 (2025 V5、57 メッシュ) | 27 | 27 |
+    | 周南市 35215 (2024 v4、81 メッシュ) | 28 | 28 |
+
+    周南市の 28 個は 27 個が `type=building` relation の outline メンバーで、
+    その relation の part は 2 つ以上の建物 ID を持つ。
+    識別子を持つ 129 個には outline メンバーが 1 つも無い。
+
+    落としても名前は失わない。28 個のうち name を持つ 13 個は、
+    13 個すべて同じ name が同じメッシュの取り込み対象にも付いていた。
+    """
+
+    def _rows(self, bare_importer, xml=_MERGE_OUTLINE_OSM):
+        importer = bare_importer(citycode='35215')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(xml)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        return importer.process_buildings_safe(all_nodes, buildings)
+
+    def test_the_merge_outline_is_not_imported(self, bare_importer):
+        """飲み込まれた建物だけが残る。外形は実在しない建物である。"""
+        rows, _, _ = self._rows(bare_importer)
+        assert len(rows) == 1, (
+            f'融合外形が建物として取り込まれている (行数 {len(rows)})')
+        assert '35215-bldg-22222' in rows[0], '実在建物のほうが落ちている'
+
+    def test_no_building_ends_up_inside_another(self, bare_importer):
+        """これが「建物の中に建物」の作られ方だった。"""
+        rows, _, _ = self._rows(bare_importer)
+        assert len(rows) == 1
+
+    def test_a_multipolygon_with_a_gml_id_is_still_imported(self, bare_importer):
+        """識別子を持つ 129 個は実在の中庭建物である。落としてはいけない。"""
+        xml = _MERGE_OUTLINE_OSM.replace(
+            '    <tag k="height" v="12.3"/>\n',
+            '    <tag k="height" v="12.3"/>\n'
+            '    <tag k="ref:MLIT_PLATEAU"'
+            ' v="bldg_2621ed43-ee4a-45ff-87b5-3fb42e2f8f05"/>\n')
+        assert xml != _MERGE_OUTLINE_OSM, '置換対象の文字列が一致していない'
+        rows, _, _ = self._rows(bare_importer, xml)
+        assert len(rows) == 2, '中庭建物が落とされている'
+
+    def test_an_identifier_from_a_twin_way_still_counts(self, bare_importer):
+        """判定は twin の解決より後に置くこと。
+
+        現行の変換出力に、識別子を持たない multipolygon と組になる way は無い
+        (融合外形の外側リングは合成物なので、建物 ID を持つ way と一致しない)。
+        判定を twin の解決より前に置くと、将来そういう出力が出たとき、
+        識別子を持つ実在建物を黙って落とす。順序を固定するための test である。
+        """
+        xml = _MERGE_OUTLINE_OSM.replace(
+            '  <way id="-10">\n'
+            '    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>\n'
+            '  </way>\n',
+            '  <way id="-10">\n'
+            '    <nd ref="-1"/><nd ref="-2"/><nd ref="-3"/><nd ref="-4"/><nd ref="-1"/>\n'
+            '  </way>\n'
+            '  <way id="-60">\n'
+            '    <nd ref="-3"/><nd ref="-4"/><nd ref="-1"/><nd ref="-2"/><nd ref="-3"/>\n'
+            '    <tag k="building" v="school"/>\n'
+            '    <tag k="ref:MLIT_PLATEAU" v="35215-bldg-33333"/>\n'
+            '  </way>\n')
+        assert xml != _MERGE_OUTLINE_OSM, '置換対象の文字列が一致していない'
+        rows, _, _ = self._rows(bare_importer, xml)
+        hits = [r for r in rows if '35215-bldg-33333' in r]
+        assert len(hits) == 1, 'twin から識別子を受け取る建物が落ちている'
+        assert hits[0][8].count('(') >= 3, '中庭が塗り潰されている'

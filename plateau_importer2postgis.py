@@ -451,6 +451,9 @@ class PlateauImporter2PostGIS:
         - `ref:MLIT_PLATEAU` を持つ way は building:part タグが付いていても
           実在する独立した建物として扱う（変換器は CityGML の BuildingPart
           を読まないため、真の部分立体は出力に存在しない）。
+        - 同じ規則を `type=multipolygon` にも適用する。相方の way から識別子を
+          受け取ってもなお `ref:MLIT_PLATEAU` が無い multipolygon は、融合された
+          建物群の外形なので取り込まない。
         """
         try:
             tree = ET.parse(osm_file)
@@ -643,8 +646,6 @@ class PlateauImporter2PostGIS:
                 })
 
         # multipolygon (穴のある建物) を 1 棟の建物としてまとめる。
-        # ref:MLIT_PLATEAU が無くても取り込む（変換器が relation では欠落させる
-        # ことがある。周南市 10 メッシュ 15 件中 5 件、実在の校舎を含む）。
         for rel_id, rel_tags, outer_way_id, inner_way_ids in mp_buildings:
             outer_refs = all_way_nd_refs.get(outer_way_id)
             if not outer_refs or len(outer_refs) < 3:
@@ -659,6 +660,13 @@ class PlateauImporter2PostGIS:
             twin_ref = twin_ref_by_rel_id.get(rel_id)
             if twin_ref:
                 rel_tags = dict(rel_tags, **{'ref:MLIT_PLATEAU': twin_ref})
+            # ここまで来て識別子が無い multipolygon は、融合された建物群の外形である。
+            # 変換器は融合のときに outline メンバーから ref:MLIT_PLATEAU を外す
+            # (ElementRelation.margeTagValue、呼び出しは RelationMarge.matomeru だけ)。
+            # way 側と同じく、元データに対応する形状が無いので取り込まない。
+            # 実測: 宇城市 27/27、周南市 28/28 が他の実在建物を飲み込んでいた。
+            if not rel_tags.get('ref:MLIT_PLATEAU'):
+                continue
             buildings.append({
                 'way_id': rel_id,
                 'plateau_id': f'r{rel_id}',

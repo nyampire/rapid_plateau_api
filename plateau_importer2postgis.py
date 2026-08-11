@@ -71,6 +71,10 @@ def _triangle_area_m2(coords):
 
 
 class PlateauImporter2PostGIS:
+    # 行政界フィルタの SELECT を包む SAVEPOINT 名。
+    # SELECT が失敗しても直前までの INSERT を道連れにしないための退避点。
+    BOUNDARY_FILTER_SAVEPOINT = "plateau_boundary_filter"
+
     def __init__(self,
                  data_dir="./plateau_data",
                  postgres_url="postgresql://osmfj_user:secure_plateau_password@localhost:5432/osmfj_plateau",
@@ -1276,10 +1280,6 @@ class PlateauImporter2PostGIS:
         finally:
             conn.close()
 
-    # 行政界フィルタの SELECT を包む SAVEPOINT 名。
-    # SELECT が失敗しても直前までの INSERT を道連れにしないための退避点。
-    BOUNDARY_FILTER_SAVEPOINT = "plateau_boundary_filter"
-
     @staticmethod
     def _build_boundary_filter_select_sql() -> str:
         """source city の N03 行政界の外にある建物 id を選ぶ SQL。
@@ -1338,12 +1338,19 @@ class PlateauImporter2PostGIS:
         try:
             cursor.execute(f"SAVEPOINT {savepoint}")
         except Exception as e:
-            # SAVEPOINT すら張れない (autocommit / 既に abort 済み / 接続喪失)。
-            # フィルタは諦めるが、ここで例外を投げても状況は改善しないので素通り。
-            # 接続が死んでいる場合は呼び出し元の commit が失敗して import 自体が
-            # 落ちるため、成功を偽装することにはならない。
-            logger.warning(f"⚠️ 行政界フィルタの SAVEPOINT 失敗: {e}（pass-through）")
-            return 0, 0
+            if getattr(cursor.connection, "autocommit", False):
+                # autocommit では SAVEPOINT を張れないが、各文が既に commit
+                # 済みで失われる投入分が無いため素通りしてよい。
+                logger.warning(
+                    f"⚠️ 行政界フィルタの SAVEPOINT 失敗 (autocommit): {e}（pass-through）"
+                )
+                return 0, 0
+            # トランザクション中に張れない = 既に abort 済み or 接続喪失。
+            # このとき呼び出し元の commit は例外を投げずに静かに ROLLBACK する
+            # ので、素通りすると本バグと同じ「成功ログ + 0 件」に逆戻りする。
+            # import を落として異常を可視化する。
+            logger.error(f"❌ 行政界フィルタの SAVEPOINT 失敗: {e}")
+            raise
 
         try:
             cursor.execute(

@@ -1276,6 +1276,10 @@ class PlateauImporter2PostGIS:
         finally:
             conn.close()
 
+    # 行政界フィルタの SELECT を包む SAVEPOINT 名。
+    # SELECT が失敗しても直前までの INSERT を道連れにしないための退避点。
+    BOUNDARY_FILTER_SAVEPOINT = "plateau_boundary_filter"
+
     @staticmethod
     def _build_boundary_filter_select_sql() -> str:
         """source city の N03 行政界の外にある建物 id を選ぶ SQL。
@@ -1313,12 +1317,34 @@ class PlateauImporter2PostGIS:
         場合でも、parent_building_id ON DELETE CASCADE と組み合わさって
         ノードを残さず連鎖削除される。
 
+        rapid#48: 判定 SELECT は SAVEPOINT で囲む。dash_city_master が無い DB
+        (ダッシュボード未導入の新規デプロイなど) では SELECT が失敗し、
+        SAVEPOINT 無しだとトランザクションが abort 状態になって呼び出し元の
+        commit が実質 ROLLBACK になる。フィルタは「欠けても素通り」の補助層
+        なので、失敗しても直前までの INSERT は必ず生かす。
+
         Returns:
             (buildings_deleted, 0)
             nodes は CASCADE 経由で消えるので rowcount を取らない。
         """
         if not self.citycode or self.citycode == "unknown":
             return 0, 0
+
+        # SELECT は SAVEPOINT で囲む。PostgreSQL では失敗した文がトランザクション
+        # 全体を abort 状態にし、以降の文が全て弾かれた上で commit が実質 ROLLBACK
+        # になるため、SAVEPOINT 無しの try/except では「pass-through したつもりで
+        # 投入分が丸ごと消え、しかも成功ログが出る」ことになる (rapid#48)。
+        savepoint = self.BOUNDARY_FILTER_SAVEPOINT
+        try:
+            cursor.execute(f"SAVEPOINT {savepoint}")
+        except Exception as e:
+            # SAVEPOINT すら張れない (autocommit / 既に abort 済み / 接続喪失)。
+            # フィルタは諦めるが、ここで例外を投げても状況は改善しないので素通り。
+            # 接続が死んでいる場合は呼び出し元の commit が失敗して import 自体が
+            # 落ちるため、成功を偽装することにはならない。
+            logger.warning(f"⚠️ 行政界フィルタの SAVEPOINT 失敗: {e}（pass-through）")
+            return 0, 0
+
         try:
             cursor.execute(
                 self._build_boundary_filter_select_sql(), (self.citycode,)
@@ -1329,7 +1355,13 @@ class PlateauImporter2PostGIS:
             # 行政界フィルタは恒久対策の補助層であり、欠落しても import 全体を
             # 失敗させない方が安全 (Part A の API 側フィルタが残る)。
             logger.warning(f"⚠️ 行政界フィルタの SELECT 失敗: {e}（pass-through）")
+            # abort を解除して直前までの INSERT を commit 可能な状態に戻す。
+            # ここが失敗する = 接続喪失なので、握りつぶさず呼び出し元に投げる。
+            cursor.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
             return 0, 0
+
+        cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
 
         if not outside_ids:
             logger.info(

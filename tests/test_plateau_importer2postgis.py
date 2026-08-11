@@ -15,6 +15,8 @@ import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from plateau_importer2postgis import PlateauImporter2PostGIS
 
 
@@ -385,9 +387,23 @@ class TestCityBoundaryFilter:
       2. 境界外 (outside)   : 該当 ID を nodes / buildings から 2 段階で削除
       3. NULL boundary      : SQL の `boundary_geom IS NOT NULL` 句で
                               SELECT 結果が空になり、pass-through される
+      4. SELECT 失敗        : SAVEPOINT まで巻き戻して pass-through
+                              (トランザクションを abort させない)
     """
 
     SQL = None  # 各テストで _build_boundary_filter_select_sql() を再取得
+
+    @staticmethod
+    def _sqls(cursor):
+        return [call.args[0] for call in cursor.execute.call_args_list]
+
+    @staticmethod
+    def _data_sqls(cursor):
+        """SAVEPOINT 制御文を除いた、データを触る SQL だけを返す。"""
+        return [
+            sql for sql in TestCityBoundaryFilter._sqls(cursor)
+            if 'SAVEPOINT' not in sql
+        ]
 
     def test_filter_sql_structure(self):
         """SELECT SQL に Part A と同じ NOT EXISTS 相当の構造が含まれる。
@@ -414,15 +430,33 @@ class TestCityBoundaryFilter:
         b, n = importer._apply_city_boundary_filter(cursor)
 
         assert (b, n) == (0, 0)
-        # SELECT は 1 度だけ呼ばれる (フィルタ判定用)
-        assert cursor.execute.call_count == 1
-        called_sql = cursor.execute.call_args_list[0][0][0]
-        assert 'SELECT' in called_sql
+        # データを触る SQL は判定用の SELECT 1 本だけ
+        data_sqls = self._data_sqls(cursor)
+        assert len(data_sqls) == 1
+        assert 'SELECT' in data_sqls[0]
         # DELETE 系は 1 度も呼ばれない
-        assert all(
-            'DELETE' not in call.args[0]
-            for call in cursor.execute.call_args_list
-        )
+        assert all('DELETE' not in sql for sql in self._sqls(cursor))
+
+    def test_select_is_wrapped_in_savepoint(self, bare_importer):
+        """SELECT は SAVEPOINT で囲み、成功時は RELEASE する。
+
+        SAVEPOINT が無いと、SELECT の失敗 (dash_city_master 不在など) が
+        トランザクション全体を abort させ、直後の commit が実質 ROLLBACK に
+        なる。呼び出し元は成功を報告するので投入 0 件に気付けない。
+        """
+        importer = bare_importer(citycode='13203')
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+
+        importer._apply_city_boundary_filter(cursor)
+
+        sqls = self._sqls(cursor)
+        sp = PlateauImporter2PostGIS.BOUNDARY_FILTER_SAVEPOINT
+        assert sqls[0] == f'SAVEPOINT {sp}'
+        assert 'SELECT' in sqls[1]
+        assert sqls[2] == f'RELEASE SAVEPOINT {sp}'
+        # 成功時に巻き戻さない (巻き戻すと直前の INSERT まで消える)
+        assert not any('ROLLBACK TO' in sql for sql in sqls)
 
     def test_outside_boundary_deletes_buildings(self, bare_importer):
         """境界外: SELECT が ID リスト → 単一の DELETE FROM plateau_buildings が発行される。
@@ -438,22 +472,19 @@ class TestCityBoundaryFilter:
 
         b, n = importer._apply_city_boundary_filter(cursor)
 
-        # 2 回 execute: SELECT, DELETE buildings
-        assert cursor.execute.call_count == 2
-        sqls = [call.args[0] for call in cursor.execute.call_args_list]
-        assert 'SELECT' in sqls[0]
-        assert 'DELETE FROM plateau_buildings' in sqls[1]
+        # データを触るのは SELECT と DELETE buildings の 2 本だけ
+        # (SAVEPOINT 制御文は SELECT を守るためのもので、DELETE は素で走る)
+        data_sqls = self._data_sqls(cursor)
+        assert len(data_sqls) == 2
+        assert 'SELECT' in data_sqls[0]
+        assert 'DELETE FROM plateau_buildings' in data_sqls[1]
         # 削除対象 ID は SELECT 結果と一致
-        assert cursor.execute.call_args_list[1].args[1] == ([101, 102, 103],)
+        delete_call = cursor.execute.call_args_list[-1]
+        assert delete_call.args[1] == ([101, 102, 103],)
         # ノード DELETE は importer から直接は発行されない (CASCADE)
         assert all(
-            'DELETE FROM plateau_building_nodes' not in call.args[0]
-            for call in cursor.execute.call_args_list
-        )
-        # SAVEPOINT もない (CASCADE で FK violation が起きないため)
-        assert all(
-            'SAVEPOINT' not in call.args[0]
-            for call in cursor.execute.call_args_list
+            'DELETE FROM plateau_building_nodes' not in sql
+            for sql in self._sqls(cursor)
         )
         # 戻り値: buildings_deleted=rowcount, nodes_deleted=0 (CASCADE で計測不能)
         assert b == 3 and n == 0
@@ -473,8 +504,11 @@ class TestCityBoundaryFilter:
 
         assert (b, n) == (0, 0)
         # citycode が SELECT パラメータとして渡されていることを確認
-        select_params = cursor.execute.call_args_list[0].args[1]
-        assert select_params == ('13999',)
+        select_call = next(
+            call for call in cursor.execute.call_args_list
+            if 'SELECT' in call.args[0]
+        )
+        assert select_call.args[1] == ('13999',)
 
     def test_unknown_citycode_skipped(self, bare_importer):
         """citycode='unknown' / None のときはフィルタを完全スキップする
@@ -488,6 +522,18 @@ class TestCityBoundaryFilter:
             assert (b, n) == (0, 0)
             cursor.execute.assert_not_called()
 
+    @staticmethod
+    def _failing_select_cursor(exc: Exception) -> MagicMock:
+        """SELECT だけが失敗し、SAVEPOINT 制御文は通る cursor モック。"""
+        cursor = MagicMock()
+
+        def _execute(sql, *args, **kwargs):
+            if 'SAVEPOINT' not in sql:
+                raise exc
+
+        cursor.execute.side_effect = _execute
+        return cursor
+
     def test_select_failure_falls_back_to_pass_through(self, bare_importer):
         """dash_city_master 不在等で SELECT が例外を投げても import は止めない。
 
@@ -495,22 +541,115 @@ class TestCityBoundaryFilter:
         重複が出るだけで重大な破壊は起きないため pass-through が安全。
         """
         importer = bare_importer(citycode='13203')
-        cursor = MagicMock()
-        cursor.execute.side_effect = Exception('relation "dash_city_master" does not exist')
+        cursor = self._failing_select_cursor(
+            Exception('relation "dash_city_master" does not exist')
+        )
 
         b, n = importer._apply_city_boundary_filter(cursor)
 
         assert (b, n) == (0, 0)
         # SELECT 1 回で諦め、DELETE は呼ばれない
-        assert cursor.execute.call_count == 1
+        assert len(self._data_sqls(cursor)) == 1
+        assert not any('DELETE' in sql for sql in self._sqls(cursor))
 
-    def test_no_savepoint_or_node_delete_after_cascade_migration(self, bare_importer):
-        """api#20 (CASCADE 化) 後: SAVEPOINT もノード DELETE も発行されないこと。
+    def test_select_failure_rolls_back_to_savepoint(self, bare_importer):
+        """SELECT 失敗時は SAVEPOINT まで巻き戻してトランザクションを生かす。
+
+        PostgreSQL では失敗した文がトランザクションを abort 状態にし、以降の
+        文が全て弾かれる。pass-through したつもりでも呼び出し元の commit が
+        実質 ROLLBACK になり、「成功ログを出して 0 件」という最悪の失敗をする
+        (2026-08-11 に dash_city_master の無い DB で再現)。ROLLBACK TO
+        SAVEPOINT で abort を解除し、直前までの INSERT を commit 可能に保つ。
+        """
+        importer = bare_importer(citycode='13203')
+        cursor = self._failing_select_cursor(
+            Exception('relation "dash_city_master" does not exist')
+        )
+
+        importer._apply_city_boundary_filter(cursor)
+
+        sqls = self._sqls(cursor)
+        sp = PlateauImporter2PostGIS.BOUNDARY_FILTER_SAVEPOINT
+        assert sqls == [
+            f'SAVEPOINT {sp}',
+            sqls[1],  # 失敗した SELECT
+            f'ROLLBACK TO SAVEPOINT {sp}',
+            f'RELEASE SAVEPOINT {sp}',
+        ]
+        assert 'SELECT' in sqls[1]
+
+    def test_rollback_failure_is_not_swallowed(self, bare_importer):
+        """巻き戻しにすら失敗したら握りつぶさず呼び出し元に投げる。
+
+        ROLLBACK TO SAVEPOINT が失敗する = 接続喪失であり、トランザクションを
+        救う手立ては無い。ここで pass-through すると呼び出し元は「フィルタは
+        素通りしただけ」と解釈して先へ進み、本バグと同じ「成功ログ + 0 件」に
+        逆戻りする。import を落として異常を可視化するのが正しい。
+        """
+        importer = bare_importer(citycode='13203')
+        cursor = MagicMock()
+
+        def _execute(sql, *args, **kwargs):
+            if sql.startswith('SAVEPOINT'):
+                return
+            raise Exception('server closed the connection unexpectedly')
+
+        cursor.execute.side_effect = _execute
+
+        with pytest.raises(Exception, match='server closed the connection'):
+            importer._apply_city_boundary_filter(cursor)
+
+    def test_savepoint_failure_passes_through_under_autocommit(self, bare_importer):
+        """autocommit 接続では SAVEPOINT を張れないが、素通りして問題ない。
+
+        autocommit では各文が既に commit 済みで、失われる投入分が無い。
+        PostgreSQL のエラーは
+        `SAVEPOINT can only be used in transaction blocks`。
+        """
+        importer = bare_importer(citycode='13203')
+        cursor = MagicMock()
+        cursor.connection.autocommit = True
+        cursor.execute.side_effect = Exception(
+            'SAVEPOINT can only be used in transaction blocks'
+        )
+
+        b, n = importer._apply_city_boundary_filter(cursor)
+
+        assert (b, n) == (0, 0)
+        # SAVEPOINT が張れなければ SELECT には進まない
+        assert self._data_sqls(cursor) == []
+
+    def test_savepoint_failure_in_transaction_is_raised(self, bare_importer):
+        """トランザクション中に SAVEPOINT を張れない場合は握りつぶさず送出する。
+
+        非 autocommit で SAVEPOINT が失敗する = トランザクションが既に abort
+        しているか接続が死んでいる。実 DB で確認した挙動:
+
+            SAVEPOINT → `current transaction is aborted, commands ignored
+                         until end of transaction block`
+            conn.commit() → **例外を投げずに** 静かに ROLLBACK し、0 件になる
+
+        つまりここで素通りすると、本バグとまったく同じ「成功ログ + 0 件」に
+        逆戻りする。import を落として異常を可視化するのが正しい。
+        """
+        importer = bare_importer(citycode='13203')
+        cursor = MagicMock()
+        cursor.connection.autocommit = False
+        cursor.execute.side_effect = Exception(
+            'current transaction is aborted, commands ignored until end of transaction block'
+        )
+
+        with pytest.raises(Exception, match='current transaction is aborted'):
+            importer._apply_city_boundary_filter(cursor)
+
+    def test_no_savepoint_around_delete_after_cascade_migration(self, bare_importer):
+        """api#20 (CASCADE 化) 後: DELETE を SAVEPOINT で囲まず、ノード DELETE も出さない。
 
         plateau_migrate_fk_cascade.py で plateau_building_nodes.building_id を
         ON DELETE CASCADE に揃えてあれば、DELETE FROM plateau_buildings 1 文で
-        ノードと子 part も連鎖削除される。SAVEPOINT は不要。
-        旧来の 2 段階 DELETE + SAVEPOINT パターンが回帰しないことを確認する。
+        ノードと子 part も連鎖削除される。旧来の 2 段階 DELETE + SAVEPOINT
+        パターンが回帰しないことを確認する (SELECT を守る SAVEPOINT は別物で、
+        DELETE より前に RELEASE 済み)。
         """
         importer = bare_importer(citycode='13203')
         cursor = MagicMock()
@@ -519,9 +658,15 @@ class TestCityBoundaryFilter:
 
         importer._apply_city_boundary_filter(cursor)
 
-        sqls = [call.args[0] for call in cursor.execute.call_args_list]
-        assert not any('SAVEPOINT' in s for s in sqls), \
-            "SAVEPOINT should not appear after the CASCADE migration"
+        sqls = self._sqls(cursor)
+        sp = PlateauImporter2PostGIS.BOUNDARY_FILTER_SAVEPOINT
+        # SAVEPOINT 文は SELECT を守る 1 組だけ。スライスで «DELETE 以降» を見る
+        # 形にすると、旧来の «SAVEPOINT → ノード DELETE → ROLLBACK TO → 建物
+        # DELETE» が検査範囲の外側に収まって素通りしてしまう。
+        assert [s for s in sqls if 'SAVEPOINT' in s] == [
+            f'SAVEPOINT {sp}',
+            f'RELEASE SAVEPOINT {sp}',
+        ], "The only savepoint may be the one guarding the SELECT"
         assert not any('DELETE FROM plateau_building_nodes' in s for s in sqls), \
             "Nodes are now removed via CASCADE; importer should not delete them explicitly"
 

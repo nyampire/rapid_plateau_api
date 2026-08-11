@@ -159,7 +159,8 @@ def fresh_plateau_full_schema(integration_db_url):
                 sequence_id INTEGER,
                 building_id INTEGER
                     REFERENCES plateau_buildings(id) ON DELETE CASCADE,
-                ring_id INTEGER NOT NULL DEFAULT 0
+                ring_id INTEGER NOT NULL DEFAULT 0,
+                geom geometry(Point, 4326)
             )
         ''')
         cur.execute('''
@@ -254,12 +255,17 @@ def bare_importer(monkeypatch, tmp_path):
     として idempotent に用意した importer を返す。返り値は呼び出し可能な builder で、
     citycode を任意に切り替えられる。
 
+    `postgres_url` を渡せば実 DB を向いた importer も作れる (統合テスト用)。
+    その場合も上記 3 メソッドは no-op のままなので、スキーマ準備はテスト側
+    (`fresh_plateau_full_schema` など) の責任になる。
+
     使い方::
 
         def test_x(bare_importer):
             importer = bare_importer()                  # citycode='99999'
             importer = bare_importer(citycode='13203')  # 任意の citycode
             importer = bare_importer(citycode=None)     # None ハンドリングの検証
+            importer = bare_importer(citycode='13203', postgres_url=url)  # 実 DB
     """
     from plateau_importer2postgis import PlateauImporter2PostGIS
 
@@ -267,12 +273,12 @@ def bare_importer(monkeypatch, tmp_path):
     monkeypatch.setattr(PlateauImporter2PostGIS, '_initialize_id_counters', lambda self: None)
     monkeypatch.setattr(PlateauImporter2PostGIS, '_ensure_schema', lambda self: None)
 
-    def _build(citycode='99999'):
+    def _build(citycode='99999', postgres_url='fake'):
         data_dir = tmp_path / (citycode or 'unknown')
         data_dir.mkdir(parents=True, exist_ok=True)
         return PlateauImporter2PostGIS(
             data_dir=str(data_dir),
-            postgres_url='fake',
+            postgres_url=postgres_url,
             citycode=citycode,
         )
 

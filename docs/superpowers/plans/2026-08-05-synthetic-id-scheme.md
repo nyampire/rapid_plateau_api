@@ -777,6 +777,11 @@ python plateau_importer2postgis.py \
 検証用 DB には `plateau_buildings`、`plateau_building_nodes`、`dash_city_master` の 3 つを作る。
 `dash_city_master` が無いと行政界フィルタの SELECT が失敗してトランザクションが中断し、
 **1 行も入らないままログは「インポート成功」と出る**。
+
+> **訂正 (2026-08-11)。**`dash_city_master` は不要になった。
+> 失敗した SELECT を `SAVEPOINT` で囲み、宣言どおりの pass-through にしたので、
+> このテーブルが無くても行が入る。作るのは `plateau_buildings` と
+> `plateau_building_nodes` の 2 つでよい。
 取り込み後に `SELECT count(*) FROM plateau_buildings` で 3,835 を確かめること。
 
 API 応答も確認する。穴のある建物の relation id が `-(建物id × 10 + 2)`、outer way が `-(建物id × 1000)`、inner way が `-(建物id × 1000 + 1)` になっていること。

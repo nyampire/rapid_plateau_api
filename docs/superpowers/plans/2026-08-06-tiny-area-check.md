@@ -251,6 +251,11 @@ staged copy が
 3 つが要る。`dash_city_master` が無いと行政界フィルタの SELECT が失敗してトランザクションが中断し、
 **1 行も入らないままログは「インポート成功」と出る**。
 
+> **訂正 (2026-08-11)。**`dash_city_master` は要らなくなった。
+> 失敗した SELECT を `SAVEPOINT` で囲み、宣言どおりの pass-through にしたので、
+> このテーブルが無くても行が入る。要るのは `plateau_buildings` と
+> `plateau_building_nodes` の 2 つ。
+
 前回の実行のデータが残っているので、取り込み前に TRUNCATE すること。
 
 ```bash

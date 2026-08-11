@@ -599,17 +599,48 @@ class TestCityBoundaryFilter:
         with pytest.raises(Exception, match='server closed the connection'):
             importer._apply_city_boundary_filter(cursor)
 
-    def test_savepoint_failure_still_passes_through(self, bare_importer):
-        """SAVEPOINT 自体が張れない場合 (autocommit 等) もフィルタは素通りする。"""
+    def test_savepoint_failure_passes_through_under_autocommit(self, bare_importer):
+        """autocommit 接続では SAVEPOINT を張れないが、素通りして問題ない。
+
+        autocommit では各文が既に commit 済みで、失われる投入分が無い。
+        PostgreSQL のエラーは
+        `SAVEPOINT can only be used in transaction blocks`。
+        """
         importer = bare_importer(citycode='13203')
         cursor = MagicMock()
-        cursor.execute.side_effect = Exception('SAVEPOINT can only be used in transaction blocks')
+        cursor.connection.autocommit = True
+        cursor.execute.side_effect = Exception(
+            'SAVEPOINT can only be used in transaction blocks'
+        )
 
         b, n = importer._apply_city_boundary_filter(cursor)
 
         assert (b, n) == (0, 0)
         # SAVEPOINT が張れなければ SELECT には進まない
         assert self._data_sqls(cursor) == []
+
+    def test_savepoint_failure_in_transaction_is_raised(self, bare_importer):
+        """トランザクション中に SAVEPOINT を張れない場合は握りつぶさず送出する。
+
+        非 autocommit で SAVEPOINT が失敗する = トランザクションが既に abort
+        しているか接続が死んでいる。実 DB で確認した挙動:
+
+            SAVEPOINT → `current transaction is aborted, commands ignored
+                         until end of transaction block`
+            conn.commit() → **例外を投げずに** 静かに ROLLBACK し、0 件になる
+
+        つまりここで素通りすると、本バグとまったく同じ「成功ログ + 0 件」に
+        逆戻りする。import を落として異常を可視化するのが正しい。
+        """
+        importer = bare_importer(citycode='13203')
+        cursor = MagicMock()
+        cursor.connection.autocommit = False
+        cursor.execute.side_effect = Exception(
+            'current transaction is aborted, commands ignored until end of transaction block'
+        )
+
+        with pytest.raises(Exception, match='current transaction is aborted'):
+            importer._apply_city_boundary_filter(cursor)
 
     def test_no_savepoint_around_delete_after_cascade_migration(self, bare_importer):
         """api#20 (CASCADE 化) 後: DELETE を SAVEPOINT で囲まず、ノード DELETE も出さない。
@@ -628,11 +659,14 @@ class TestCityBoundaryFilter:
         importer._apply_city_boundary_filter(cursor)
 
         sqls = self._sqls(cursor)
-        delete_index = next(
-            i for i, s in enumerate(sqls) if 'DELETE FROM plateau_buildings' in s
-        )
-        assert not any('SAVEPOINT' in s for s in sqls[delete_index:]), \
-            "The DELETE must not be wrapped in a savepoint after the CASCADE migration"
+        sp = PlateauImporter2PostGIS.BOUNDARY_FILTER_SAVEPOINT
+        # SAVEPOINT 文は SELECT を守る 1 組だけ。スライスで «DELETE 以降» を見る
+        # 形にすると、旧来の «SAVEPOINT → ノード DELETE → ROLLBACK TO → 建物
+        # DELETE» が検査範囲の外側に収まって素通りしてしまう。
+        assert [s for s in sqls if 'SAVEPOINT' in s] == [
+            f'SAVEPOINT {sp}',
+            f'RELEASE SAVEPOINT {sp}',
+        ], "The only savepoint may be the one guarding the SELECT"
         assert not any('DELETE FROM plateau_building_nodes' in s for s in sqls), \
             "Nodes are now removed via CASCADE; importer should not delete them explicitly"
 

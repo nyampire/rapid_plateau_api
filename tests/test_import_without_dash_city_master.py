@@ -133,6 +133,35 @@ def test_batch_insert_persists_rows_without_dash_city_master(
 
 
 @pytest.mark.integration
+def test_batch_insert_persists_rows_when_boundary_column_missing(
+    fresh_plateau_full_schema, integration_db_url, bare_importer
+):
+    """テーブルはあるがカラムが欠けている DB でも投入行が残る。
+
+    SAVEPOINT 方式を `to_regclass` によるテーブル存在チェックより優先した根拠が
+    これ。存在チェックはテーブル不在しか救えず、スキーマのずれ
+    (plateau_migrate.py が追加する city_code の欠落、PostGIS 未導入など) では
+    存在チェックを通過した後で SELECT が落ち、同じ silent data loss になる。
+    このテストが無いと、後日「素直に存在チェックへ簡略化」しても全テストが
+    通ってしまい、設計判断ごと退行する。
+    """
+    conn = fresh_plateau_full_schema
+    with conn.cursor() as cur:
+        cur.execute('ALTER TABLE dash_city_master DROP COLUMN boundary_geom')
+
+    lat, lon = 35.6890, 139.4855
+    importer = bare_importer(citycode=CITY_CODE, postgres_url=integration_db_url)
+
+    ok = importer.insert_to_database_batch(
+        [_building_row(-1001, lat, lon)],
+        _node_rows(-1001, lat, lon, base_node_id=-2001),
+    )
+
+    assert ok is True
+    assert _count_buildings(conn) == 1
+
+
+@pytest.mark.integration
 def test_batch_insert_still_filters_when_master_present(
     fresh_plateau_full_schema, integration_db_url, bare_importer
 ):

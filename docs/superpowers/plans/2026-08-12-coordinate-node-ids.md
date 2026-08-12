@@ -15,7 +15,7 @@ Issue: [#51](https://github.com/nyampire/rapid_plateau_api/issues/51)
 
 - 対象ファイルは `osmfj_plateau_api.py` と `tests/test_buildings_xml.py` の 2 つだけ。DB のスキーマ、`plateau_importer2postgis.py`、Rapid 側には一切触らない
 - 採番の定数は `PlateauAPI` クラスの定数として置く。既存の `WAY_ID_RING_MULTIPLIER` と同じ場所、同じ書き方に合わせる
-- `lat_i` と `lon_i` は **先に `1e7` 倍して丸め、あとから原点を引く**。`(lat - 20.0) * 1e7` の順で書かない。出力の `f"{lat:.7f}"` と同じ丸めにするため
+- `lat_i` と `lon_i` は **先に `round(lat, 7)` で 7 桁に丸め、その値を `1e7` 倍して丸め、あとから原点を引く**。`(lat - 20.0) * 1e7` の順で書かない（引き算の誤差が入る）。また `round(lat * 1e7)` のように丸めずに掛けない（掛け算の時点の浮動小数点誤差で、出力の `f"{lat:.7f}"` と丸めが食い違う半端値がある）。両方を満たして初めて `f"{lat:.7f}"` と同じ丸めになる
 - ノード id は負で 0 以外。範囲外の座標だけ、警告を出して `-node_data['id']` に落ちる
 - コミットは既存の履歴に合わせ、`Co-Authored-By` の trailer を付けない
 - テストの実行は `python3 -m pytest`
@@ -128,10 +128,15 @@ Expected: FAIL。`AttributeError: 'PlateauAPI' object has no attribute '_node_id
         外れると他の座標と id が衝突し、Rapid が後から来た角を捨てて way の形が
         壊れるため、id の安定性より出力の完全性を優先する。
         """
-        # 先に 1e7 倍して丸める。出力の f"{lat:.7f}" と同じ丸めにするためで、
-        # 原点を引いてから掛けると引き算の誤差でずれることがある。
-        lat_i = round(lat * self.NODE_COORD_SCALE) - self.NODE_LAT_OFFSET
-        lon_i = round(lon * self.NODE_COORD_SCALE) - self.NODE_LON_OFFSET
+        # 先に 1e7 倍してから原点を引く。原点を先に引いて掛けると引き算の
+        # 誤差でずれることがあるため、掛け算を先にするのはそれを避けるためで、
+        # これだけでは出力の f"{lat:.7f}" と丸めが一致する保証にはならない。
+        # 1e7 倍した時点の lat は既に浮動小数点の丸め誤差を含んでいるので、
+        # その積を丸めても "35.00000015" のような half-way 値では
+        # f"{lat:.7f}" の丸めと食い違うことがある。round(lat, 7) で先に
+        # 7 桁に丸めてから 1e7 倍することで、f"{lat:.7f}" と同じ丸めが得られる。
+        lat_i = round(round(lat, 7) * self.NODE_COORD_SCALE) - self.NODE_LAT_OFFSET
+        lon_i = round(round(lon, 7) * self.NODE_COORD_SCALE) - self.NODE_LON_OFFSET
 
         if not (0 <= lat_i < self.NODE_LAT_STEPS and 0 <= lon_i < self.NODE_LON_STEPS):
             logger.warning(

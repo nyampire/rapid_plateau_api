@@ -1097,8 +1097,11 @@ class TestNodeIdFromCoordinate:
         assert nid < 0
 
     def test_id_fits_in_int64(self, api):
-        # 範囲の隅がもっとも大きな値になる
-        nid = api._node_id(46.0 - 1e-7, 154.0 - 1e-7, 1)
+        # 範囲の隅がもっとも大きな値になるのは、緯度・経度とも刻み数の
+        # 最大値 (NODE_LAT_STEPS - 1 / NODE_LON_STEPS - 1) を取る座標、
+        # すなわちちょうど 46.0 / 154.0 のとき。
+        nid = api._node_id(46.0, 154.0, 1)
+        assert nid == -83_200_000_580_000_001
         assert abs(nid) < 2 ** 63
 
     def test_same_coordinate_gives_same_id_regardless_of_db_row(self, api):
@@ -1115,11 +1118,21 @@ class TestNodeIdFromCoordinate:
                 seen.add(nid)
         assert len(seen) == 200 * 200
 
+        # 上のグリッドは 1 つの連続したブロックに収まっているので、
+        # NODE_LON_STEPS がそのブロック幅より大きければ何でも単射になり、
+        # 乗数の値そのものは検証できない。単射性を支えているのは乗数だけ
+        # なので、1 ストライドの両端で衝突しないことを別に固定する。
+        # これは NODE_LON_STEPS を留めるテスト。
+        assert api._node_id(20.0000001, 122.0, 1) != api._node_id(20.0, 154.0, 1)
+
     def test_id_matches_printed_coordinate(self, api):
-        # 出力は f"{lat:.7f}" で丸めるので、丸めた値と生の値で id が割れてはならない
-        lat, lon = 35.70000004999, 139.70000004999
+        # 出力は f"{lat:.7f}" で丸めるので、丸めた値と生の値で id が割れては
+        # ならない。35.00000015 は半端 (half-way) 値で、掛け算してから丸める
+        # 実装と、先に 7 桁へ丸めてから掛ける実装とで結果が分かれる。
+        lat, lon = 35.00000015, 139.00000015
+        printed_lat, printed_lon = f'{lat:.7f}', f'{lon:.7f}'
         assert api._node_id(lat, lon, 1) == \
-               api._node_id(float(f'{lat:.7f}'), float(f'{lon:.7f}'), 1)
+               api._node_id(float(printed_lat), float(printed_lon), 1)
 
     def test_out_of_range_falls_back_to_db_id(self, api, caplog):
         with caplog.at_level(logging.WARNING):

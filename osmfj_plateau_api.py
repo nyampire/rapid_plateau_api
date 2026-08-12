@@ -520,30 +520,11 @@ class OSMFJPlateauAPI:
                 )
             emitted_element_ids.add(key)
 
-        # Emit a single <node> for each unique (lat, lon) across the WHOLE
-        # response and reuse its id from every way that touches that coordinate.
-        # plateau_building_nodes stores a separate row per (building_id, osm_id),
-        # so identical corners — both within one building (outline/parts) and
-        # between separate buildings that share a wall — arrive with distinct
-        # ids. Emitting them unshared makes editors see the corners as separate
-        # points; JOSM then reports them as "Duplicated nodes" (api#38). Deduping
-        # was originally scoped to one relation (Rapid#33), on the assumption
-        # that cross-building sharing was handled by the importer's Phase 1
-        # dedup — but that dedup keys on (building_id, osm_id), so it never
-        # merges across buildings. Keying the map globally closes that gap: the
-        # first way to touch a coordinate registers its id, every later way
-        # references it, and coincident corners of adjacent buildings become one
-        # shared node.
-        # Value: { (lat, lon) → canonical node id (negative, the first one seen) }
-        coord_to_nid: Dict[tuple, int] = {}
-        # Tracks which canonical node ids have already produced a <node> element
-        # so duplicates from later ways simply reference the existing one.
+        # ノードの id は座標から決まる (_node_id)。同じ座標には必ず同じ id が
+        # 付くので、どの建物が先に来たかを覚える必要がない。応答をまたいでも
+        # 同じ角が同じノードになる (#51)。
+        # 同じ <node> を二度出さないために、出した id だけを記録する。
         emitted_node_ids: set = set()
-
-        def _coord_key(lat: float, lon: float) -> tuple:
-            # Match the 7-decimal precision used in the output below so float
-            # representation jitter never makes "same coordinate" look distinct.
-            return (round(lat, 7), round(lon, 7))
 
         processed_buildings = 0
         total_nodes_created = 0
@@ -616,17 +597,11 @@ class OSMFJPlateauAPI:
 
             first_node_id = None
 
-            # Look up / register the canonical node id for each coordinate
-            # in the response-wide map. The first way to touch a coordinate
-            # registers its id; every later way — whether a part of the same
-            # building or a separate neighbouring building — reuses it, so
-            # coincident corners resolve to a single shared <node>.
+            # 座標から id を決める。同じ角に触れる way は、同じ建物の部分立体
+            # でも隣の建物でも同じ id を得るので、<node> は 1 つに集まる。
             for i, node_data in enumerate(valid_nodes):
-                key = _coord_key(node_data['lat'], node_data['lon'])
-                canonical_id = coord_to_nid.get(key)
-                if canonical_id is None:
-                    canonical_id = -node_data['id']
-                    coord_to_nid[key] = canonical_id
+                canonical_id = self._node_id(node_data['lat'], node_data['lon'],
+                                             node_data['id'])
 
                 if canonical_id not in emitted_node_ids:
                     emitted_node_ids.add(canonical_id)

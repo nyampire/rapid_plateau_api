@@ -1183,3 +1183,54 @@ class TestNodeIdFromCoordinate:
         for way in ways:
             refs = [nd.get('ref') for nd in way.findall('nd')]
             assert corner_nid in refs
+
+
+class TestOsmChangePlaceholderContract:
+    """アップロードを受ける側が仮 id に課す条件を、応答の側で満たしているか。
+
+    条件の出どころは 2 つ。
+    cgimap は id を int64 で読み、作成する要素には「0 でない」と「負である」を
+    課す (osmobject.hpp)。Rails は加えて「作成する要素の仮 id は型ごとに
+    一意であること」を課す (lib/diff_reader.rb)。
+    """
+
+    def _response(self, api):
+        corner = {'lat': 32.6445365, 'lon': 130.6984598}
+        b1 = _make_building(building_id=1, building='yes', nodes=[
+            {'id': 272155033, 'lat': 32.6444162, 'lon': 130.6988233},
+            {'id': 272155034, **corner},
+            {'id': 272155035, 'lat': 32.6444965, 'lon': 130.6984413},
+        ])
+        b2 = _make_building(building_id=2, building='yes', nodes=[
+            {'id': 272163761, **corner},
+            {'id': 272163762, 'lat': 32.6446000, 'lon': 130.6984598},
+            {'id': 272163763, 'lat': 32.6446000, 'lon': 130.6985000},
+        ])
+        return ET.fromstring(api.buildings_to_osm_xml([b1, b2]))
+
+    def test_all_ids_are_negative_and_nonzero(self, api):
+        root = self._response(api)
+        for kind in ('node', 'way', 'relation'):
+            for elem in root.findall(kind):
+                value = int(elem.get('id'))
+                assert value < 0, f'{kind} id {value} が負でない'
+
+    def test_all_ids_fit_in_int64(self, api):
+        root = self._response(api)
+        for kind in ('node', 'way', 'relation'):
+            for elem in root.findall(kind):
+                assert abs(int(elem.get('id'))) < 2 ** 63
+
+    def test_ids_are_unique_within_each_type(self, api):
+        root = self._response(api)
+        for kind in ('node', 'way', 'relation'):
+            ids = [elem.get('id') for elem in root.findall(kind)]
+            assert len(ids) == len(set(ids)), f'{kind} の id が重複している'
+
+    def test_every_nd_ref_resolves_to_an_emitted_node(self, api):
+        root = self._response(api)
+        emitted = {n.get('id') for n in root.findall('node')}
+        for way in root.findall('way'):
+            for nd in way.findall('nd'):
+                assert nd.get('ref') in emitted, \
+                    f"way {way.get('id')} が未出力のノード {nd.get('ref')} を参照している"

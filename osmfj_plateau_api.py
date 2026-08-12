@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 import logging
 import os
 import uvicorn
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime
 import re
 import hashlib
@@ -377,6 +377,73 @@ class OSMFJPlateauAPI:
         """relation の合成 OSM id。kind は RELATION_KIND_* のいずれか。"""
         return -(building_db_id * self.RELATION_ID_KIND_MULTIPLIER + kind)
 
+    # ノードの id は建物ではなく座標から決める。
+    #
+    #   node : -(1 + lat_i * NODE_LON_STEPS + lon_i)
+    #
+    # way と relation は建物 id から決めているが、ノードだけは違う規則を使う。
+    # 同じ角が複数の建物に属し、DB にはその建物の数だけ行があるためで、
+    # 行の id から決めると「その応答で先に来た建物」で値が変わる (#51)。
+    #
+    # 範囲は緯度 20..46 度、経度 122..154 度。沖ノ鳥島から択捉島、
+    # 与那国島から南鳥島までを含む。
+    #
+    # 単射である理由: lon_i の最大値が NODE_LON_STEPS より小さいので、
+    # 商と余りが一意に決まり、lat_i と lon_i の両方が一致するしかない。
+    #
+    # 桁: 最大 83,200,000,580,000,001 で int64 の上限の約 111 分の 1。
+    # way id の側にある「JavaScript の安全整数 9e15」の見積もりはこちらには
+    # 当てはまらない。Rapid は entityID を文字列として持ち、数値に変換するのは
+    # relation を並べ替える osmRelation.creationOrder だけで、ノードは通らない。
+    # アップロードを受ける cgimap は仮 id を int64 で読み、条件は「負」と
+    # 「0 でない」の 2 つだけである。
+    NODE_COORD_SCALE = 10_000_000        # 7 桁
+    NODE_LAT_OFFSET = 200_000_000        # 20.0 * NODE_COORD_SCALE
+    NODE_LON_OFFSET = 1_220_000_000      # 122.0 * NODE_COORD_SCALE
+    NODE_LAT_STEPS = 260_000_001         # 緯度 20..46 度の刻み数
+    NODE_LON_STEPS = 320_000_001         # 経度 122..154 度の刻み数
+
+    def _node_id(self, lat: float, lon: float, db_node_id: int,
+                 on_out_of_range: Optional[Callable[[], None]] = None) -> int:
+        """座標から決まるノードの合成 OSM id。
+
+        範囲外の座標だけ、DB の行 id に落ちる。丸めた値が範囲を外れると他の
+        座標と id が衝突し、Rapid が後から来た角を捨てて way の形が壊れるため、
+        id の安定性より出力の完全性を優先する。
+
+        `_register_element_id` による衝突検知は way / relation にしか掛けて
+        いない。ノードは同じ id が複数回出ることが意図した動作（複数建物が
+        同じ角を共有する）なので、対象から外している。そのため、範囲外の
+        フォールバック id (`-db_node_id`) が座標由来の id と衝突しても、
+        それを検知する仕組みは無い。
+
+        範囲外の通知先は `on_out_of_range` で選べる。渡さなければここで直接
+        `logger.warning` を出す（このメソッドを単体で呼ぶときの後方互換）。
+        応答生成のホットパス (`_make_way_elem`) はノード 1 件ごとに呼ばれるので、
+        件数だけを集計するコールバックを渡し、応答単位で 1 回だけログを出す。
+        """
+        # 先に 1e7 倍してから原点を引く。原点を先に引いて掛けると引き算の
+        # 誤差でずれることがあるため、掛け算を先にするのはそれを避けるためで、
+        # これだけでは出力の f"{lat:.7f}" と丸めが一致する保証にはならない。
+        # 1e7 倍した時点の lat は既に浮動小数点の丸め誤差を含んでいるので、
+        # その積を丸めても "35.00000015" のような half-way 値では
+        # f"{lat:.7f}" の丸めと食い違うことがある。round(lat, 7) で先に
+        # 7 桁に丸めてから 1e7 倍することで、f"{lat:.7f}" と同じ丸めが得られる。
+        lat_i = round(round(lat, 7) * self.NODE_COORD_SCALE) - self.NODE_LAT_OFFSET
+        lon_i = round(round(lon, 7) * self.NODE_COORD_SCALE) - self.NODE_LON_OFFSET
+
+        if not (0 <= lat_i < self.NODE_LAT_STEPS and 0 <= lon_i < self.NODE_LON_STEPS):
+            if on_out_of_range is not None:
+                on_out_of_range()
+            else:
+                logger.warning(
+                    f"⚠️ ノード座標が範囲外: ({lat}, {lon})。"
+                    f"DB の行 id {db_node_id} に落とす (#51 の症状が残る)"
+                )
+            return -db_node_id
+
+        return -(1 + lat_i * self.NODE_LON_STEPS + lon_i)
+
     def _emit_building_tags(self, parent_elem, building: Dict, is_part: bool):
         """way / relation 共通のタグを追加するヘルパー。
 
@@ -473,30 +540,11 @@ class OSMFJPlateauAPI:
                 )
             emitted_element_ids.add(key)
 
-        # Emit a single <node> for each unique (lat, lon) across the WHOLE
-        # response and reuse its id from every way that touches that coordinate.
-        # plateau_building_nodes stores a separate row per (building_id, osm_id),
-        # so identical corners — both within one building (outline/parts) and
-        # between separate buildings that share a wall — arrive with distinct
-        # ids. Emitting them unshared makes editors see the corners as separate
-        # points; JOSM then reports them as "Duplicated nodes" (api#38). Deduping
-        # was originally scoped to one relation (Rapid#33), on the assumption
-        # that cross-building sharing was handled by the importer's Phase 1
-        # dedup — but that dedup keys on (building_id, osm_id), so it never
-        # merges across buildings. Keying the map globally closes that gap: the
-        # first way to touch a coordinate registers its id, every later way
-        # references it, and coincident corners of adjacent buildings become one
-        # shared node.
-        # Value: { (lat, lon) → canonical node id (negative, the first one seen) }
-        coord_to_nid: Dict[tuple, int] = {}
-        # Tracks which canonical node ids have already produced a <node> element
-        # so duplicates from later ways simply reference the existing one.
+        # ノードの id は座標から決まる (_node_id)。同じ座標には必ず同じ id が
+        # 付くので、どの建物が先に来たかを覚える必要がない。応答をまたいでも
+        # 同じ角が同じノードになる (#51)。
+        # 同じ <node> を二度出さないために、出した id だけを記録する。
         emitted_node_ids: set = set()
-
-        def _coord_key(lat: float, lon: float) -> tuple:
-            # Match the 7-decimal precision used in the output below so float
-            # representation jitter never makes "same coordinate" look distinct.
-            return (round(lat, 7), round(lon, 7))
 
         processed_buildings = 0
         total_nodes_created = 0
@@ -523,6 +571,16 @@ class OSMFJPlateauAPI:
         # データを失う (tests/test_representative_point.py が固定している契約)。
         # 外形行と孤立部分立体も設計上 NULL を持つ。
         dropped_far_parts = 0
+        # 範囲外座標のため DB 行 id にフォールバックしたノードの件数。
+        # _node_id はノード 1 件ごとに呼ばれるホットパスなので、そこで直接
+        # logger.warning すると 960MB のホストで六桁行/応答になりうる (#51
+        # レビュー finding 6)。ここで集計し、応答単位で 1 回だけログを出す。
+        out_of_range_node_count = 0
+
+        def _count_out_of_range_node():
+            nonlocal out_of_range_node_count
+            out_of_range_node_count += 1
+
         kept_buildings = []
         for b in buildings:
             if b.get('intersects_parent') is False:
@@ -569,17 +627,12 @@ class OSMFJPlateauAPI:
 
             first_node_id = None
 
-            # Look up / register the canonical node id for each coordinate
-            # in the response-wide map. The first way to touch a coordinate
-            # registers its id; every later way — whether a part of the same
-            # building or a separate neighbouring building — reuses it, so
-            # coincident corners resolve to a single shared <node>.
+            # 座標から id を決める。同じ角に触れる way は、同じ建物の部分立体
+            # でも隣の建物でも同じ id を得るので、<node> は 1 つに集まる。
             for i, node_data in enumerate(valid_nodes):
-                key = _coord_key(node_data['lat'], node_data['lon'])
-                canonical_id = coord_to_nid.get(key)
-                if canonical_id is None:
-                    canonical_id = -node_data['id']
-                    coord_to_nid[key] = canonical_id
+                canonical_id = self._node_id(node_data['lat'], node_data['lon'],
+                                             node_data['id'],
+                                             on_out_of_range=_count_out_of_range_node)
 
                 if canonical_id not in emitted_node_ids:
                     emitted_node_ids.add(canonical_id)
@@ -824,6 +877,12 @@ class OSMFJPlateauAPI:
         # 0 件のときも出す。撤去してよいかは「発火しなくなったこと」で判断する
         # ので、0 が記録に残らないと不在を証明できない。
         logger.info(f"出口補正: 親と交差しない部分立体を除外 {dropped_far_parts}件")
+        # 0 件のときも出す。理由は dropped_far_parts と同じ (発火しなくなった
+        # ことを不在の証拠として使うため)。
+        logger.info(
+            f"出口補正: 範囲外座標のため DB 行 id にフォールバックしたノード "
+            f"{out_of_range_node_count}件"
+        )
 
         try:
             xml_string = ET.tostring(osm, encoding='unicode', method='xml')

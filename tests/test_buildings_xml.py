@@ -1126,3 +1126,60 @@ class TestNodeIdFromCoordinate:
             nid = api._node_id(60.0, 139.7, 4242)   # 緯度が範囲外
         assert nid == -4242
         assert any('範囲外' in r.message for r in caplog.records)
+
+    def test_shared_corner_id_does_not_depend_on_which_buildings_are_present(self, api):
+        """#51 の再現。隣の建物が応答に入るかどうかで角の id が変わってはならない。"""
+        corner = {'lat': 32.6445365, 'lon': 130.6984598}
+        b1 = _make_building(building_id=1, building='yes', nodes=[
+            {'id': 272155033, 'lat': 32.6444162, 'lon': 130.6988233},
+            {'id': 272155034, **corner},
+            {'id': 272155035, 'lat': 32.6444965, 'lon': 130.6984413},
+        ])
+        # 隣の建物。同じ角を自分の行 id で持つ
+        b2 = _make_building(building_id=2, building='yes', nodes=[
+            {'id': 272163761, **corner},
+            {'id': 272163762, 'lat': 32.6446000, 'lon': 130.6984598},
+            {'id': 272163763, 'lat': 32.6446000, 'lon': 130.6985000},
+        ])
+
+        def corner_id(xml_str):
+            root = ET.fromstring(xml_str)
+            hit = [n for n in root.findall('node')
+                   if (n.get('lat'), n.get('lon')) == ('32.6445365', '130.6984598')]
+            assert len(hit) == 1
+            return hit[0].get('id')
+
+        both = corner_id(api.buildings_to_osm_xml([b1, b2]))
+        only_b2 = corner_id(api.buildings_to_osm_xml([b2]))
+        reversed_order = corner_id(api.buildings_to_osm_xml([b2, b1]))
+
+        assert both == only_b2 == reversed_order
+
+    def test_adjacent_buildings_share_the_corner_node(self, api):
+        corner = {'lat': 32.6445365, 'lon': 130.6984598}
+        b1 = _make_building(building_id=1, building='yes', nodes=[
+            {'id': 272155033, 'lat': 32.6444162, 'lon': 130.6988233},
+            {'id': 272155034, **corner},
+            {'id': 272155035, 'lat': 32.6444965, 'lon': 130.6984413},
+        ])
+        b2 = _make_building(building_id=2, building='yes', nodes=[
+            {'id': 272163761, **corner},
+            {'id': 272163762, 'lat': 32.6446000, 'lon': 130.6984598},
+            {'id': 272163763, 'lat': 32.6446000, 'lon': 130.6985000},
+        ])
+
+        root = ET.fromstring(api.buildings_to_osm_xml([b1, b2]))
+
+        # 応答の中の重複は 0 件のまま (#38 の退行が無いこと)
+        assert _josm_duplicate_node_coords(root) == []
+
+        at_corner = [n for n in root.findall('node')
+                     if (n.get('lat'), n.get('lon')) == ('32.6445365', '130.6984598')]
+        assert len(at_corner) == 1
+        corner_nid = at_corner[0].get('id')
+
+        ways = root.findall('way')
+        assert len(ways) == 2
+        for way in ways:
+            refs = [nd.get('ref') for nd in way.findall('nd')]
+            assert corner_nid in refs

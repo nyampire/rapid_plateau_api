@@ -1079,3 +1079,192 @@ class TestRingLimitAndIdUniqueness:
         with caplog.at_level(logging.WARNING):
             api.buildings_to_osm_xml([b1, b2])
         assert any('衝突' in r.message for r in caplog.records), '重複が報告されていない'
+
+
+# ----------------------------------------------------------------------
+# 座標から決まるノード id (#51)
+# ----------------------------------------------------------------------
+
+class TestNodeIdFromCoordinate:
+    """ノード id が座標だけで決まること。
+
+    応答に含まれる建物で id が変わると、同じ角が取得のたびに別のノードとして
+    Rapid に届き、承認すると重複ノードとして OSM に上がる (#51)。
+    """
+
+    def test_id_is_negative_and_nonzero(self, api):
+        nid = api._node_id(35.7000000, 139.7000000, 12345)
+        assert nid < 0
+
+    def test_id_fits_in_int64(self, api):
+        # 範囲の隅がもっとも大きな値になるのは、緯度・経度とも刻み数の
+        # 最大値 (NODE_LAT_STEPS - 1 / NODE_LON_STEPS - 1) を取る座標、
+        # すなわちちょうど 46.0 / 154.0 のとき。
+        nid = api._node_id(46.0, 154.0, 1)
+        assert nid == -83_200_000_580_000_001
+        assert abs(nid) < 2 ** 63
+
+    def test_same_coordinate_gives_same_id_regardless_of_db_row(self, api):
+        # 同じ角に属する DB の行は建物ごとに違う id を持つ
+        assert api._node_id(32.6445365, 130.6984598, 272155034) == \
+               api._node_id(32.6445365, 130.6984598, 272163761)
+
+    def test_distinct_coordinates_never_collide(self, api):
+        seen = set()
+        for i in range(200):
+            for j in range(200):
+                nid = api._node_id(32.6445365 + i * 1e-7,
+                                   130.6984598 + j * 1e-7, 1)
+                seen.add(nid)
+        assert len(seen) == 200 * 200
+
+        # 上のグリッドは 1 つの連続したブロックに収まっているので、
+        # NODE_LON_STEPS がそのブロック幅より大きければ何でも単射になり、
+        # 乗数の値そのものは検証できない。単射性を支えているのは乗数だけ
+        # なので、乗数を直接固定する。
+        #
+        # 緯度 1 刻みぶんだけ原点から離れた座標の id は、定義どおりなら
+        # -(1 + 1 * NODE_LON_STEPS + 0) になる。乗数がずれるとこの値がずれる。
+        #
+        # 「1 ストライドの両端が衝突しないこと」を突き合わせる形では乗数を
+        # 固定できない。範囲の判定も NODE_LON_STEPS を使っているので、
+        # 乗数を小さくすると反対側の端が範囲外に落ちてフォールバックし、
+        # 衝突しないまま素通りする。
+        assert api._node_id(20.0000001, 122.0000000, 1) == -(1 + 320_000_001)
+
+    def test_id_matches_printed_coordinate(self, api):
+        # 出力は f"{lat:.7f}" で丸めるので、丸めた値と生の値で id が割れては
+        # ならない。35.00000015 は半端 (half-way) 値で、掛け算してから丸める
+        # 実装と、先に 7 桁へ丸めてから掛ける実装とで結果が分かれる。
+        lat, lon = 35.00000015, 139.00000015
+        printed_lat, printed_lon = f'{lat:.7f}', f'{lon:.7f}'
+        assert api._node_id(lat, lon, 1) == \
+               api._node_id(float(printed_lat), float(printed_lon), 1)
+
+    def test_out_of_range_falls_back_to_db_id(self, api, caplog):
+        with caplog.at_level(logging.WARNING):
+            nid = api._node_id(60.0, 139.7, 4242)   # 緯度が範囲外
+        assert nid == -4242
+        assert any('範囲外' in r.message for r in caplog.records)
+
+    def test_shared_corner_id_does_not_depend_on_which_buildings_are_present(self, api):
+        """#51 の再現。隣の建物が応答に入るかどうかで角の id が変わってはならない。"""
+        corner = {'lat': 32.6445365, 'lon': 130.6984598}
+        b1 = _make_building(building_id=1, building='yes', nodes=[
+            {'id': 272155033, 'lat': 32.6444162, 'lon': 130.6988233},
+            {'id': 272155034, **corner},
+            {'id': 272155035, 'lat': 32.6444965, 'lon': 130.6984413},
+        ])
+        # 隣の建物。同じ角を自分の行 id で持つ
+        b2 = _make_building(building_id=2, building='yes', nodes=[
+            {'id': 272163761, **corner},
+            {'id': 272163762, 'lat': 32.6446000, 'lon': 130.6984598},
+            {'id': 272163763, 'lat': 32.6446000, 'lon': 130.6985000},
+        ])
+
+        def corner_id(xml_str):
+            root = ET.fromstring(xml_str)
+            hit = [n for n in root.findall('node')
+                   if (n.get('lat'), n.get('lon')) == ('32.6445365', '130.6984598')]
+            assert len(hit) == 1
+            return hit[0].get('id')
+
+        both = corner_id(api.buildings_to_osm_xml([b1, b2]))
+        only_b2 = corner_id(api.buildings_to_osm_xml([b2]))
+        reversed_order = corner_id(api.buildings_to_osm_xml([b2, b1]))
+
+        assert both == only_b2 == reversed_order
+
+    def test_adjacent_buildings_share_the_corner_node(self, api):
+        corner = {'lat': 32.6445365, 'lon': 130.6984598}
+        b1 = _make_building(building_id=1, building='yes', nodes=[
+            {'id': 272155033, 'lat': 32.6444162, 'lon': 130.6988233},
+            {'id': 272155034, **corner},
+            {'id': 272155035, 'lat': 32.6444965, 'lon': 130.6984413},
+        ])
+        b2 = _make_building(building_id=2, building='yes', nodes=[
+            {'id': 272163761, **corner},
+            {'id': 272163762, 'lat': 32.6446000, 'lon': 130.6984598},
+            {'id': 272163763, 'lat': 32.6446000, 'lon': 130.6985000},
+        ])
+
+        root = ET.fromstring(api.buildings_to_osm_xml([b1, b2]))
+
+        # 応答の中の重複は 0 件のまま (#38 の退行が無いこと)
+        assert _josm_duplicate_node_coords(root) == []
+
+        at_corner = [n for n in root.findall('node')
+                     if (n.get('lat'), n.get('lon')) == ('32.6445365', '130.6984598')]
+        assert len(at_corner) == 1
+        corner_nid = at_corner[0].get('id')
+
+        ways = root.findall('way')
+        assert len(ways) == 2
+        for way in ways:
+            refs = [nd.get('ref') for nd in way.findall('nd')]
+            assert corner_nid in refs
+
+
+class TestOsmChangePlaceholderContract:
+    """アップロードを受ける側が仮 id に課す条件を、応答の側で満たしているか。
+
+    条件の出どころは 2 つ。
+    cgimap は id を int64 で読み、作成する要素には「0 でない」と「負である」を
+    課す (osmobject.hpp)。Rails は加えて「作成する要素の仮 id は型ごとに
+    一意であること」を課す (lib/diff_reader.rb)。
+    """
+
+    def _response(self, api):
+        corner = {'lat': 32.6445365, 'lon': 130.6984598}
+        b1 = _make_building(building_id=1, building='yes', nodes=[
+            {'id': 272155033, 'lat': 32.6444162, 'lon': 130.6988233},
+            {'id': 272155034, **corner},
+            {'id': 272155035, 'lat': 32.6444965, 'lon': 130.6984413},
+        ])
+        b2 = _make_building(building_id=2, building='yes', nodes=[
+            {'id': 272163761, **corner},
+            {'id': 272163762, 'lat': 32.6446000, 'lon': 130.6984598},
+            {'id': 272163763, 'lat': 32.6446000, 'lon': 130.6985000},
+        ])
+        # b1 を outline とする building:part を追加する。
+        # これで b1 が type=building relation の outline になり、応答に
+        # node/way/relation の 3 種類が揃う。
+        # (TestBuildingsToOsmXmlRelations.test_outline_with_parts_generates_relation
+        # と同じ組み方)
+        part = _make_part(part_id=3, parent_id=1, height=5)
+        root = ET.fromstring(api.buildings_to_osm_xml([b1, b2, part]))
+
+        # このクラスの各テストは node/way/relation の3種類をループで確認する。
+        # relation が1つも無いとループ本体が空振りして、何も検証せずに
+        # テストが通ってしまう。ここで前提を強制する。
+        for kind in ('node', 'way', 'relation'):
+            assert root.findall(kind), \
+                f'fixture の応答に {kind} が含まれていない (このクラスの前提が崩れている)'
+        return root
+
+    def test_all_ids_are_negative_and_nonzero(self, api):
+        root = self._response(api)
+        for kind in ('node', 'way', 'relation'):
+            for elem in root.findall(kind):
+                value = int(elem.get('id'))
+                assert value < 0, f'{kind} id {value} が負でない'
+
+    def test_all_ids_fit_in_int64(self, api):
+        root = self._response(api)
+        for kind in ('node', 'way', 'relation'):
+            for elem in root.findall(kind):
+                assert abs(int(elem.get('id'))) < 2 ** 63
+
+    def test_ids_are_unique_within_each_type(self, api):
+        root = self._response(api)
+        for kind in ('node', 'way', 'relation'):
+            ids = [elem.get('id') for elem in root.findall(kind)]
+            assert len(ids) == len(set(ids)), f'{kind} の id が重複している'
+
+    def test_every_nd_ref_resolves_to_an_emitted_node(self, api):
+        root = self._response(api)
+        emitted = {n.get('id') for n in root.findall('node')}
+        for way in root.findall('way'):
+            for nd in way.findall('nd'):
+                assert nd.get('ref') in emitted, \
+                    f"way {way.get('id')} が未出力のノード {nd.get('ref')} を参照している"

@@ -377,6 +377,53 @@ class OSMFJPlateauAPI:
         """relation の合成 OSM id。kind は RELATION_KIND_* のいずれか。"""
         return -(building_db_id * self.RELATION_ID_KIND_MULTIPLIER + kind)
 
+    # ノードの id は建物ではなく座標から決める。
+    #
+    #   node : -(1 + lat_i * NODE_LON_STEPS + lon_i)
+    #
+    # way と relation は建物 id から決めているが、ノードだけは違う規則を使う。
+    # 同じ角が複数の建物に属し、DB にはその建物の数だけ行があるためで、
+    # 行の id から決めると「その応答で先に来た建物」で値が変わる (#51)。
+    #
+    # 範囲は緯度 20..46 度、経度 122..154 度。沖ノ鳥島から択捉島、
+    # 与那国島から南鳥島までを含む。
+    #
+    # 単射である理由: lon_i の最大値が NODE_LON_STEPS より小さいので、
+    # 商と余りが一意に決まり、lat_i と lon_i の両方が一致するしかない。
+    #
+    # 桁: 最大 83,200,000,580,000,001 で int64 の上限の約 111 分の 1。
+    # way id の側にある「JavaScript の安全整数 9e15」の見積もりはこちらには
+    # 当てはまらない。Rapid は entityID を文字列として持ち、数値に変換するのは
+    # relation を並べ替える osmRelation.creationOrder だけで、ノードは通らない。
+    # アップロードを受ける cgimap は仮 id を int64 で読み、条件は「負」と
+    # 「0 でない」の 2 つだけである。
+    NODE_COORD_SCALE = 10_000_000        # 7 桁
+    NODE_LAT_OFFSET = 200_000_000        # 20.0 * NODE_COORD_SCALE
+    NODE_LON_OFFSET = 1_220_000_000      # 122.0 * NODE_COORD_SCALE
+    NODE_LAT_STEPS = 260_000_001         # 緯度 20..46 度の刻み数
+    NODE_LON_STEPS = 320_000_001         # 経度 122..154 度の刻み数
+
+    def _node_id(self, lat: float, lon: float, db_node_id: int) -> int:
+        """座標から決まるノードの合成 OSM id。
+
+        範囲外の座標だけ、警告を出して DB の行 id に落ちる。丸めた値が範囲を
+        外れると他の座標と id が衝突し、Rapid が後から来た角を捨てて way の形が
+        壊れるため、id の安定性より出力の完全性を優先する。
+        """
+        # 先に 1e7 倍して丸める。出力の f"{lat:.7f}" と同じ丸めにするためで、
+        # 原点を引いてから掛けると引き算の誤差でずれることがある。
+        lat_i = round(lat * self.NODE_COORD_SCALE) - self.NODE_LAT_OFFSET
+        lon_i = round(lon * self.NODE_COORD_SCALE) - self.NODE_LON_OFFSET
+
+        if not (0 <= lat_i < self.NODE_LAT_STEPS and 0 <= lon_i < self.NODE_LON_STEPS):
+            logger.warning(
+                f"⚠️ ノード座標が範囲外: ({lat}, {lon})。"
+                f"DB の行 id {db_node_id} に落とす (#51 の症状が残る)"
+            )
+            return -db_node_id
+
+        return -(1 + lat_i * self.NODE_LON_STEPS + lon_i)
+
     def _emit_building_tags(self, parent_elem, building: Dict, is_part: bool):
         """way / relation 共通のタグを追加するヘルパー。
 

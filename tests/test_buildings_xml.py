@@ -1079,3 +1079,50 @@ class TestRingLimitAndIdUniqueness:
         with caplog.at_level(logging.WARNING):
             api.buildings_to_osm_xml([b1, b2])
         assert any('衝突' in r.message for r in caplog.records), '重複が報告されていない'
+
+
+# ----------------------------------------------------------------------
+# 座標から決まるノード id (#51)
+# ----------------------------------------------------------------------
+
+class TestNodeIdFromCoordinate:
+    """ノード id が座標だけで決まること。
+
+    応答に含まれる建物で id が変わると、同じ角が取得のたびに別のノードとして
+    Rapid に届き、承認すると重複ノードとして OSM に上がる (#51)。
+    """
+
+    def test_id_is_negative_and_nonzero(self, api):
+        nid = api._node_id(35.7000000, 139.7000000, 12345)
+        assert nid < 0
+
+    def test_id_fits_in_int64(self, api):
+        # 範囲の隅がもっとも大きな値になる
+        nid = api._node_id(46.0 - 1e-7, 154.0 - 1e-7, 1)
+        assert abs(nid) < 2 ** 63
+
+    def test_same_coordinate_gives_same_id_regardless_of_db_row(self, api):
+        # 同じ角に属する DB の行は建物ごとに違う id を持つ
+        assert api._node_id(32.6445365, 130.6984598, 272155034) == \
+               api._node_id(32.6445365, 130.6984598, 272163761)
+
+    def test_distinct_coordinates_never_collide(self, api):
+        seen = set()
+        for i in range(200):
+            for j in range(200):
+                nid = api._node_id(32.6445365 + i * 1e-7,
+                                   130.6984598 + j * 1e-7, 1)
+                seen.add(nid)
+        assert len(seen) == 200 * 200
+
+    def test_id_matches_printed_coordinate(self, api):
+        # 出力は f"{lat:.7f}" で丸めるので、丸めた値と生の値で id が割れてはならない
+        lat, lon = 35.70000004999, 139.70000004999
+        assert api._node_id(lat, lon, 1) == \
+               api._node_id(float(f'{lat:.7f}'), float(f'{lon:.7f}'), 1)
+
+    def test_out_of_range_falls_back_to_db_id(self, api, caplog):
+        with caplog.at_level(logging.WARNING):
+            nid = api._node_id(60.0, 139.7, 4242)   # 緯度が範囲外
+        assert nid == -4242
+        assert any('範囲外' in r.message for r in caplog.records)

@@ -1206,7 +1206,21 @@ class TestOsmChangePlaceholderContract:
             {'id': 272163762, 'lat': 32.6446000, 'lon': 130.6984598},
             {'id': 272163763, 'lat': 32.6446000, 'lon': 130.6985000},
         ])
-        return ET.fromstring(api.buildings_to_osm_xml([b1, b2]))
+        # b1 を outline とする building:part を追加する。
+        # これで b1 が type=building relation の outline になり、応答に
+        # node/way/relation の 3 種類が揃う。
+        # (TestBuildingsToOsmXmlRelations.test_outline_with_parts_generates_relation
+        # と同じ組み方)
+        part = _make_part(part_id=3, parent_id=1, height=5)
+        root = ET.fromstring(api.buildings_to_osm_xml([b1, b2, part]))
+
+        # このクラスの各テストは node/way/relation の3種類をループで確認する。
+        # relation が1つも無いとループ本体が空振りして、何も検証せずに
+        # テストが通ってしまう。ここで前提を強制する。
+        for kind in ('node', 'way', 'relation'):
+            assert root.findall(kind), \
+                f'fixture の応答に {kind} が含まれていない (このクラスの前提が崩れている)'
+        return root
 
     def test_all_ids_are_negative_and_nonzero(self, api):
         root = self._response(api)

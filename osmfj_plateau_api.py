@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 import logging
 import os
 import uvicorn
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime
 import re
 import hashlib
@@ -403,23 +403,43 @@ class OSMFJPlateauAPI:
     NODE_LAT_STEPS = 260_000_001         # 緯度 20..46 度の刻み数
     NODE_LON_STEPS = 320_000_001         # 経度 122..154 度の刻み数
 
-    def _node_id(self, lat: float, lon: float, db_node_id: int) -> int:
+    def _node_id(self, lat: float, lon: float, db_node_id: int,
+                 on_out_of_range: Optional[Callable[[], None]] = None) -> int:
         """座標から決まるノードの合成 OSM id。
 
-        範囲外の座標だけ、警告を出して DB の行 id に落ちる。丸めた値が範囲を
-        外れると他の座標と id が衝突し、Rapid が後から来た角を捨てて way の形が
-        壊れるため、id の安定性より出力の完全性を優先する。
+        範囲外の座標だけ、DB の行 id に落ちる。丸めた値が範囲を外れると他の
+        座標と id が衝突し、Rapid が後から来た角を捨てて way の形が壊れるため、
+        id の安定性より出力の完全性を優先する。
+
+        `_register_element_id` による衝突検知は way / relation にしか掛けて
+        いない。ノードは同じ id が複数回出ることが意図した動作（複数建物が
+        同じ角を共有する）なので、対象から外している。そのため、範囲外の
+        フォールバック id (`-db_node_id`) が座標由来の id と衝突しても、
+        それを検知する仕組みは無い。
+
+        範囲外の通知先は `on_out_of_range` で選べる。渡さなければここで直接
+        `logger.warning` を出す（このメソッドを単体で呼ぶときの後方互換）。
+        応答生成のホットパス (`_make_way_elem`) はノード 1 件ごとに呼ばれるので、
+        件数だけを集計するコールバックを渡し、応答単位で 1 回だけログを出す。
         """
-        # 先に 1e7 倍して丸める。出力の f"{lat:.7f}" と同じ丸めにするためで、
-        # 原点を引いてから掛けると引き算の誤差でずれることがある。
-        lat_i = round(lat * self.NODE_COORD_SCALE) - self.NODE_LAT_OFFSET
-        lon_i = round(lon * self.NODE_COORD_SCALE) - self.NODE_LON_OFFSET
+        # 先に 1e7 倍してから原点を引く。原点を先に引いて掛けると引き算の
+        # 誤差でずれることがあるため、掛け算を先にするのはそれを避けるためで、
+        # これだけでは出力の f"{lat:.7f}" と丸めが一致する保証にはならない。
+        # 1e7 倍した時点の lat は既に浮動小数点の丸め誤差を含んでいるので、
+        # その積を丸めても "35.00000015" のような half-way 値では
+        # f"{lat:.7f}" の丸めと食い違うことがある。round(lat, 7) で先に
+        # 7 桁に丸めてから 1e7 倍することで、f"{lat:.7f}" と同じ丸めが得られる。
+        lat_i = round(round(lat, 7) * self.NODE_COORD_SCALE) - self.NODE_LAT_OFFSET
+        lon_i = round(round(lon, 7) * self.NODE_COORD_SCALE) - self.NODE_LON_OFFSET
 
         if not (0 <= lat_i < self.NODE_LAT_STEPS and 0 <= lon_i < self.NODE_LON_STEPS):
-            logger.warning(
-                f"⚠️ ノード座標が範囲外: ({lat}, {lon})。"
-                f"DB の行 id {db_node_id} に落とす (#51 の症状が残る)"
-            )
+            if on_out_of_range is not None:
+                on_out_of_range()
+            else:
+                logger.warning(
+                    f"⚠️ ノード座標が範囲外: ({lat}, {lon})。"
+                    f"DB の行 id {db_node_id} に落とす (#51 の症状が残る)"
+                )
             return -db_node_id
 
         return -(1 + lat_i * self.NODE_LON_STEPS + lon_i)
@@ -551,6 +571,16 @@ class OSMFJPlateauAPI:
         # データを失う (tests/test_representative_point.py が固定している契約)。
         # 外形行と孤立部分立体も設計上 NULL を持つ。
         dropped_far_parts = 0
+        # 範囲外座標のため DB 行 id にフォールバックしたノードの件数。
+        # _node_id はノード 1 件ごとに呼ばれるホットパスなので、そこで直接
+        # logger.warning すると 960MB のホストで六桁行/応答になりうる (#51
+        # レビュー finding 6)。ここで集計し、応答単位で 1 回だけログを出す。
+        out_of_range_node_count = 0
+
+        def _count_out_of_range_node():
+            nonlocal out_of_range_node_count
+            out_of_range_node_count += 1
+
         kept_buildings = []
         for b in buildings:
             if b.get('intersects_parent') is False:
@@ -601,7 +631,8 @@ class OSMFJPlateauAPI:
             # でも隣の建物でも同じ id を得るので、<node> は 1 つに集まる。
             for i, node_data in enumerate(valid_nodes):
                 canonical_id = self._node_id(node_data['lat'], node_data['lon'],
-                                             node_data['id'])
+                                             node_data['id'],
+                                             on_out_of_range=_count_out_of_range_node)
 
                 if canonical_id not in emitted_node_ids:
                     emitted_node_ids.add(canonical_id)
@@ -846,6 +877,12 @@ class OSMFJPlateauAPI:
         # 0 件のときも出す。撤去してよいかは「発火しなくなったこと」で判断する
         # ので、0 が記録に残らないと不在を証明できない。
         logger.info(f"出口補正: 親と交差しない部分立体を除外 {dropped_far_parts}件")
+        # 0 件のときも出す。理由は dropped_far_parts と同じ (発火しなくなった
+        # ことを不在の証拠として使うため)。
+        logger.info(
+            f"出口補正: 範囲外座標のため DB 行 id にフォールバックしたノード "
+            f"{out_of_range_node_count}件"
+        )
 
         try:
             xml_string = ET.tostring(osm, encoding='unicode', method='xml')

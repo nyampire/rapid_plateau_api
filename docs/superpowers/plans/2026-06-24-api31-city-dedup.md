@@ -197,7 +197,7 @@ def test_fixture_round_trips_a_single_building(
 
 - [ ] **Step 3: Verify the default test run still skips integration tests**
 
-Run: `cd /Users/nyampire/git/rapid_plateau_api && pytest tests/test_dedup_city_duplicates.py -v`
+Run: `pytest tests/test_dedup_city_duplicates.py -v`
 
 Expected: `1 skipped` (because `--run-integration` is not set).
 
@@ -212,7 +212,6 @@ Expected: `1 passed`. If it fails because the database is unreachable, fix the e
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/nyampire/git/rapid_plateau_api
 git add tests/conftest.py tests/test_dedup_city_duplicates.py
 git commit -m "Add fresh_plateau_full_schema fixture for dedup integration tests (#31)"
 ```
@@ -460,7 +459,7 @@ Expected: all 6 currently-defined integration tests pass (smoke + 5 new).
 
 - [ ] **Step 5: Run the full test suite (no integration) to confirm no regressions**
 
-Run: `cd /Users/nyampire/git/rapid_plateau_api && pytest -v`
+Run: `pytest -v`
 
 Expected: all unit tests pass; integration tests skipped.
 
@@ -469,7 +468,6 @@ If `tests/test_buildings_xml.py` complains about the changed SQL shape (it asser
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/nyampire/git/rapid_plateau_api
 git add osmfj_plateau_api.py tests/test_dedup_city_duplicates.py
 git commit -m "Dedup cross-city duplicate outlines at API output (#31)"
 ```
@@ -582,7 +580,6 @@ If `tests/test_buildings_xml.py` has a `sql.count('FROM dash_city_master m')` as
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/nyampire/git/rapid_plateau_api
 git add osmfj_plateau_api.py tests/test_dedup_city_duplicates.py
 git commit -m "Dedup cross-city duplicate orphan building:part rows at API output (#31)"
 ```
@@ -775,7 +772,6 @@ Pay attention to `tests/test_osmfj_plateau_api.py` and `tests/test_buildings_xml
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/nyampire/git/rapid_plateau_api
 git add osmfj_plateau_api.py tests/test_dedup_city_duplicates.py
 git commit -m "Log deduped count from bbox query window function (#31)"
 ```
@@ -790,14 +786,13 @@ git commit -m "Log deduped count from bbox query window function (#31)"
 
 - [ ] **Step 1: Run the full suite one more time, locally**
 
-Run: `cd /Users/nyampire/git/rapid_plateau_api && pytest -v && PLATEAU_TEST_DATABASE_URL=postgresql:///plateau_api_test pytest -v --run-integration`
+Run: `pytest -v && PLATEAU_TEST_DATABASE_URL=postgresql:///plateau_api_test pytest -v --run-integration`
 
 Expected: both runs green.
 
 - [ ] **Step 2: Push the branch and open a PR**
 
 ```bash
-cd /Users/nyampire/git/rapid_plateau_api
 git push origin HEAD
 gh pr create --title "Dedup cross-city duplicate buildings at API output (#31)" \
     --body-file - <<'EOF'

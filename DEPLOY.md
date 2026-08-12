@@ -51,7 +51,7 @@ usermod -aG sudo plateau
 
 ```bash
 # ローカルマシンで SSH 鍵を生成（未作成の場合）
-ssh-keygen -t ed25519 -C "plateau-vps"
+ssh-keygen -t ed25519 -C "vps"
 
 # 公開鍵を VPS に転送
 ssh-copy-id -i ~/.ssh/id_ed25519.pub plateau@<VPS_IP_ADDRESS>
@@ -83,14 +83,14 @@ sudo systemctl restart sshd
 `~/.ssh/config` に以下を追加すると、接続が簡単になります。
 
 ```
-Host plateau-vps
+Host vps
     HostName <VPS_IP_ADDRESS>
     User plateau
     IdentityFile ~/.ssh/id_ed25519
     # Port 2222  # ポートを変更した場合
 ```
 
-以降は `ssh plateau-vps` で接続できます。
+以降は `ssh vps` で接続できます。
 
 ---
 

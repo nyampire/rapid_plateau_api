@@ -243,9 +243,8 @@ Expected: 失敗なし
 これまでは三角形 2 件が落ちて 3,835 行だった。
 
 素の変換出力を使うこと。`imp_rule3` を含むパスの下のものは規則適用後にフィルタ済みで、検証にならない。
-staged copy が
-`/private/tmp/claude-501/-Users-nyampire-git-Rapid/f1440411-3615-4d28-b29d-9772815bc402/scratchpad/task5/35215/`
-にある（識別子無し way が 51310655 で 63、51310636 で 54 あることを確かめてから使う）。
+staged copy はセッション固有のスクラッチ領域に置かれていた
+（識別子無し way が 51310655 で 63、51310636 で 54 あることを確かめてから使う）。
 
 検証用 DB `plateau_task5` には `plateau_buildings`、`plateau_building_nodes`、`dash_city_master` の
 3 つが要る。`dash_city_master` が無いと行政界フィルタの SELECT が失敗してトランザクションが中断し、

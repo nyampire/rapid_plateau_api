@@ -171,7 +171,7 @@ CREATE TABLE plateau_buildings (
 CREATE TABLE plateau_building_nodes (
     id SERIAL PRIMARY KEY,
     osm_id BIGINT,
-    building_id INTEGER REFERENCES plateau_buildings(id),
+    building_id INTEGER REFERENCES plateau_buildings(id) ON DELETE CASCADE,
     sequence_id INTEGER,
     ring_id INTEGER NOT NULL DEFAULT 0,
     lat DOUBLE PRECISION,
@@ -193,6 +193,11 @@ GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO osmfj_user;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO osmfj_user;
 SQL
 ```
+
+> **`plateau_building_nodes.building_id` の `ON DELETE CASCADE` を外さないこと。**
+> 行政界フィルタは `DELETE FROM plateau_buildings` の 1 文だけを実行し、ノード側の削除を外部キーに任せている。
+> CASCADE が無いと、市境の外に落ちる建物を持つ最初の都市で外部キー違反が起き、その都市の取り込みが失敗する。
+> `plateau_migrate_fk_cascade.py` は既存データベースをこの状態に揃えるための移行用で、新規構築の手順には要らない。
 
 > **`city_code` は必ず上の DDL で作ること。**
 > インポーターは初回実行時に `building_part` / `ref_mlit_plateau` / `parent_building_id` / `ring_id` を

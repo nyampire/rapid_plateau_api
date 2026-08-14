@@ -42,16 +42,35 @@ def extract(city_code, dest):
     members = [i for i in zf.infolist()
                if i.filename.startswith(MEMBER_PREFIX) and i.filename.endswith('.gml')]
 
+    # 出力先を basename に潰すので、zip 内のパスが違っても衝突しうる。
+    # 黙って上書きするとファイル数だけが減り、原因は取り出しの外から判らない。
+    seen = {}
+    for info in members:
+        base = os.path.basename(info.filename)
+        if base in seen:
+            raise SystemExit('basename が衝突している: %s (%s と %s)'
+                             % (base, seen[base], info.filename))
+        seen[base] = info.filename
+
     written = 0
     for info in members:
         out = os.path.join(dest, os.path.basename(info.filename))
-        with zf.open(info) as src, open(out, 'wb') as dst:
+        # 書き終えてから名前を付ける。切り詰められた `.gml` が残ると、
+        # 枚数の照合を通り抜けて建物が欠けたまま取り込まれる。
+        part = out + '.part'
+        with zf.open(info) as src, open(part, 'wb') as dst:
             while True:
                 chunk = src.read(1 << 22)
                 if not chunk:
                     break
                 dst.write(chunk)
-        written += os.path.getsize(out)
+        size = os.path.getsize(part)
+        if size != info.file_size:
+            os.unlink(part)
+            raise SystemExit('%s の大きさが zip の申告と違う (%d != %d)'
+                             % (info.filename, size, info.file_size))
+        os.replace(part, out)
+        written += size
 
     return {
         'city_code': city_code,

@@ -12,7 +12,10 @@ from unittest.mock import MagicMock
 import pytest
 
 # モジュールがimport可能なようにパスを通す
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+# 再取り込みの道具はリポジトリ直下ではなく scripts/reimport にある
+sys.path.insert(0, str(_REPO_ROOT / 'scripts' / 'reimport'))
 
 
 def pytest_addoption(parser):

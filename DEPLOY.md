@@ -161,13 +161,17 @@ CREATE TABLE plateau_buildings (
     leisure TEXT,
     landuse TEXT,
     geom GEOMETRY(Polygon, 4326),
-    centroid GEOMETRY(Point, 4326)
+    centroid GEOMETRY(Point, 4326),
+    city_code VARCHAR(5) NOT NULL,
+    building_part TEXT,
+    parent_building_id INTEGER REFERENCES plateau_buildings(id) ON DELETE CASCADE,
+    ref_mlit_plateau TEXT
 );
 
 CREATE TABLE plateau_building_nodes (
     id SERIAL PRIMARY KEY,
     osm_id BIGINT,
-    building_id INTEGER REFERENCES plateau_buildings(id),
+    building_id INTEGER REFERENCES plateau_buildings(id) ON DELETE CASCADE,
     sequence_id INTEGER,
     ring_id INTEGER NOT NULL DEFAULT 0,
     lat DOUBLE PRECISION,
@@ -179,6 +183,9 @@ CREATE TABLE plateau_building_nodes (
 CREATE INDEX idx_buildings_geom ON plateau_buildings USING GIST (geom);
 CREATE INDEX idx_buildings_centroid ON plateau_buildings USING GIST (centroid);
 CREATE INDEX idx_buildings_osm_id ON plateau_buildings (osm_id);
+CREATE INDEX idx_buildings_city_code ON plateau_buildings (city_code);
+CREATE INDEX idx_buildings_parent_building_id ON plateau_buildings (parent_building_id)
+    WHERE parent_building_id IS NOT NULL;
 CREATE INDEX idx_nodes_building_id ON plateau_building_nodes (building_id);
 CREATE INDEX idx_nodes_osm_id ON plateau_building_nodes (osm_id);
 
@@ -186,6 +193,21 @@ GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO osmfj_user;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO osmfj_user;
 SQL
 ```
+
+> **`plateau_building_nodes.building_id` の `ON DELETE CASCADE` を外さないこと。**
+> 行政界フィルタは `DELETE FROM plateau_buildings` の 1 文だけを実行し、ノード側の削除を外部キーに任せている。
+> CASCADE が無いと、市境の外に落ちる建物を持つ最初の都市で外部キー違反が起き、その都市の取り込みが失敗する。
+> `plateau_migrate_fk_cascade.py` は既存データベースをこの状態に揃えるための移行用で、新規構築の手順には要らない。
+
+> **`city_code` は必ず上の DDL で作ること。**
+> インポーターは初回実行時に `building_part` / `ref_mlit_plateau` / `parent_building_id` / `ring_id` を
+> 自分で追加するが (`_ensure_schema`)、**`city_code` はその対象外**である。
+> この列が無いと最初の取り込みが `column "city_code" does not exist` で失敗する。
+> `plateau_migrate.py` は既存データベースにこの列を足すための移行用で、新規構築の手順には要らない。
+>
+> `NOT NULL` にしてあるのは本番に合わせたもの。インポーターは `--citycode` が未指定なら
+> `--data-dir` のディレクトリ名から市区町村コードを推定するので、`plateau_data/31202` のように
+> コードを名前に含めておくか、`--citycode` を明示する。どちらも無いと値が NULL になり INSERT が落ちる。
 
 > **注意**: `ring_id` カラムは上の `CREATE TABLE` に含まれているので新規構築では問題にならない。
 > 既存データベースをこの手順のバージョンに追従させる場合は、`ALTER TABLE plateau_building_nodes ADD COLUMN ring_id INTEGER NOT NULL DEFAULT 0;` をこの時点、つまり API のデプロイより前に必ず実行する。

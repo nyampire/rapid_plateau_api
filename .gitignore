@@ -16,3 +16,7 @@ skipped_buildings_*.json
 # 取得量の見積もり (scan_bldg.py の出力、実行成果物)
 scripts/reimport/bldg_scan.json
 scripts/reimport/*.tmp
+
+# 手元の設定と進捗 (実サーバの識別子を含む)
+scripts/reimport/ship.env
+scripts/reimport/shipped.txt

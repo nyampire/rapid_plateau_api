@@ -12,3 +12,7 @@ CLAUDE.md
 
 # 取り込みが吐くスキップ集計 (実行成果物)
 skipped_buildings_*.json
+
+# 取得量の見積もり (scan_bldg.py の出力、実行成果物)
+scripts/reimport/bldg_scan.json
+scripts/reimport/*.tmp

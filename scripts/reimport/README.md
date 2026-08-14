@@ -18,11 +18,19 @@ Range で読む薄い層を 1 つ用意すれば足りる（`httpzip.py`）。
 
 ## 使い方
 
+`ckan_download_plan.csv` は 147 都市ぶんをコミットしてあるので、
+既に載っている都市を取り出すだけなら手順 1 は要らない。
+
 ```bash
-# 1. 対象都市の CityGML の URL を集める (CKAN に問い合わせる)
+# 1. 都市を足す / URL を取り直す (CKAN に問い合わせる)
+#    既存の CSV は残り、渡した都市の行だけが入れ替わる
 python3 build_download_plan.py 30406
 
+#    引数なしで、載っている都市すべての URL を取り直す
+python3 build_download_plan.py
+
 # 2. 取得量とメッシュ数を見積もる (中身は落とさない)
+#    zip の大きさを問い合わせずに済ませるなら --no-size
 python3 scan_bldg.py
 
 # 3. 建物データだけ取り出す
@@ -30,7 +38,12 @@ python3 extract_city.py 30406 ./work/30406
 ```
 
 出力した `.gml` は citygml-osm にそのまま渡せる。
-変換したあと `.osm` をサーバへ送り、purge してから `--no-zip` で取り込む。
+変換したあと `.osm` をサーバへ送り、`--no-zip` を付けて取り込む。
+
+**取り込みの前に `plateau_purge.py` を呼ぶ必要はない。**
+`plateau_importer2postgis.py` は `--citycode` が渡っていれば、開始前にその都市の
+既存データを自分で消す。
+purge を挟むと対応エリアの再計算まで走り、メモリの小さいサーバでは OOM する。
 
 ## ファイル
 
@@ -41,6 +54,11 @@ python3 extract_city.py 30406 ./work/30406
 | `scan_bldg.py` | 各 zip の中央ディレクトリを読み、建物データの量を数える |
 | `extract_city.py` | `udx/bldg/*.gml` だけを Range で取り出す |
 | `ckan_download_plan.csv` | 147 都市の URL 一覧。`build_download_plan.py` が作る |
+
+**対象は本来 148 都市で、この CSV には 1 つ足りない。**
+宇城市 43213 が、作成時点で再取り込み済みだったため除いてある。
+空のデータベースへ一から入れる場合は対象なので、`python3 build_download_plan.py 43213`
+で足してから使う。既存の 147 行は残る。
 
 ## CKAN の読み方で引っかかるところ
 

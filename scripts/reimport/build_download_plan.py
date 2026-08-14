@@ -3,14 +3,19 @@
 
 `ckan_download_plan.csv` を書き出す。`extract_city.py` はこの CSV を読む。
 
-対象の都市コードは引数で渡す。渡さなければ、同じディレクトリの
-`ckan_download_plan.csv` に載っている都市を対象にして作り直す。
+対象の都市コードは引数で渡す。渡さなければ、既存の CSV に載っている都市を
+すべて対象にして取り直す。
 
     python3 build_download_plan.py                 # 既存の一覧を最新の URL で更新
-    python3 build_download_plan.py 30406 43213     # 都市を指定
+    python3 build_download_plan.py 30406 43213     # この 2 都市を足す / 取り直す
+
+**書き出しは追加である。**渡した都市の行だけが入れ替わり、載っていない都市は
+そのまま残る。解決できなかった都市も既存の行を残す。消してしまうと、引数なしの
+モードが CSV 自身を読むので二度と戻らない。
 
 CKAN の package 名は `plateau-<citycode>-<romaji>-<種別>-<年度>` の形で、
-1 都市に複数年度ある。最新年度を採る。
+1 都市に複数年度ある。新しい年度から順に見て、CityGML を持つ最初の年度を採る。
+最新年度が 3D Tiles だけということがあるので、1 年度で諦めない。
 
 resource は name が `CityGML（vN）` に**完全一致**するものだけを見る。
 部分一致にすると `【uc25-…】…のCityGMLデータ` のような、ユースケース実証用の
@@ -53,17 +58,20 @@ def list_packages():
     return sorted(n for n in set(names) if n.startswith('plateau-'))
 
 
-def latest_by_citycode(names):
-    """citycode → 最新年度の package 名。"""
-    best = {}
+def by_citycode(names):
+    """citycode → (年度, package 名) の新しい順のリスト。
+
+    最新年度に CityGML が無い package もあるので、1 件に絞らず順に試せる形で返す。
+    3D Tiles だけを収めた年度が 1 つあるだけで都市ごと落ちるのを避ける。
+    """
+    found = {}
     for n in names:
         m = PACKAGE_NAME.match(n)
         if not m:
             continue
         code, year = m.group(1), int(m.group(3))
-        if code not in best or year > best[code][0]:
-            best[code] = (year, n)
-    return best
+        found.setdefault(code, []).append((year, n))
+    return {code: sorted(v, reverse=True) for code, v in found.items()}
 
 
 def citygml_resource(package):
@@ -85,45 +93,75 @@ def content_length(url):
         return int(r.headers.get('Content-Length') or 0)
 
 
-def main():
+FIELDS = ['city_code', 'package', 'year', 'citygml_v', 'bytes', 'url']
+
+
+def load_plan(path):
+    """既存の計画を citycode → 行 の dict で読む。無ければ空。"""
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return {row['city_code']: row for row in csv.DictReader(f)}
+
+
+def write_plan(path, by_code):
+    """計画を書き出す。書き終えてから差し替えるので、途中で落ちても既存が残る。"""
+    tmp = path + '.tmp'
+    with open(tmp, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(FIELDS)
+        for code in sorted(by_code):
+            row = by_code[code]
+            w.writerow([row[k] for k in FIELDS])
+    os.replace(tmp, path)
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument('citycodes', nargs='*', help='省略時は既存の CSV の都市を対象にする')
     ap.add_argument('--no-size', action='store_true', help='zip の大きさを問い合わせない')
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    # 既存の計画は残したまま、対象の都市の行だけ入れ替える。
+    # 置き換えにすると、都市を 1 つ足すつもりの実行で残りが消える。
+    plan = load_plan(PLAN)
 
     wanted = args.citycodes
     if not wanted:
-        if not os.path.exists(PLAN):
+        if not plan:
             ap.error('都市コードを渡すか、先に一度都市を指定して %s を作ること' % PLAN)
-        with open(PLAN) as f:
-            wanted = [row['city_code'] for row in csv.DictReader(f)]
+        wanted = list(plan)
 
-    best = latest_by_citycode(list_packages())
-    rows, missing = [], []
-    for i, code in enumerate(sorted(set(wanted)), 1):
-        if code not in best:
-            missing.append(code)
-            continue
-        year, package = best[code]
-        found = citygml_resource(package)
+    catalog = by_citycode(list_packages())
+    wanted = sorted(set(wanted))
+    updated, missing = 0, []
+    for i, code in enumerate(wanted, 1):
+        found = None
+        for year, package in catalog.get(code, []):
+            got = citygml_resource(package)
+            if got:
+                found = (year, package, got[0], got[1])
+                break
+            time.sleep(0.3)
         if not found:
+            # 解決できなかった都市は既存の行を残す。消すと、引数なしのモードが
+            # 計画自身を読むので二度と戻らない。
             missing.append(code)
             continue
-        v, url = found
+        year, package, v, url = found
         size = 0 if args.no_size else content_length(url)
-        rows.append([code, package, year, v, size, url])
+        plan[code] = dict(zip(FIELDS, [code, package, year, v, size, url]))
+        updated += 1
         if i % 25 == 0:
-            print('...%d/%d' % (i, len(set(wanted))), flush=True)
+            print('...%d/%d' % (i, len(wanted)), flush=True)
         time.sleep(0.3)
 
-    with open(PLAN, 'w', newline='') as f:
-        w = csv.writer(f)
-        w.writerow(['city_code', 'package', 'year', 'citygml_v', 'bytes', 'url'])
-        w.writerows(rows)
+    write_plan(PLAN, plan)
 
-    print('%d 都市を %s に書き出した' % (len(rows), PLAN))
+    print('%d 都市を更新、計 %d 都市を %s に書き出した' % (updated, len(plan), PLAN))
     if missing:
-        print('CityGML が見つからない都市: %s' % ', '.join(missing), file=sys.stderr)
+        print('CityGML が見つからない都市 (既存の行はそのまま): %s'
+              % ', '.join(missing), file=sys.stderr)
         return 1
     return 0
 

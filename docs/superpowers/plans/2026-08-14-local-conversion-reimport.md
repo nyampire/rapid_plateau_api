@@ -53,7 +53,9 @@ deploy/
 tests/
   test_ship_city.py      新規  ship_city.sh の門と失敗時の振る舞い
   test_ship_all.py       新規  ship_all.sh の再開と件数確認
-  test_reimport_one.py   新規  reimport_one.sh の 3 つの分岐
+  test_reimport_one.py       新規  reimport_one.sh の分岐
+  test_reimport_batch.py     新規  一覧の受け取りと done.txt の照合
+  test_reimport_watchdog.py  新規  wrapper の判定
 ```
 
 `DEPLOY.md` を新規構築と更新の 2 部に分ける作業は Task 6 に含む。
@@ -1135,7 +1137,8 @@ MSG
 **Files:**
 - Create: `deploy/reimport_batch.sh`
 - Create: `deploy/reimport_watchdog.sh`
-- Modify: `tests/test_reimport_one.py`（バッチのテストを足す。ファイル名はこのままにする）
+- Create: `tests/test_reimport_batch.py`
+- Create: `tests/test_reimport_watchdog.py`
 
 **Interfaces:**
 - Consumes: Task 4 の `reimport_one.sh`
@@ -1147,12 +1150,18 @@ MSG
 
 - [ ] **Step 1: 失敗するテストを 2 件書く**
 
-`tests/test_reimport_one.py` の末尾に追加する。
+`tests/test_reimport_batch.py` を新規に作る。
 
 ```python
-# ----------------------------------------------------------------------
-# reimport_batch.sh
+"""reimport_batch.sh の一覧の受け取りと done.txt の照合を固定する。"""
 
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
 BATCH = REPO / 'deploy' / 'reimport_batch.sh'
 
 
@@ -1214,7 +1223,7 @@ def test_batch_skips_cities_listed_in_done(batch_env):
 
 - [ ] **Step 2: 2 件が落ちることを確かめる**
 
-Run: `python3 -m pytest tests/test_reimport_one.py -v -k batch`
+Run: `python3 -m pytest tests/test_reimport_batch.py -v`
 Expected: 2 failed。`deploy/reimport_batch.sh` がまだ無いので returncode 127。
 
 - [ ] **Step 3: `deploy/reimport_batch.sh` を書く**
@@ -1330,10 +1339,108 @@ echo DONE > "$STATUS"
 
 - [ ] **Step 4: テストが通ることを確かめる**
 
-Run: `python3 -m pytest tests/test_reimport_one.py -v -k batch`
+Run: `python3 -m pytest tests/test_reimport_batch.py -v`
 Expected: 2 passed
 
-- [ ] **Step 5: `deploy/reimport_watchdog.sh` を書く**
+- [ ] **Step 5: watchdog の判定を固定する失敗するテストを 2 件書く**
+
+`tests/test_reimport_watchdog.py` を新規に作る。
+
+ループ全体は回さない。打ち切りも `kill` も黙って効かなくなる原因は `is_real_wrapper` の 1 つで、
+そこだけを切り出して確かめる。
+
+```python
+"""reimport_watchdog.sh の is_real_wrapper を固定する。
+
+置き場所を変えると判定が常に false に倒れ、90 分の打ち切りも kill も
+黙って効かなくなる。ログだけは正常に出続けるので気づけない。
+
+ループ本体は回さない。関数だけを source して呼ぶ。
+"""
+
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+WATCHDOG = REPO / 'deploy' / 'reimport_watchdog.sh'
+
+
+def _ask(wrapper_path, cmdline, tmp_path):
+    """is_real_wrapper に cmdline を判定させ、終了コードを返す。
+
+    /proc を読む実装なので、cmdline を返す偽の tr を PATH に置く。
+    """
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir(exist_ok=True)
+    tr_stub = bin_dir / 'tr'
+    tr_stub.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [ "$1" = "\\\\0" ]; then printf "%s" %s; else exec /usr/bin/tr "$@"; fi\n'
+        % ('%s', repr(cmdline).replace("'", '"'))
+    )
+    tr_stub.chmod(0o755)
+
+    script = (
+        'set -uo pipefail\n'
+        'WRAPPER_PATH=%s\n'
+        'is_real_wrapper() {\n'
+        '  local cmdline\n'
+        '  cmdline=$(tr "\\\\0" " " < /dev/null) || return 1\n'
+        '  case "$cmdline" in\n'
+        '    "bash $WRAPPER_PATH "*) return 0 ;;\n'
+        '    *) return 1 ;;\n'
+        '  esac\n'
+        '}\n'
+        'is_real_wrapper 1\n'
+    ) % wrapper_path
+
+    env = dict(os.environ)
+    env['PATH'] = '%s:%s' % (bin_dir, env['PATH'])
+    return subprocess.run(['bash', '-c', script], env=env,
+                          capture_output=True, text=True).returncode
+
+
+def test_watchdog_reads_wrapper_path_from_the_environment():
+    """判定に使うパスが環境変数から来ている。
+
+    絶対パスが直接書き込まれていると、置き場所を変えたときに一致しなくなる。
+    """
+    body = WATCHDOG.read_text()
+    assert 'WRAPPER_PATH' in body
+    assert '"bash $WRAPPER_PATH "*)' in body
+
+
+def test_watchdog_does_not_hardcode_an_absolute_wrapper_path():
+    """判定に使うパスが直に埋め込まれていない。
+
+    実サーバのパスを名指しで書くと、この公開リポジトリにそれを残すことになる。
+    絶対パスの形だけを見て、どこを指しているかは問わない。
+    """
+    body = WATCHDOG.read_text()
+    hard = re.findall(r'"bash /[^"$]*reimport_one\.sh', body)
+    assert not hard, hard
+
+
+def test_matches_when_the_cmdline_uses_the_configured_path(tmp_path):
+    assert _ask('/somewhere/reimport_one.sh',
+                'bash /somewhere/reimport_one.sh 30406 ', tmp_path) == 0
+
+
+def test_does_not_match_when_the_wrapper_moved(tmp_path):
+    """WRAPPER_PATH がずれていれば一致しない。これが黙って起きる失敗の形。"""
+    assert _ask('/elsewhere/reimport_one.sh',
+                'bash /somewhere/reimport_one.sh 30406 ', tmp_path) == 1
+```
+
+- [ ] **Step 6: 4 件が落ちることを確かめる**
+
+Run: `python3 -m pytest tests/test_reimport_watchdog.py -v`
+Expected: 4 failed。`deploy/reimport_watchdog.sh` がまだ無いので `read_text` が `FileNotFoundError` になる。
+
+- [ ] **Step 7: `deploy/reimport_watchdog.sh` を書く**
 
 `deploy/reimport_watchdog.sh` を新規に作る。
 サーバ上の現物から変えたのは、`is_real_wrapper` が比べる文字列を環境変数から作ることだけである。
@@ -1471,16 +1578,21 @@ while true; do
 done
 ```
 
-- [ ] **Step 6: 全体のテストを流す**
+- [ ] **Step 8: watchdog のテストが通ることを確かめる**
+
+Run: `python3 -m pytest tests/test_reimport_watchdog.py -v`
+Expected: 4 passed
+
+- [ ] **Step 9: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 346 passed、25 skipped
+Expected: 350 passed、25 skipped
 
-- [ ] **Step 7: 実行権限を付けてコミット**
+- [ ] **Step 10: 実行権限を付けてコミット**
 
 ```bash
 chmod +x deploy/reimport_one.sh deploy/reimport_batch.sh deploy/reimport_watchdog.sh
-git add deploy/reimport_batch.sh deploy/reimport_watchdog.sh tests/test_reimport_one.py
+git add deploy/reimport_batch.sh deploy/reimport_watchdog.sh tests/test_reimport_batch.py tests/test_reimport_watchdog.py
 git update-index --chmod=+x deploy/reimport_one.sh deploy/reimport_batch.sh deploy/reimport_watchdog.sh
 git commit -F - <<'MSG'
 feat(deploy): バッチと見張りをリポジトリに置く
@@ -1668,7 +1780,7 @@ Expected: 該当なし。`DEPLOY.md` にあるパスは、他人が自分の環�
 - [ ] **Step 4: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 346 passed、25 skipped
+Expected: 350 passed、25 skipped
 
 - [ ] **Step 5: コミット**
 

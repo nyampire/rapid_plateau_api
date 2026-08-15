@@ -26,6 +26,12 @@
   `find | wc -l` や `grep -c` のように必ず数値を返すものは対象外でよい。
   コマンドの終了コードも `$?` に取って別に確かめる。`need_int` だけでは、
   失敗したコマンドがたまたま数値を吐いた場合を捕まえられない
+- **変数展開の直後に全角文字が続くときは `${VAR}` と書く。**
+  bash 3.2 は `LANG=ja_JP.UTF-8` のとき、全角文字の先頭バイトを識別子の一部として読む。
+  `"exit $SSH_EXIT、出力"` は `SSH_EXIT\xe3: unbound variable` になり、`set -u` の下で落ちる。
+  `LANG` が空や `C` のときは起きないので、環境によって出たり出なかったりする。
+  メッセージが日本語である以上どこにでも現れうるので、commit の前に
+  `grep -nP '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[^\x00-\x7F]'` で洗う
 - 終了コードの割り当て。`2` はディスク不足でバッチ全体を止める合図なので、他の用途に使わない
 
 | コード | 意味 |
@@ -620,7 +626,7 @@ SSH_EXIT=$?
 # 転送を確かめないまま shipped.txt に記録して作業ディレクトリを消す。
 # 記録された都市は ship_all.sh が永久に飛ばす。
 if [ "$SSH_EXIT" -ne 0 ] || ! need_int "$REMOTE_N"; then
-  bail "$EXIT_TRANSFER" "転送先の枚数を数えられない (ssh exit $SSH_EXIT、出力: $REMOTE_N)"
+  bail "$EXIT_TRANSFER" "転送先の枚数を数えられない (ssh exit ${SSH_EXIT}、出力: ${REMOTE_N})"
 fi
 say "転送先 $REMOTE_N 個"
 if [ "$REMOTE_N" -ne "$OSM_N" ]; then
@@ -1255,7 +1261,7 @@ trap cleanup EXIT
   IMP_EXIT=$?
   IMPORT_PID=""
   if [ "$IMP_EXIT" -ne 0 ]; then
-    echo "[$(ts)] [$CITY] 取り込みが exit $IMP_EXIT。入力は残す"
+    echo "[$(ts)] [$CITY] 取り込みが exit ${IMP_EXIT}。入力は残す"
     exit $IMP_EXIT
   fi
 

@@ -125,6 +125,13 @@ trap cleanup EXIT
   IMPORT_PID=""
   if [ "$IMP_EXIT" -ne 0 ]; then
     echo "[$(ts)] [$CITY] 取り込みが exit ${IMP_EXIT}。入力は残す"
+    # 2 はディスク不足の予約番号で、バッチはこれを見て全体を止める。
+    # 取り込み器は argparse を使うので、引数の綴りが違うと 2 を返す。
+    # 素通しすると 1 都市目で全体が止まり、ログには「ディスク不足」と出る。
+    if [ "$IMP_EXIT" -eq 2 ]; then
+      echo "[$(ts)] [$CITY] 取り込み器の exit 2 を 14 に写す (引数の不整合の可能性)"
+      exit 14
+    fi
     exit $IMP_EXIT
   fi
 

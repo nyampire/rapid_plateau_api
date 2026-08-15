@@ -167,6 +167,21 @@ def test_counts_the_osm_files_instead_of_assuming_two(env):
     assert r.returncode == 13, r.stdout + r.stderr
 
 
+def test_importer_exit_2_becomes_14(env):
+    """取り込み器の exit 2 (argparse のエラーなど) は 14 に写す。
+
+    2 はディスク不足の予約番号で、バッチはこれを見て全体を止める。
+    取り込み器は argparse を使うので、引数の綴りが違うだけで 2 を返す。
+    素通しすると 1 都市目で全体が止まり、ログには「ディスク不足」と出る。
+    """
+    _city(env, osm=2)
+    env.stub.write_text('import sys\nsys.exit(2)\n')
+
+    r = _run(env)
+
+    assert r.returncode == 14, r.stdout + r.stderr
+
+
 def test_kills_the_importer_when_the_wrapper_is_terminated(env):
     """wrapper が SIGTERM を受けたら、取り込みの子も落とす。
 

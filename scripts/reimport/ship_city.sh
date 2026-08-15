@@ -52,10 +52,25 @@ bail() {
 
 disk_kb() { df -k "$1" | awk 'NR==2 {print $4}'; }
 
+# コマンドの出力を数値として比べる前に、必ずこれを通す。
+# 空文字のまま [ "$x" -ne "$y" ] を評価すると
+# integer expression expected でエラー終了し、if がそれを偽として扱う。
+# 分岐が黙って消えるので、門は「壊れているときに限って」効かなくなる。
+need_int() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 say "=== START ==="
 
 mkdir -p "$WORK_ROOT"
 AVAIL=$(disk_kb "$WORK_ROOT")
+if ! need_int "$AVAIL"; then
+  say "ABORT: 空き容量を読めない (df の出力: $AVAIL)"
+  exit 2
+fi
 say "空き $AVAIL KB (下限 $DISK_MIN_KB)"
 if [ "$AVAIL" -lt "$DISK_MIN_KB" ]; then
   say "ABORT: ディスクが足りない"
@@ -81,7 +96,7 @@ MESHES_EXIT=$?
 # 報告が読めなかったときに門をすり抜けさせない。
 # MESHES が空のまま [ "$GML_N" -ne "$MESHES" ] を評価すると
 # integer expression expected でエラー終了し、if はそれを偽として扱う。
-if [ "$MESHES_EXIT" -ne 0 ] || ! [[ "$MESHES" =~ ^[0-9]+$ ]]; then
+if [ "$MESHES_EXIT" -ne 0 ] || ! need_int "$MESHES"; then
   bail "$EXIT_EXTRACT" "meshes を読めない (出力: $EXTRACT_JSON)"
 fi
 GML_N=$(find "$WORK" -maxdepth 1 -name '*.gml' | wc -l | tr -d ' ')
@@ -109,6 +124,9 @@ fi
 
 # 数の一致では切り詰めを検出できない。JVM が途中で落ちると、
 # 書きかけの .osm も 1 個として数えられる。
+# .osm が 1 つも無いとグロブが展開されず、文字列 <WORK>/*.osm が f に入る。
+# 存在しないパスに対して [ ! -s ] が真になり、実態と食い違うメッセージで落ちる。
+shopt -s nullglob
 for f in "$WORK"/*.osm; do
   if [ ! -s "$f" ]; then
     bail "$EXIT_CONVERT" "空のファイル: $(basename "$f")"
@@ -117,6 +135,7 @@ for f in "$WORK"/*.osm; do
     bail "$EXIT_CONVERT" "閉じタグが無い: $(basename "$f")"
   fi
 done
+shopt -u nullglob
 
 say "3/5 manifest"
 echo "$OSM_N" > "$WORK/manifest.txt"
@@ -131,6 +150,13 @@ if [ "$RSYNC_EXIT" -ne 0 ]; then
 fi
 
 REMOTE_N=$(ssh "$SHIP_HOST" "find '$SHIP_PATH/$CITY' -maxdepth 1 -name '*.osm' | wc -l" | tr -d ' ')
+SSH_EXIT=$?
+# ssh が失敗すると REMOTE_N が空になる。そのまま比較すると門が消え、
+# 転送を確かめないまま shipped.txt に記録して作業ディレクトリを消す。
+# 記録された都市は ship_all.sh が永久に飛ばす。
+if [ "$SSH_EXIT" -ne 0 ] || ! need_int "$REMOTE_N"; then
+  bail "$EXIT_TRANSFER" "転送先の枚数を数えられない (ssh exit $SSH_EXIT 、出力: $REMOTE_N)"
+fi
 say "転送先 $REMOTE_N 個"
 if [ "$REMOTE_N" -ne "$OSM_N" ]; then
   bail "$EXIT_TRANSFER" "転送先の枚数が違う ($REMOTE_N != $OSM_N)"

@@ -214,3 +214,38 @@ def test_records_city_and_count_when_everything_passes(env):
     assert r.returncode == 0, r.stdout + r.stderr
     assert env.shipped.read_text().strip() == '30406 2'
     assert not (env.work_root / '30406').exists()
+
+
+def test_transfer_gate_fails_when_the_remote_count_is_unreadable(env):
+    """転送先の枚数を数えられなければ落ちる。
+
+    ssh が失敗すると REMOTE_N が空になる。そのまま比較すると
+    integer expression expected でエラー終了し、if がそれを偽として扱う。
+    門が消え、転送を確かめないまま shipped.txt に記録して作業を消す。
+    記録された都市は ship_all.sh が永久に飛ばす。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    _stub(env.bin, 'rsync', 'exit 0')
+    _stub(env.bin, 'ssh', 'echo "ssh: connect failed" >&2\nexit 255')
+
+    r = _run(env)
+
+    assert r.returncode == 12, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
+def test_gates_use_computed_counts_not_constants(env):
+    """門が数える値を使っている。定数と比べていない。
+
+    他のテストがどれも 2 メッシュなので、.osm 数も転送先の枚数も 2 に
+    固定した実装で通ってしまう。3 メッシュで一通り流して区別する。
+    """
+    _good_extract(env, n=3)
+    _good_java(env)
+    _good_transfer(env, remote_count=3)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.shipped.read_text().strip() == '30406 3'

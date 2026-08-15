@@ -165,6 +165,40 @@ def test_extract_gate_fails_when_file_count_differs(env):
 
     assert r.returncode == 10, r.stderr
     assert not env.shipped.exists()
+
+
+def test_extract_gate_passes_when_file_count_matches(env):
+    """報告と実ファイル数が合えば、取り出しの門を通る。
+
+    これが無いと「常に exit 10 で落ちる」実装でも上のテストが通ってしまい、
+    門が比較していることを何も固定できない。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'printf "<x/>" > "$2/53394501_bldg_6697_op.gml"\n'
+          'echo \'{"city_code":"30406","meshes":2,"raw_bytes":10}\'')
+
+    r = _run(env)
+
+    assert r.returncode != 10, r.stdout + r.stderr
+    assert '報告 2 メッシュ、実ファイル 2' in r.stdout
+
+
+def test_extract_gate_fails_when_the_report_is_unreadable(env):
+    """meshes を読めなければ落ちる。
+
+    MESHES が空のまま比較すると [ は integer expression expected で
+    エラー終了し、if がそれを偽として扱うので門をすり抜ける。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'echo "これは JSON ではない"')
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
 ```
 
 - [ ] **Step 2: テストが落ちることを確かめる**
@@ -304,6 +338,13 @@ fi
 echo "$EXTRACT_JSON"
 
 MESHES=$(echo "$EXTRACT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["meshes"])')
+MESHES_EXIT=$?
+# 報告が読めなかったときに門をすり抜けさせない。
+# MESHES が空のまま [ "$GML_N" -ne "$MESHES" ] を評価すると
+# integer expression expected でエラー終了し、if はそれを偽として扱う。
+if [ "$MESHES_EXIT" -ne 0 ] || ! [[ "$MESHES" =~ ^[0-9]+$ ]]; then
+  bail "$EXIT_EXTRACT" "meshes を読めない (出力: $EXTRACT_JSON)"
+fi
 GML_N=$(find "$WORK" -maxdepth 1 -name '*.gml' | wc -l | tr -d ' ')
 say "報告 $MESHES メッシュ、実ファイル $GML_N"
 if [ "$GML_N" -ne "$MESHES" ]; then
@@ -316,12 +357,12 @@ say "=== 取り出しまで完了 ==="
 - [ ] **Step 6: テストが通ることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: PASS (1 passed)
+Expected: PASS (3 passed)
 
 - [ ] **Step 7: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 既存の 329 passed に 1 件足されて 330 passed、25 skipped
+Expected: 既存の 329 passed に 3 件足されて 332 passed、25 skipped
 
 - [ ] **Step 8: コミット**
 
@@ -440,7 +481,7 @@ def test_records_city_and_count_when_everything_passes(env):
 - [ ] **Step 2: 4 件が落ちることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: 4 failed, 1 passed。落ちるのは、取り出しまでで終わっているスクリプトが returncode 0 を返すため。
+Expected: 4 failed, 3 passed。落ちるのは、取り出しまでで終わっているスクリプトが returncode 0 を返すため。
 
 - [ ] **Step 3: 変換と転送を実装する**
 
@@ -510,12 +551,12 @@ say "=== DONE ($OSM_N メッシュ) ==="
 - [ ] **Step 4: テストが通ることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: 5 passed
+Expected: 7 passed
 
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 334 passed、25 skipped
+Expected: 336 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -790,7 +831,7 @@ Expected: 4 passed
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 338 passed、25 skipped
+Expected: 340 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -1099,7 +1140,7 @@ Expected: 6 passed
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 344 passed、25 skipped
+Expected: 346 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -1586,7 +1627,7 @@ Expected: 4 passed
 - [ ] **Step 9: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 350 passed、25 skipped
+Expected: 352 passed、25 skipped
 
 - [ ] **Step 10: 実行権限を付けてコミット**
 
@@ -1780,7 +1821,7 @@ Expected: 該当なし。`DEPLOY.md` にあるパスは、他人が自分の環�
 - [ ] **Step 4: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 350 passed、25 skipped
+Expected: 352 passed、25 skipped
 
 - [ ] **Step 5: コミット**
 

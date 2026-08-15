@@ -77,6 +77,13 @@ fi
 echo "$EXTRACT_JSON"
 
 MESHES=$(echo "$EXTRACT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["meshes"])')
+MESHES_EXIT=$?
+# 報告が読めなかったときに門をすり抜けさせない。
+# MESHES が空のまま [ "$GML_N" -ne "$MESHES" ] を評価すると
+# integer expression expected でエラー終了し、if はそれを偽として扱う。
+if [ "$MESHES_EXIT" -ne 0 ] || ! [[ "$MESHES" =~ ^[0-9]+$ ]]; then
+  bail "$EXIT_EXTRACT" "meshes を読めない (出力: $EXTRACT_JSON)"
+fi
 GML_N=$(find "$WORK" -maxdepth 1 -name '*.gml' | wc -l | tr -d ' ')
 say "報告 $MESHES メッシュ、実ファイル $GML_N"
 if [ "$GML_N" -ne "$MESHES" ]; then

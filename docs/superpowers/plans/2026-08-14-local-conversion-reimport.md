@@ -199,6 +199,26 @@ def test_extract_gate_fails_when_the_report_is_unreadable(env):
     r = _run(env)
 
     assert r.returncode == 10, r.stdout + r.stderr
+
+
+def test_extract_gate_uses_the_number_from_the_report(env):
+    """比較に使う数が、報告された meshes から来ている。
+
+    他の 3 件はどれも meshes が 2 なので、比較対象を 2 に固定して
+    $EXTRACT_JSON を読まない実装でも全部通ってしまう。
+    3 メッシュの報告に 3 ファイルを添えると、2 固定の実装はここで落ちる。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'printf "<x/>" > "$2/53394501_bldg_6697_op.gml"\n'
+          'printf "<x/>" > "$2/53394502_bldg_6697_op.gml"\n'
+          'echo \'{"city_code":"30406","meshes":3,"raw_bytes":15}\'')
+
+    r = _run(env)
+
+    assert r.returncode != 10, r.stdout + r.stderr
+    assert '報告 3 メッシュ、実ファイル 3' in r.stdout
 ```
 
 - [ ] **Step 2: テストが落ちることを確かめる**
@@ -357,12 +377,12 @@ say "=== 取り出しまで完了 ==="
 - [ ] **Step 6: テストが通ることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: PASS (3 passed)
+Expected: PASS (4 passed)
 
 - [ ] **Step 7: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 既存の 329 passed に 3 件足されて 332 passed、25 skipped
+Expected: 既存の 329 passed に 4 件足されて 333 passed、25 skipped
 
 - [ ] **Step 8: コミット**
 
@@ -481,7 +501,7 @@ def test_records_city_and_count_when_everything_passes(env):
 - [ ] **Step 2: 4 件が落ちることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: 4 failed, 3 passed。落ちるのは、取り出しまでで終わっているスクリプトが returncode 0 を返すため。
+Expected: 4 failed, 4 passed。落ちるのは、取り出しまでで終わっているスクリプトが returncode 0 を返すため。
 
 - [ ] **Step 3: 変換と転送を実装する**
 
@@ -551,12 +571,12 @@ say "=== DONE ($OSM_N メッシュ) ==="
 - [ ] **Step 4: テストが通ることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: 7 passed
+Expected: 8 passed
 
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 336 passed、25 skipped
+Expected: 337 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -831,7 +851,7 @@ Expected: 4 passed
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 340 passed、25 skipped
+Expected: 341 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -1140,7 +1160,7 @@ Expected: 6 passed
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 346 passed、25 skipped
+Expected: 347 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -1627,7 +1647,7 @@ Expected: 4 passed
 - [ ] **Step 9: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 352 passed、25 skipped
+Expected: 353 passed、25 skipped
 
 - [ ] **Step 10: 実行権限を付けてコミット**
 
@@ -1821,7 +1841,7 @@ Expected: 該当なし。`DEPLOY.md` にあるパスは、他人が自分の環�
 - [ ] **Step 4: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 352 passed、25 skipped
+Expected: 353 passed、25 skipped
 
 - [ ] **Step 5: コミット**
 

@@ -37,7 +37,10 @@
 | コード | 意味 |
 |---|---|
 | 0 | 成功 |
+| 1 | 1 都市以上が失敗 (`ship_all.sh`) |
 | 2 | ディスク不足 (バッチ全体を止める) |
+| 3 | 設定か計画がおかしい (`ship_all.sh`) |
+| 4 | 一覧をサーバへ置けなかった (`ship_all.sh`) |
 | 10 | 取り出しの門で不一致 |
 | 11 | 変換の門で不一致 |
 | 12 | 転送の門で不一致 |
@@ -717,7 +720,7 @@ MSG
 - Produces: `ship_all.sh`。`SHIP_CITY_CMD` で呼ぶコマンドを差し替えられる
 - Produces: 転送先の親に `reimport_targets_<日時>.txt` を置く
 
-- [ ] **Step 1: 失敗するテストを 4 件書く**
+- [ ] **Step 1: 失敗するテストを 8 件書く**
 
 `tests/test_ship_all.py` を新規に作る。
 
@@ -846,12 +849,80 @@ def test_one_failure_does_not_stop_the_rest(env):
     assert r.returncode == 1, r.stdout + r.stderr
     assert env.called.read_text().split() == ['13402', '30406', '43213']
     assert '30406' in r.stdout
+
+
+def test_disk_shortage_aborts_the_whole_run(env):
+    """空きが下限を割ったら、その場で全体を止める。
+
+    このテストが無いと、ディスクチェックを丸ごと消した実装でも通る。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    env.run_env['SHIP_ENV'] = str(env.tmp / 'ship_tight.env')
+    (env.tmp / 'ship_tight.env').write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'DISK_MIN_KB=0', 'DISK_MIN_KB=999999999999'))
+
+    r = _run(env)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert not env.called.exists()
+
+
+def test_ship_city_disk_exit_aborts_the_whole_run(env):
+    """ship_city.sh が exit 2 を返したら、次の都市へ進まずに止める。
+
+    2 はディスク不足の合図で、他の失敗と混ぜてはいけない。
+    このテストが無いと、exit 2 の分岐を消した実装でも通る。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    _stub(env.bin, 'ship_city_stub',
+          'echo "$1" >> "%s"\n'
+          'if [ "$1" = "30406" ]; then exit 2; fi\n'
+          'echo "$1 3" >> "%s"\n'
+          'exit 0' % (env.called, env.shipped))
+
+    r = _run(env)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert env.called.read_text().split() == ['13402', '30406']
+
+
+def test_target_list_holds_only_city_codes(env):
+    """サーバへ渡す一覧は都市コード 1 列だけにする。
+
+    shipped.txt は <citycode> <osm数> の 2 列。第 2 段のバッチは行から
+    空白を全部除くので、2 列のまま渡すと 43213 103 が 43213103 になり、
+    その都市は永久に取り込まれない。
+    """
+    _write_plan(env, ['13402', '30406'])
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    written = sorted(env.tmp.glob('reimport_targets_*.txt'))
+    assert written, '一覧が作られていない'
+    lines = [ln for ln in written[-1].read_text().splitlines() if ln]
+    assert lines == ['13402', '30406'], lines
+
+
+def test_resume_does_not_skip_on_a_prefix_match(env):
+    """都市コードの前方一致で誤って飛ばさない。
+
+    照合が行頭と末尾の空白で挟まれていないと、1340 が 13402 に一致する。
+    """
+    _write_plan(env, ['13402', '30406'])
+    env.shipped.write_text('1340 8\n')
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.called.read_text().split() == ['13402', '30406']
 ```
 
-- [ ] **Step 2: 4 件が落ちることを確かめる**
+- [ ] **Step 2: 8 件が落ちることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_all.py -v`
-Expected: 4 failed。`ship_all.sh` がまだ無いので returncode 127。
+Expected: 8 failed。`ship_all.sh` がまだ無いので returncode 127。
 
 - [ ] **Step 3: `ship_all.sh` を書く**
 
@@ -901,6 +972,17 @@ need_int() {
   esac
 }
 
+# ship.env はファイルなので、そこから来る数値も検査する。
+# DISK_MIN_KB が壊れているとディスク不足の判定が黙って消える。
+# 安全装置そのものが、設定を書き損じたときに限って効かなくなる。
+for v in DISK_MIN_KB EXPECTED_CITIES; do
+  eval "val=\$$v"
+  if ! need_int "$val"; then
+    say "ABORT: ${v} が数字でない (値: ${val})"
+    exit 3
+  fi
+done
+
 touch "$SHIPPED_TXT"
 
 CODES=$(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | grep -c .)
@@ -914,9 +996,12 @@ failed=""
 ok=0
 skip=0
 i=0
-for CITY in $(tail -n +2 "$PLAN_CSV" | cut -d, -f1); do
+# tr -d '\r' は CRLF の CSV に備える。\r が残ると shipped.txt との照合が
+# 一致しなくなり、再開のたびに全都市を送り直す。
+for CITY in $(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | tr -d '\r'); do
   i=$((i + 1))
 
+  # 行頭と末尾の空白で挟む。挟まないと 1340 が 13402 に前方一致する。
   if grep -q "^$CITY " "$SHIPPED_TXT"; then
     skip=$((skip + 1))
     continue
@@ -951,9 +1036,19 @@ done
 # 走っているバッチが読むファイルを書き換えない。
 STAMP=$(date '+%Y%m%d-%H%M%S')
 TARGETS="$WORK_ROOT/reimport_targets_$STAMP.txt"
+# 都市コードの 1 列だけにする。shipped.txt は 2 列である。
+# 第 2 段のバッチは行から空白を全部除くので、2 列のまま渡すと
+# 43213 103 が 43213103 になり、その都市は永久に取り込まれない。
 cut -d' ' -f1 "$SHIPPED_TXT" > "$TARGETS"
 rsync -az "$TARGETS" "$SHIP_HOST:$SHIP_PATH/../reimport_targets_$STAMP.txt"
-say "一覧を置いた: reimport_targets_$STAMP.txt ($(grep -c . "$TARGETS") 都市)"
+TARGETS_EXIT=$?
+# ここで失敗を握りつぶすと、5〜6 時間かけて送ったあとに一覧だけ届いておらず、
+# ログ上は成功して見える。第 2 段が始まらない理由が判らなくなる。
+if [ "$TARGETS_EXIT" -ne 0 ]; then
+  say "ABORT: 一覧の転送が exit ${TARGETS_EXIT}。手元には ${TARGETS} が残っている"
+  exit 4
+fi
+say "一覧を置いた: reimport_targets_${STAMP}.txt ($(grep -c . "$TARGETS") 都市)"
 
 say "=== DONE === ok=$ok skip=$skip failed=$(echo "$failed" | wc -w | tr -d ' ')"
 if [ -n "$failed" ]; then
@@ -967,12 +1062,12 @@ exit 0
 - [ ] **Step 4: テストが通ることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_all.py -v`
-Expected: 4 passed
+Expected: 8 passed
 
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 345 passed、25 skipped
+Expected: 349 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -1317,7 +1412,7 @@ Expected: 7 passed
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 352 passed、25 skipped
+Expected: 356 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -1804,7 +1899,7 @@ Expected: 4 passed
 - [ ] **Step 9: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 358 passed、25 skipped
+Expected: 362 passed、25 skipped
 
 - [ ] **Step 10: 実行権限を付けてコミット**
 
@@ -1998,7 +2093,7 @@ Expected: 該当なし。`DEPLOY.md` にあるパスは、他人が自分の環�
 - [ ] **Step 4: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 358 passed、25 skipped
+Expected: 362 passed、25 skipped
 
 - [ ] **Step 5: コミット**
 

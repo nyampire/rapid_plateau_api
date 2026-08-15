@@ -45,6 +45,12 @@ need_int() {
   esac
 }
 
+# ログはプロセス置換で複製する。`{ ... } | tee` にすると本体がサブシェルで
+# 走り、そこでの IMPORT_PID=$! が親に伝わらない。watchdog が SIGTERM を
+# 送るのは親なので、親の cleanup は常に空の IMPORT_PID を見て空振りする。
+# 落とすべき取り込みが生き残り、この機構を置いた意味が消える。
+exec > >(tee -a "$LOG") 2>&1
+
 # 取り込み器を子として起動し、自分が終わるときに確実に落とす。
 # watchdog の kill は wrapper の PID にしか届かないので、これが無いと
 # 打ち切られたあとも取り込みが走り続け、次の都市と採番が重なる。
@@ -127,4 +133,4 @@ trap cleanup EXIT
   rm -rf "$SRC"
   echo "[$(ts)] [$CITY] 空き $(disk_kb "$PLATEAU_APP_DIR") KB"
   echo "[$(ts)] [$CITY] === DONE ==="
-} 2>&1 | tee -a "$LOG"
+}

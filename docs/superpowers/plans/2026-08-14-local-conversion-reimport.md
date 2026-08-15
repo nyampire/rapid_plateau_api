@@ -19,6 +19,13 @@
 - **公開リポジトリに実サーバの識別子を書かない。**ホスト名、SSH の別名、`/opt` や `/home` で始まる実在のパスをスクリプトにも `deploy/README.md` にも書かない。すべて `ship.env` と環境変数から読む。`ship.env` 自体は `.gitignore` に入れる
 - シェルは `#!/usr/bin/env bash` と `set -uo pipefail` で始める。`set -e` は使わない (既存の 3 本に合わせる。各段の終了コードを明示的に見る)
 - `df` は GNU 拡張の `--output=avail` を使わない。`df -k <path> | awk 'NR==2 {print $4}'` を使う。macOS と Linux の両方で 4 列目が 1K ブロックの空きになる
+- **コマンドの出力やファイルの中身を数値として比較する前に、必ず `need_int` を通す。**
+  空文字のまま `[ "$x" -ne "$y" ]` を評価すると `integer expression expected` でエラー終了し、
+  `if` はそれを偽として扱う。分岐が黙って消えるので、門は「入力が壊れているときに限って」効かなくなる。
+  この計画で 3 回踏んだ (`MESHES`、`REMOTE_N`、`WANT`)。
+  `find | wc -l` や `grep -c` のように必ず数値を返すものは対象外でよい。
+  コマンドの終了コードも `$?` に取って別に確かめる。`need_int` だけでは、
+  失敗したコマンドがたまたま数値を吐いた場合を捕まえられない
 - 終了コードの割り当て。`2` はディスク不足でバッチ全体を止める合図なので、他の用途に使わない
 
 | コード | 意味 |
@@ -333,10 +340,25 @@ bail() {
 
 disk_kb() { df -k "$1" | awk 'NR==2 {print $4}'; }
 
+# コマンドの出力を数値として比べる前に、必ずこれを通す。
+# 空文字のまま [ "$x" -ne "$y" ] を評価すると
+# integer expression expected でエラー終了し、if がそれを偽として扱う。
+# 分岐が黙って消えるので、門は「壊れているときに限って」効かなくなる。
+need_int() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 say "=== START ==="
 
 mkdir -p "$WORK_ROOT"
 AVAIL=$(disk_kb "$WORK_ROOT")
+if ! need_int "$AVAIL"; then
+  say "ABORT: 空き容量を読めない (df の出力: $AVAIL)"
+  exit 2
+fi
 say "空き $AVAIL KB (下限 $DISK_MIN_KB)"
 if [ "$AVAIL" -lt "$DISK_MIN_KB" ]; then
   say "ABORT: ディスクが足りない"
@@ -359,10 +381,7 @@ echo "$EXTRACT_JSON"
 
 MESHES=$(echo "$EXTRACT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["meshes"])')
 MESHES_EXIT=$?
-# 報告が読めなかったときに門をすり抜けさせない。
-# MESHES が空のまま [ "$GML_N" -ne "$MESHES" ] を評価すると
-# integer expression expected でエラー終了し、if はそれを偽として扱う。
-if [ "$MESHES_EXIT" -ne 0 ] || ! [[ "$MESHES" =~ ^[0-9]+$ ]]; then
+if [ "$MESHES_EXIT" -ne 0 ] || ! need_int "$MESHES"; then
   bail "$EXIT_EXTRACT" "meshes を読めない (出力: $EXTRACT_JSON)"
 fi
 GML_N=$(find "$WORK" -maxdepth 1 -name '*.gml' | wc -l | tr -d ' ')
@@ -416,7 +435,7 @@ MSG
 - Produces: `SHIPPED_TXT` へ `<citycode> <osm数>` を追記する
 - Produces: 終了コード 11 (変換の門)、12 (転送の門)
 
-- [ ] **Step 1: 失敗するテストを 4 件書く**
+- [ ] **Step 1: 失敗するテストを 6 件書く**
 
 `tests/test_ship_city.py` の末尾に追加する。
 
@@ -496,12 +515,47 @@ def test_records_city_and_count_when_everything_passes(env):
     assert r.returncode == 0, r.stdout + r.stderr
     assert env.shipped.read_text().strip() == '30406 2'
     assert not (env.work_root / '30406').exists()
+
+
+def test_transfer_gate_fails_when_the_remote_count_is_unreadable(env):
+    """転送先の枚数を数えられなければ落ちる。
+
+    ssh が失敗すると REMOTE_N が空になる。そのまま比較すると
+    integer expression expected でエラー終了し、if がそれを偽として扱う。
+    門が消え、転送を確かめないまま shipped.txt に記録して作業を消す。
+    記録された都市は ship_all.sh が永久に飛ばす。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    _stub(env.bin, 'rsync', 'exit 0')
+    _stub(env.bin, 'ssh', 'echo "ssh: connect failed" >&2\nexit 255')
+
+    r = _run(env)
+
+    assert r.returncode == 12, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
+def test_gates_use_computed_counts_not_constants(env):
+    """門が数える値を使っている。定数と比べていない。
+
+    他のテストがどれも 2 メッシュなので、.osm 数も転送先の枚数も 2 に
+    固定した実装で通ってしまう。3 メッシュで一通り流して区別する。
+    """
+    _good_extract(env, n=3)
+    _good_java(env)
+    _good_transfer(env, remote_count=3)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.shipped.read_text().strip() == '30406 3'
 ```
 
-- [ ] **Step 2: 4 件が落ちることを確かめる**
+- [ ] **Step 2: 6 件が落ちることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: 4 failed, 4 passed。落ちるのは、取り出しまでで終わっているスクリプトが returncode 0 を返すため。
+Expected: 6 failed, 4 passed。落ちるのは、取り出しまでで終わっているスクリプトが returncode 0 を返すため。
 
 - [ ] **Step 3: 変換と転送を実装する**
 
@@ -535,6 +589,9 @@ fi
 
 # 数の一致では切り詰めを検出できない。JVM が途中で落ちると、
 # 書きかけの .osm も 1 個として数えられる。
+# .osm が 1 つも無いとグロブが展開されず、文字列 <WORK>/*.osm が f に入る。
+# 存在しないパスに対して [ ! -s ] が真になり、実態と食い違うメッセージで落ちる。
+shopt -s nullglob
 for f in "$WORK"/*.osm; do
   if [ ! -s "$f" ]; then
     bail "$EXIT_CONVERT" "空のファイル: $(basename "$f")"
@@ -543,6 +600,7 @@ for f in "$WORK"/*.osm; do
     bail "$EXIT_CONVERT" "閉じタグが無い: $(basename "$f")"
   fi
 done
+shopt -u nullglob
 
 say "3/5 manifest"
 echo "$OSM_N" > "$WORK/manifest.txt"
@@ -557,6 +615,13 @@ if [ "$RSYNC_EXIT" -ne 0 ]; then
 fi
 
 REMOTE_N=$(ssh "$SHIP_HOST" "find '$SHIP_PATH/$CITY' -maxdepth 1 -name '*.osm' | wc -l" | tr -d ' ')
+SSH_EXIT=$?
+# ssh が失敗すると REMOTE_N が空になる。そのまま比較すると門が消え、
+# 転送を確かめないまま shipped.txt に記録して作業ディレクトリを消す。
+# 記録された都市は ship_all.sh が永久に飛ばす。
+if [ "$SSH_EXIT" -ne 0 ] || ! need_int "$REMOTE_N"; then
+  bail "$EXIT_TRANSFER" "転送先の枚数を数えられない (ssh exit $SSH_EXIT、出力: $REMOTE_N)"
+fi
 say "転送先 $REMOTE_N 個"
 if [ "$REMOTE_N" -ne "$OSM_N" ]; then
   bail "$EXIT_TRANSFER" "転送先の枚数が違う ($REMOTE_N != $OSM_N)"
@@ -571,12 +636,12 @@ say "=== DONE ($OSM_N メッシュ) ==="
 - [ ] **Step 4: テストが通ることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: 8 passed
+Expected: 10 passed
 
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 337 passed、25 skipped
+Expected: 339 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -784,6 +849,16 @@ say() { echo "[$(ts)] $*"; }
 
 disk_kb() { df -k "$1" | awk 'NR==2 {print $4}'; }
 
+# コマンドの出力を数値として比べる前に、必ずこれを通す。
+# 空文字のまま [ "$x" -lt "$y" ] を評価すると
+# integer expression expected でエラー終了し、if がそれを偽として扱う。
+need_int() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 touch "$SHIPPED_TXT"
 
 CODES=$(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | grep -c .)
@@ -806,6 +881,10 @@ for CITY in $(tail -n +2 "$PLAN_CSV" | cut -d, -f1); do
   fi
 
   AVAIL=$(disk_kb "$WORK_ROOT")
+  if ! need_int "$AVAIL"; then
+    say "ABORT: 空き容量を読めない (df の出力: $AVAIL)"
+    exit 2
+  fi
   if [ "$AVAIL" -lt "$DISK_MIN_KB" ]; then
     say "ABORT: 空きが $AVAIL KB で下限 $DISK_MIN_KB を割った"
     exit 2
@@ -851,7 +930,7 @@ Expected: 4 passed
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 341 passed、25 skipped
+Expected: 343 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -885,7 +964,7 @@ MSG
 - Produces: 環境変数 `PLATEAU_APP_DIR` / `PLATEAU_VENV` / `PLATEAU_ENV_FILE` / `PLATEAU_IMPORT_DIR` / `PLATEAU_LOG_DIR` / `THRESHOLD_KB` / `PYTHON_BIN`
 - Produces: 終了コード 2 (ディスク不足)、13 (入力が無い、または枚数が合わない)
 
-- [ ] **Step 1: 失敗するテストを 4 件書く**
+- [ ] **Step 1: 失敗するテストを 7 件書く**
 
 `tests/test_reimport_one.py` を新規に作る。
 
@@ -984,6 +1063,20 @@ def test_count_mismatch_exits_with_dedicated_code(env):
     assert r.returncode == 13, r.stdout + r.stderr
 
 
+def test_unreadable_manifest_exits_with_dedicated_code(env):
+    """manifest.txt が数字でなければ落ちる。
+
+    空や壊れた manifest をそのまま比較すると integer expression expected で
+    エラー終了し、if がそれを偽として扱う。壊れた manifest を弾くのが
+    この門の目的なので、素通りさせると門を置いた意味が無くなる。
+    """
+    _city(env, osm=2, manifest='')
+
+    r = _run(env)
+
+    assert r.returncode == 13, r.stdout + r.stderr
+
+
 def test_passes_citycode_and_no_zip_explicitly(env):
     """--citycode と --no-zip を明示して渡す。推定に頼らない。"""
     _city(env, osm=2)
@@ -1035,7 +1128,7 @@ def test_low_disk_exits_2(env):
 - [ ] **Step 2: テストが落ちることを確かめる**
 
 Run: `python3 -m pytest tests/test_reimport_one.py -v`
-Expected: 6 failed。`deploy/reimport_one.sh` がまだ無いので returncode 127。
+Expected: 7 failed。`deploy/reimport_one.sh` がまだ無いので returncode 127。
 
 - [ ] **Step 3: `deploy/reimport_one.sh` を書く**
 
@@ -1078,6 +1171,17 @@ SRC="$PLATEAU_IMPORT_DIR/$CITY"
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 disk_kb() { df -k "$1" | awk 'NR==2 {print $4}'; }
 
+# コマンドやファイルから読んだ値を数値として比べる前に、必ずこれを通す。
+# 空文字のまま [ "$x" -ne "$y" ] を評価すると
+# integer expression expected でエラー終了し、if がそれを偽として扱う。
+# 分岐が黙って消えるので、門は「入力が壊れているときに限って」効かなくなる。
+need_int() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 # 取り込み器を子として起動し、自分が終わるときに確実に落とす。
 # watchdog の kill は wrapper の PID にしか届かないので、これが無いと
 # 打ち切られたあとも取り込みが走り続け、次の都市と採番が重なる。
@@ -1096,6 +1200,10 @@ trap cleanup EXIT
   echo "[$(ts)] [$CITY] === START ==="
 
   AVAIL=$(disk_kb "$PLATEAU_APP_DIR")
+  if ! need_int "$AVAIL"; then
+    echo "[$(ts)] [$CITY] ABORT: 空き容量を読めない (df の出力: $AVAIL)"
+    exit $EXIT_DISK
+  fi
   echo "[$(ts)] [$CITY] 空き $AVAIL KB (下限 $THRESHOLD_KB)"
   if [ "$AVAIL" -lt "$THRESHOLD_KB" ]; then
     echo "[$(ts)] [$CITY] ABORT: ディスクが足りない"
@@ -1113,6 +1221,13 @@ trap cleanup EXIT
     exit $EXIT_INPUT
   fi
   WANT=$(tr -d '[:space:]' < "$SRC/manifest.txt")
+  # manifest.txt が空だったり数字以外だったりすると、そのまま比較した時点で
+  # 門が消える。壊れた manifest を弾くのがこの門の目的なので、
+  # ここを素通りさせると門を置いた意味が無くなる。
+  if ! need_int "$WANT"; then
+    echo "[$(ts)] [$CITY] ABORT: manifest.txt が数字でない (中身: $WANT)"
+    exit $EXIT_INPUT
+  fi
   echo "[$(ts)] [$CITY] .osm $OSM_N 個 (manifest $WANT)"
   if [ "$OSM_N" -ne "$WANT" ]; then
     echo "[$(ts)] [$CITY] ABORT: 枚数が manifest と違う"
@@ -1155,12 +1270,12 @@ trap cleanup EXIT
 - [ ] **Step 4: テストが通ることを確かめる**
 
 Run: `python3 -m pytest tests/test_reimport_one.py -v`
-Expected: 6 passed
+Expected: 7 passed
 
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 347 passed、25 skipped
+Expected: 350 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -1647,7 +1762,7 @@ Expected: 4 passed
 - [ ] **Step 9: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 353 passed、25 skipped
+Expected: 356 passed、25 skipped
 
 - [ ] **Step 10: 実行権限を付けてコミット**
 
@@ -1841,7 +1956,7 @@ Expected: 該当なし。`DEPLOY.md` にあるパスは、他人が自分の環�
 - [ ] **Step 4: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 353 passed、25 skipped
+Expected: 356 passed、25 skipped
 
 - [ ] **Step 5: コミット**
 

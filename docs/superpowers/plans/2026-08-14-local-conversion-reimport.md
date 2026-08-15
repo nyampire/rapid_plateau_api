@@ -45,6 +45,7 @@
 | 11 | 変換の門で不一致 |
 | 12 | 転送の門で不一致 |
 | 13 | 入力が無い、または `manifest.txt` と枚数が合わない |
+| 14 | 取り込み器が 2 を返した (引数の不整合の可能性)。2 の予約を守るための写し |
 
 - テストの実行は `python3 -m pytest`。シェルのテストは `subprocess` でスクリプトを実行し、外部コマンド (`java` / `rsync` / `ssh`) は `PATH` に置いた偽物に差し替える
 - コミットは既存の履歴に合わせ、`Co-Authored-By` の trailer を付けない
@@ -284,9 +285,12 @@ CONVERSION_JSON="/path/to/citygml-osm/conversion.json"
 # 都市ごとの作業ディレクトリを作る場所。1 都市ぶんで最大 4.4GB 使う
 WORK_ROOT="/path/to/scratch/plateau_ship"
 
-# 転送先。ssh の宛先と、その先のディレクトリ
+# 転送先。ssh の宛先と、その先のディレクトリ。
+# SHIP_PATH はサーバの PLATEAU_IMPORT_DIR と同じ絶対パスにする。
+# ship_all.sh は都市の一覧を SHIP_PATH の親へ置くので、
+# 親をサーバのホームにしておくと運用の手順が短くなる。
 SHIP_HOST="user@example"
-SHIP_PATH="/path/to/plateau_import"
+SHIP_PATH="$HOME/plateau_import"
 
 # 送り終えた都市の記録。<citycode> <osm数> を 1 行ずつ
 SHIPPED_TXT="$(dirname "${BASH_SOURCE[0]}")/shipped.txt"
@@ -1473,6 +1477,13 @@ trap cleanup EXIT
   IMPORT_PID=""
   if [ "$IMP_EXIT" -ne 0 ]; then
     echo "[$(ts)] [$CITY] 取り込みが exit ${IMP_EXIT}。入力は残す"
+    # 2 はディスク不足の予約番号で、バッチはこれを見て全体を止める。
+    # 取り込み器は argparse を使うので、引数の綴りが違うと 2 を返す。
+    # 素通しすると 1 都市目で全体が止まり、ログには「ディスク不足」と出る。
+    if [ "$IMP_EXIT" -eq 2 ]; then
+      echo "[$(ts)] [$CITY] 取り込み器の exit 2 を 14 に写す (引数の不整合の可能性)"
+      exit 14
+    fi
     exit $IMP_EXIT
   fi
 
@@ -1852,7 +1863,28 @@ MAX_CITY_MIN=${MAX_CITY_MIN:-90}
 : "${REIMPORT_LOG_DIR:=$HOME/reimport_logs}"
 # wrapper の判定に使うパス。置き場所を変えるとここが一致しなくなり、
 # 打ち切りも kill も黙って効かなくなる。ログだけは正常に出続ける。
-: "${WRAPPER_PATH:=$HOME/reimport_one.sh}"
+# 既定は REIMPORT_ONE に揃える。バッチが起動する文字列と一致しなければ
+# 判定は永久に false のままで、打ち切りも kill も届かない。
+: "${WRAPPER_PATH:=${REIMPORT_ONE:-$HOME/reimport_one.sh}}"
+
+need_int() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# 設定の書き損じで見張りそのものが効かなくなるのを防ぐ。
+# DISK_HALT_KB が数字でないと [ がエラー終了し、if がそれを偽と扱って
+# ディスクの門が黙って消える。MAX_CITY_MIN が空だと $(( * 60 )) が 0 になり、
+# 最初の都市が 0 秒で打ち切られて全体が pause する。
+for _v in INTERVAL DISK_WARN_KB DISK_HALT_KB MAX_CITY_MIN; do
+  eval "_val=\$$_v"
+  if ! need_int "$_val"; then
+    echo "[$(date '+%F %T')] ABORT: ${_v} が数字でない (値: ${_val})" >&2
+    exit 3
+  fi
+done
 
 WATCH_LOG="$REIMPORT_LOG_DIR/watchdog.log"
 PAUSE="$HOME/reimport_pause"
@@ -2045,11 +2077,25 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 | `PLATEAU_APP_DIR` | リポジトリの置き場所 |
 | `PLATEAU_VENV` | Python の仮想環境。省略すると `PYTHON_BIN` をそのまま使う |
 | `PLATEAU_ENV_FILE` | `DATABASE_URL` を含む設定 |
-| `PLATEAU_IMPORT_DIR` | 手元から送られた `.osm` の置き場所 |
+| `PLATEAU_IMPORT_DIR` | 手元から送られた `.osm` の置き場所。手元の `SHIP_PATH` と同じ絶対パスを指す |
 | `PLATEAU_LOG_DIR` | ログの置き場所。既定は `$HOME/reimport_logs` |
 | `THRESHOLD_KB` | 取り込み前に要求する空き。既定 5GB |
 | `WRAPPER_PATH` | watchdog が wrapper を見分けるために使う `reimport_one.sh` の絶対パス |
 | `REIMPORT_ONE` | バッチが呼ぶ `reimport_one.sh` の場所 |
+
+## 手元との対応
+
+2 つの機械で同じ場所を指す設定がある。ずれると転送先と読み先が食い違う。
+
+| 手元 (`ship.env`) | サーバ | 関係 |
+|---|---|---|
+| `SHIP_PATH` | `PLATEAU_IMPORT_DIR` | 同じ絶対パスを指す |
+| `SHIP_HOST` | — | ssh の宛先 |
+
+`ship_all.sh` は都市の一覧を `$SHIP_PATH` の親へ置く。
+そこを読むのは運用者なので、**`SHIP_PATH` の親をサーバのホームにしておく**と手順が短くなる。
+`ship.env.example` の `/path/to/plateau_import` をそのまま使うと親が `/path/to` になり、
+一覧を探す場所が変わる。
 
 **`WRAPPER_PATH` は必ず実際の置き場所に合わせる。**
 判定はコマンドラインの前方一致なので、ずれていると 90 分の打ち切りも `kill` も
@@ -2067,24 +2113,48 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 
 2 と 3 はどちらも、取り込み時にしか効かず後から掛け直せない。
 
-```sql
--- 1. 境界が全都市そろっているか (0 行なら合格)
-SELECT b.city_code
-FROM (SELECT DISTINCT city_code FROM plateau_buildings) b
-LEFT JOIN dash_city_master m ON m.city_code = b.city_code
-WHERE m.city_code IS NULL OR m.boundary_geom IS NULL;
+**確かめる相手はこれから流す都市であって、いま入っている都市ではない。**
+新規構築のサーバは `plateau_buildings` が空なので、そこを起点にした問い合わせは
+必ず 0 行を返し、何も確かめないまま合格に見える。
 
--- 2. ノードの外部キーが CASCADE か ('c' なら合格)
+一覧の都市コードを一時表に読ませて突き合わせる。
+
+```bash
+# 一覧を一時表へ流し込み、境界の無い都市を挙げる (0 行なら合格)
+psql "$DATABASE_URL" <<'SQL'
+CREATE TEMP TABLE targets (city_code TEXT);
+\copy targets FROM PROGRAM 'cat ~/reimport_targets_<日時>.txt'
+SELECT t.city_code
+FROM targets t
+LEFT JOIN dash_city_master m ON m.city_code = t.city_code
+WHERE m.city_code IS NULL OR m.boundary_geom IS NULL;
+SQL
+```
+
+```sql
+-- ノードの外部キーが CASCADE か ('c' なら合格)
 SELECT confdeltype FROM pg_constraint
 WHERE conname = 'plateau_building_nodes_building_id_fkey';
 ```
 
 流す。
 
+**順序を守る。バッチを先に起動する。**
+watchdog は `batch_status` があると 1 秒で終了する。
+前回が `PAUSED` や `DISK_ABORT` で終わっていると、そのファイルが残っている。
+watchdog を先に上げると即座に落ち、残りの十数時間が無監視になる。
+ログには 1 行出るだけで、`> /dev/null` に捨てられる。
+バッチは起動時に `batch_status` を消すので、先に上げれば問題は出ない。
+
 ```bash
+export REIMPORT_ONE=$HOME/reimport_one.sh
 nohup bash ~/reimport_batch.sh ~/reimport_targets_<日時>.txt > /dev/null 2>&1 &
-WRAPPER_PATH=$HOME/reimport_one.sh nohup bash ~/reimport_watchdog.sh > /dev/null 2>&1 &
+sleep 5   # バッチが batch_status を消すのを待つ
+nohup bash ~/reimport_watchdog.sh > /dev/null 2>&1 &
 ```
+
+`WRAPPER_PATH` は `REIMPORT_ONE` を既定にしてあるので、export しておけば片方で足りる。
+2 つがずれると watchdog は一致するプロセスを 1 つも見つけないまま完走する。
 
 ## 1 都市目で止めて確かめる
 
@@ -2102,9 +2172,10 @@ pause が立つと、watchdog 自身も終わる。
 
 ```bash
 rm ~/reimport_pause
+rm -f ~/reimport_logs/batch_status   # 消さないと watchdog が即座に終わる
 # 取り込みが残っていないことを確かめてから
 pgrep -f plateau_importer2postgis.py
-# 両方を起動し直す
+# バッチ、5 秒待って watchdog の順で起動し直す
 ```
 
 `failed.txt` に載った都市は `done.txt` に入らないので、再実行で必ずやり直される。

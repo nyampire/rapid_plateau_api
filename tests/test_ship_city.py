@@ -83,3 +83,37 @@ def test_extract_gate_fails_when_file_count_differs(env):
 
     assert r.returncode == 10, r.stderr
     assert not env.shipped.exists()
+
+
+def test_extract_gate_passes_when_file_count_matches(env):
+    """報告と実ファイル数が合えば、取り出しの門を通る。
+
+    これが無いと「常に exit 10 で落ちる」実装でも上のテストが通ってしまい、
+    門が比較していることを何も固定できない。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'printf "<x/>" > "$2/53394501_bldg_6697_op.gml"\n'
+          'echo \'{"city_code":"30406","meshes":2,"raw_bytes":10}\'')
+
+    r = _run(env)
+
+    assert r.returncode != 10, r.stdout + r.stderr
+    assert '報告 2 メッシュ、実ファイル 2' in r.stdout
+
+
+def test_extract_gate_fails_when_the_report_is_unreadable(env):
+    """meshes を読めなければ落ちる。
+
+    MESHES が空のまま比較すると [ は integer expression expected で
+    エラー終了し、if がそれを偽として扱うので門をすり抜ける。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'echo "これは JSON ではない"')
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr

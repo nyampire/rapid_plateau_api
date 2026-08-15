@@ -214,6 +214,24 @@ def test_extract_gate_fails_when_the_report_is_unreadable(env):
     assert r.returncode == 10, r.stdout + r.stderr
 
 
+def test_extract_gate_fails_when_meshes_is_not_a_number(env):
+    """meshes が数字でなければ落ちる。
+
+    上の 1 件は python3 が非 0 で終わる経路しか通らないので、
+    終了コードの判定だけの実装でも通ってしまう。
+    JSON として正しく python3 も成功するが値が数字でない場合は、
+    need_int でしか捕まらない。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'echo \'{"city_code":"30406","meshes":"たくさん","raw_bytes":5}\'')
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+
+
 def test_extract_gate_uses_the_number_from_the_report(env):
     """比較に使う数が、報告された meshes から来ている。
 
@@ -402,12 +420,12 @@ say "=== 取り出しまで完了 ==="
 - [ ] **Step 6: テストが通ることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: PASS (4 passed)
+Expected: PASS (5 passed)
 
 - [ ] **Step 7: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 既存の 329 passed に 4 件足されて 333 passed、25 skipped
+Expected: 既存の 329 passed に 5 件足されて 334 passed、25 skipped
 
 - [ ] **Step 8: コミット**
 
@@ -441,7 +459,7 @@ MSG
 - Produces: `SHIPPED_TXT` へ `<citycode> <osm数>` を追記する
 - Produces: 終了コード 11 (変換の門)、12 (転送の門)
 
-- [ ] **Step 1: 失敗するテストを 6 件書く**
+- [ ] **Step 1: 失敗するテストを 7 件書く**
 
 `tests/test_ship_city.py` の末尾に追加する。
 
@@ -542,6 +560,24 @@ def test_transfer_gate_fails_when_the_remote_count_is_unreadable(env):
     assert not env.shipped.exists()
 
 
+def test_transfer_gate_fails_when_ssh_succeeds_with_junk_output(env):
+    """ssh が成功しても、出力が数字でなければ落ちる。
+
+    上の 1 件は ssh が非 0 で終わる経路しか通らないので、
+    終了コードの判定だけの実装でも通ってしまう。
+    リモートの find がエラーを吐いて標準出力に紛れる形は need_int でしか捕まらない。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    _stub(env.bin, 'rsync', 'exit 0')
+    _stub(env.bin, 'ssh', 'echo "find: No such file or directory"\nexit 0')
+
+    r = _run(env)
+
+    assert r.returncode == 12, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
 def test_gates_use_computed_counts_not_constants(env):
     """門が数える値を使っている。定数と比べていない。
 
@@ -561,7 +597,7 @@ def test_gates_use_computed_counts_not_constants(env):
 - [ ] **Step 2: 6 件が落ちることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: 6 failed, 4 passed。落ちるのは、取り出しまでで終わっているスクリプトが returncode 0 を返すため。
+Expected: 7 failed, 5 passed。落ちるのは、取り出しまでで終わっているスクリプトが returncode 0 を返すため。
 
 - [ ] **Step 3: 変換と転送を実装する**
 
@@ -642,12 +678,12 @@ say "=== DONE ($OSM_N メッシュ) ==="
 - [ ] **Step 4: テストが通ることを確かめる**
 
 Run: `python3 -m pytest tests/test_ship_city.py -v`
-Expected: 10 passed
+Expected: 12 passed
 
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 339 passed、25 skipped
+Expected: 341 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -936,7 +972,7 @@ Expected: 4 passed
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 343 passed、25 skipped
+Expected: 345 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -1281,7 +1317,7 @@ Expected: 7 passed
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 350 passed、25 skipped
+Expected: 352 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -1768,7 +1804,7 @@ Expected: 4 passed
 - [ ] **Step 9: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 356 passed、25 skipped
+Expected: 358 passed、25 skipped
 
 - [ ] **Step 10: 実行権限を付けてコミット**
 
@@ -1962,7 +1998,7 @@ Expected: 該当なし。`DEPLOY.md` にあるパスは、他人が自分の環�
 - [ ] **Step 4: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 356 passed、25 skipped
+Expected: 358 passed、25 skipped
 
 - [ ] **Step 5: コミット**
 

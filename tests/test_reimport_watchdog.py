@@ -10,6 +10,7 @@ macOS に /proc は無いので、読み先のパスだけ差し替える。
 判定の case は実物のままなので、そこが変われば落ちる。
 """
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -20,11 +21,34 @@ REPO = Path(__file__).resolve().parent.parent
 WATCHDOG = REPO / 'deploy' / 'reimport_watchdog.sh'
 
 
+def _config_env(tmp_path, **overrides):
+    """検査だけを試す実行環境。ループへ入る手前で落ちる想定なので、
+    バッチのログ類は用意しない。
+    """
+    logs = tmp_path / 'logs'
+    logs.mkdir()
+    run_env = dict(os.environ)
+    run_env.update({
+        'HOME': str(tmp_path),
+        'REIMPORT_LOG_DIR': str(logs),
+    })
+    run_env.update(overrides)
+    return run_env
+
+
 def _is_real_wrapper_source():
     """実物から is_real_wrapper の定義をそのまま取り出す。"""
     body = WATCHDOG.read_text()
     m = re.search(r'^is_real_wrapper\(\) \{.*?^\}', body, re.S | re.M)
     assert m, 'is_real_wrapper の定義が見つからない'
+    return m.group(0)
+
+
+def _wrapper_path_default_source():
+    """実物から WRAPPER_PATH の既定値の定義をそのまま取り出す。"""
+    body = WATCHDOG.read_text()
+    m = re.search(r'^: "\$\{WRAPPER_PATH:=.*\}"$', body, re.M)
+    assert m, 'WRAPPER_PATH の既定値の定義が見つからない'
     return m.group(0)
 
 
@@ -76,3 +100,54 @@ def test_does_not_match_when_the_wrapper_moved(tmp_path):
     """WRAPPER_PATH がずれていれば一致しない。これが黙って起きる失敗の形。"""
     assert _ask('/elsewhere/reimport_one.sh',
                 'bash /somewhere/reimport_one.sh 30406 ', tmp_path) == 1
+
+
+def test_wrapper_path_defaults_to_reimport_one(tmp_path):
+    """WRAPPER_PATH を省略すると REIMPORT_ONE に揃う。
+
+    reimport_batch.sh は bash "$REIMPORT_ONE" "$CITY" で wrapper を起動する。
+    WRAPPER_PATH の既定がそこからずれていると、判定は永久に false のままで、
+    90 分の打ち切りも kill も一致するプロセスを見つけられない。
+    """
+    line = _wrapper_path_default_source()
+    script = (
+        'set -uo pipefail\n'
+        'unset WRAPPER_PATH\n'
+        'REIMPORT_ONE=/srv/plateau/reimport_one.sh\n'
+        '%s\n'
+        'echo "$WRAPPER_PATH"\n'
+    ) % line
+
+    r = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+
+    assert r.stdout.strip() == '/srv/plateau/reimport_one.sh', r.stdout + r.stderr
+
+
+def test_non_numeric_disk_halt_kb_aborts_before_the_loop(tmp_path):
+    """DISK_HALT_KB が数字でなければ、ループへ入る前に exit 3 で落ちる。
+
+    [ "$AVAIL_KB" -lt "$DISK_HALT_KB" ] は DISK_HALT_KB が数字でないと
+    エラー終了し、if がそれを偽として扱う。ディスクの門が黙って消えるので、
+    起動時に検査して落とす。ループを回さないよう timeout を付ける。
+    """
+    run_env = _config_env(tmp_path, DISK_HALT_KB='not-a-number')
+
+    r = subprocess.run(['bash', str(WATCHDOG)], env=run_env,
+                       capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 3, r.stdout + r.stderr
+
+
+def test_empty_max_city_min_aborts_before_the_loop(tmp_path):
+    """MAX_CITY_MIN が空だと、ループへ入る前に exit 3 で落ちる。
+
+    空のまま $(( MAX_CITY_MIN * 60 )) を評価すると 0 になり、最初の都市が
+    0 秒で打ち切られて全体が pause する。起動時に検査して落とす。
+    ループを回さないよう timeout を付ける。
+    """
+    run_env = _config_env(tmp_path, MAX_CITY_MIN='')
+
+    r = subprocess.run(['bash', str(WATCHDOG)], env=run_env,
+                       capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 3, r.stdout + r.stderr

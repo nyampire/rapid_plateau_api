@@ -119,6 +119,24 @@ def test_extract_gate_fails_when_the_report_is_unreadable(env):
     assert r.returncode == 10, r.stdout + r.stderr
 
 
+def test_extract_gate_fails_when_meshes_is_not_a_number(env):
+    """meshes が数字でなければ落ちる。
+
+    上の 1 件は python3 が非 0 で終わる経路しか通らないので、
+    終了コードの判定だけの実装でも通ってしまう。
+    JSON として正しく python3 も成功するが値が数字でない場合は、
+    need_int でしか捕まらない。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'echo \'{"city_code":"30406","meshes":"たくさん","raw_bytes":5}\'')
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+
+
 def test_extract_gate_uses_the_number_from_the_report(env):
     """比較に使う数が、報告された meshes から来ている。
 
@@ -228,6 +246,24 @@ def test_transfer_gate_fails_when_the_remote_count_is_unreadable(env):
     _good_java(env)
     _stub(env.bin, 'rsync', 'exit 0')
     _stub(env.bin, 'ssh', 'echo "ssh: connect failed" >&2\nexit 255')
+
+    r = _run(env)
+
+    assert r.returncode == 12, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
+def test_transfer_gate_fails_when_ssh_succeeds_with_junk_output(env):
+    """ssh が成功しても、出力が数字でなければ落ちる。
+
+    上の 1 件は ssh が非 0 で終わる経路しか通らないので、
+    終了コードの判定だけの実装でも通ってしまう。
+    リモートの find がエラーを吐いて標準出力に紛れる形は need_int でしか捕まらない。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    _stub(env.bin, 'rsync', 'exit 0')
+    _stub(env.bin, 'ssh', 'echo "find: No such file or directory"\nexit 0')
 
     r = _run(env)
 

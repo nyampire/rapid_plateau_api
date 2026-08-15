@@ -894,7 +894,7 @@ def test_target_list_holds_only_city_codes(env):
     空白を全部除くので、2 列のまま渡すと 43213 103 が 43213103 になり、
     その都市は永久に取り込まれない。
     """
-    _write_plan(env, ['13402', '30406'])
+    _write_plan(env, ['13402', '30406', '43213'])
 
     r = _run(env)
 
@@ -902,7 +902,7 @@ def test_target_list_holds_only_city_codes(env):
     written = sorted(env.tmp.glob('reimport_targets_*.txt'))
     assert written, '一覧が作られていない'
     lines = [ln for ln in written[-1].read_text().splitlines() if ln]
-    assert lines == ['13402', '30406'], lines
+    assert lines == ['13402', '30406', '43213'], lines
 
 
 def test_resume_does_not_skip_on_a_prefix_match(env):
@@ -910,13 +910,13 @@ def test_resume_does_not_skip_on_a_prefix_match(env):
 
     照合が行頭と末尾の空白で挟まれていないと、1340 が 13402 に一致する。
     """
-    _write_plan(env, ['13402', '30406'])
+    _write_plan(env, ['13402', '30406', '43213'])
     env.shipped.write_text('1340 8\n')
 
     r = _run(env)
 
     assert r.returncode == 0, r.stdout + r.stderr
-    assert env.called.read_text().split() == ['13402', '30406']
+    assert env.called.read_text().split() == ['13402', '30406', '43213']
 ```
 
 - [ ] **Step 2: 8 件が落ちることを確かめる**

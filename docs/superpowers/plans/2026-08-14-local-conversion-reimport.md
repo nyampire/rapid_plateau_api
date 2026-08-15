@@ -1101,7 +1101,7 @@ MSG
 - Produces: 環境変数 `PLATEAU_APP_DIR` / `PLATEAU_VENV` / `PLATEAU_ENV_FILE` / `PLATEAU_IMPORT_DIR` / `PLATEAU_LOG_DIR` / `THRESHOLD_KB` / `PYTHON_BIN`
 - Produces: 終了コード 2 (ディスク不足)、13 (入力が無い、または枚数が合わない)
 
-- [ ] **Step 1: 失敗するテストを 7 件書く**
+- [ ] **Step 1: 失敗するテストを 9 件書く**
 
 `tests/test_reimport_one.py` を新規に作る。
 
@@ -1260,12 +1260,73 @@ def test_low_disk_exits_2(env):
     r = _run(env)
 
     assert r.returncode == 2, r.stdout + r.stderr
+
+
+def test_counts_the_osm_files_instead_of_assuming_two(env):
+    """.osm の枚数を実際に数えている。定数と比べていない。
+
+    他のテストがどれも 2 枚なので、OSM_N=2 と決め打ちした実装でも通る。
+    3 枚で manifest を 2 にすると、数えている実装だけが落ちる。
+    """
+    _city(env, osm=3, manifest=2)
+
+    r = _run(env)
+
+    assert r.returncode == 13, r.stdout + r.stderr
+
+
+def test_kills_the_importer_when_the_wrapper_is_terminated(env):
+    """wrapper が SIGTERM を受けたら、取り込みの子も落とす。
+
+    watchdog の kill は wrapper にしか届かない。子が生き残ると、
+    次の都市の取り込みと id の採番が重なってノードが別都市の建物に
+    ぶら下がる。例外も出ず行数も 0 にならないので他では検出できない。
+
+    本体を `{ ... } | tee` にすると、IMPORT_PID=$! がサブシェルの中で
+    起きて親に伝わらず、親の cleanup は空の IMPORT_PID を見て空振りする。
+    """
+    import signal
+    import time
+
+    _city(env, osm=2)
+    # 取り込み器を、すぐには終わらない偽物に差し替える
+    env.stub.write_text('import time\ntime.sleep(60)\n')
+
+    proc = subprocess.Popen(['bash', str(ONE), '30406'], env=env.run_env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # 子が起動するまで待つ
+    deadline = time.time() + 20
+    child = None
+    while time.time() < deadline:
+        out = subprocess.run(['pgrep', '-f', 'plateau_importer2postgis.py'],
+                             capture_output=True, text=True)
+        if out.stdout.strip():
+            child = out.stdout.split()[0]
+            break
+        time.sleep(0.2)
+    assert child, '取り込みの子が起動しなかった'
+
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=30)
+
+    # 子が落ちるまで少し待つ
+    deadline = time.time() + 15
+    alive = True
+    while time.time() < deadline:
+        if subprocess.run(['kill', '-0', child],
+                          capture_output=True).returncode != 0:
+            alive = False
+            break
+        time.sleep(0.2)
+    if alive:
+        subprocess.run(['kill', '-9', child], capture_output=True)
+    assert not alive, '取り込みの子が生き残った (IMPORT_PID が親に伝わっていない)'
 ```
 
 - [ ] **Step 2: テストが落ちることを確かめる**
 
 Run: `python3 -m pytest tests/test_reimport_one.py -v`
-Expected: 7 failed。`deploy/reimport_one.sh` がまだ無いので returncode 127。
+Expected: 9 failed。`deploy/reimport_one.sh` がまだ無いので returncode 127。
 
 - [ ] **Step 3: `deploy/reimport_one.sh` を書く**
 
@@ -1318,6 +1379,12 @@ need_int() {
     *) return 0 ;;
   esac
 }
+
+# ログはプロセス置換で複製する。`{ ... } | tee` にすると本体がサブシェルで
+# 走り、そこでの IMPORT_PID=$! が親に伝わらない。watchdog が SIGTERM を
+# 送るのは親なので、親の cleanup は常に空の IMPORT_PID を見て空振りする。
+# 落とすべき取り込みが生き残り、この機構を置いた意味が消える。
+exec > >(tee -a "$LOG") 2>&1
 
 # 取り込み器を子として起動し、自分が終わるときに確実に落とす。
 # watchdog の kill は wrapper の PID にしか届かないので、これが無いと
@@ -1401,18 +1468,21 @@ trap cleanup EXIT
   rm -rf "$SRC"
   echo "[$(ts)] [$CITY] 空き $(disk_kb "$PLATEAU_APP_DIR") KB"
   echo "[$(ts)] [$CITY] === DONE ==="
-} 2>&1 | tee -a "$LOG"
+}
 ```
+
+`{ ... }` はまとまりを示すだけで、パイプに繋がないのでサブシェルにならない。
+`exit` はトップレベルのシェルを終わらせ、その終了コードがそのまま呼び出し元へ返る。
 
 - [ ] **Step 4: テストが通ることを確かめる**
 
 Run: `python3 -m pytest tests/test_reimport_one.py -v`
-Expected: 7 passed
+Expected: 9 passed
 
 - [ ] **Step 5: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 356 passed、25 skipped
+Expected: 358 passed、25 skipped
 
 - [ ] **Step 6: コミット**
 
@@ -1899,7 +1969,7 @@ Expected: 4 passed
 - [ ] **Step 9: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 362 passed、25 skipped
+Expected: 364 passed、25 skipped
 
 - [ ] **Step 10: 実行権限を付けてコミット**
 
@@ -2093,7 +2163,7 @@ Expected: 該当なし。`DEPLOY.md` にあるパスは、他人が自分の環�
 - [ ] **Step 4: 全体のテストを流す**
 
 Run: `python3 -m pytest -q`
-Expected: 362 passed、25 skipped
+Expected: 364 passed、25 skipped
 
 - [ ] **Step 5: コミット**
 

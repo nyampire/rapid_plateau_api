@@ -1751,10 +1751,14 @@ Expected: 2 passed
 置き場所を変えると判定が常に false に倒れ、90 分の打ち切りも kill も
 黙って効かなくなる。ログだけは正常に出続けるので気づけない。
 
-ループ本体は回さない。関数だけを source して呼ぶ。
+ループ本体は回さない。実物から is_real_wrapper の定義を取り出して呼ぶ。
+テストの中に書き写すと、写しのほうを試すことになって実物の変更を捕まえられない。
+
+macOS に /proc は無いので、読み先のパスだけ差し替える。
+判定の case は実物のままなので、そこが変われば落ちる。
 """
 
-import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -1764,38 +1768,29 @@ REPO = Path(__file__).resolve().parent.parent
 WATCHDOG = REPO / 'deploy' / 'reimport_watchdog.sh'
 
 
+def _is_real_wrapper_source():
+    """実物から is_real_wrapper の定義をそのまま取り出す。"""
+    body = WATCHDOG.read_text()
+    m = re.search(r'^is_real_wrapper\(\) \{.*?^\}', body, re.S | re.M)
+    assert m, 'is_real_wrapper の定義が見つからない'
+    return m.group(0)
+
+
 def _ask(wrapper_path, cmdline, tmp_path):
-    """is_real_wrapper に cmdline を判定させ、終了コードを返す。
+    """実物の is_real_wrapper に cmdline を判定させ、終了コードを返す。"""
+    cmdline_file = tmp_path / 'cmdline'
+    cmdline_file.write_text(cmdline)
 
-    /proc を読む実装なので、cmdline を返す偽の tr を PATH に置く。
-    """
-    bin_dir = tmp_path / 'bin'
-    bin_dir.mkdir(exist_ok=True)
-    tr_stub = bin_dir / 'tr'
-    tr_stub.write_text(
-        '#!/usr/bin/env bash\n'
-        'if [ "$1" = "\\\\0" ]; then printf "%s" %s; else exec /usr/bin/tr "$@"; fi\n'
-        % ('%s', repr(cmdline).replace("'", '"'))
-    )
-    tr_stub.chmod(0o755)
-
+    fn = _is_real_wrapper_source().replace('/proc/$pid/cmdline', '"$CMDLINE_FILE"')
     script = (
         'set -uo pipefail\n'
         'WRAPPER_PATH=%s\n'
-        'is_real_wrapper() {\n'
-        '  local cmdline\n'
-        '  cmdline=$(tr "\\\\0" " " < /dev/null) || return 1\n'
-        '  case "$cmdline" in\n'
-        '    "bash $WRAPPER_PATH "*) return 0 ;;\n'
-        '    *) return 1 ;;\n'
-        '  esac\n'
-        '}\n'
+        'CMDLINE_FILE=%s\n'
+        '%s\n'
         'is_real_wrapper 1\n'
-    ) % wrapper_path
+    ) % (wrapper_path, cmdline_file, fn)
 
-    env = dict(os.environ)
-    env['PATH'] = '%s:%s' % (bin_dir, env['PATH'])
-    return subprocess.run(['bash', '-c', script], env=env,
+    return subprocess.run(['bash', '-c', script],
                           capture_output=True, text=True).returncode
 
 

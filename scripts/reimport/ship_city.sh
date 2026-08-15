@@ -155,7 +155,7 @@ SSH_EXIT=$?
 # 転送を確かめないまま shipped.txt に記録して作業ディレクトリを消す。
 # 記録された都市は ship_all.sh が永久に飛ばす。
 if [ "$SSH_EXIT" -ne 0 ] || ! need_int "$REMOTE_N"; then
-  bail "$EXIT_TRANSFER" "転送先の枚数を数えられない (ssh exit $SSH_EXIT 、出力: $REMOTE_N)"
+  bail "$EXIT_TRANSFER" "転送先の枚数を数えられない (ssh exit ${SSH_EXIT}、出力: ${REMOTE_N})"
 fi
 say "転送先 $REMOTE_N 個"
 if [ "$REMOTE_N" -ne "$OSM_N" ]; then

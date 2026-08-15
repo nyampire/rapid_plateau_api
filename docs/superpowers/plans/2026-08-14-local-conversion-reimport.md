@@ -1284,43 +1284,56 @@ def test_kills_the_importer_when_the_wrapper_is_terminated(env):
 
     本体を `{ ... } | tee` にすると、IMPORT_PID=$! がサブシェルの中で
     起きて親に伝わらず、親の cleanup は空の IMPORT_PID を見て空振りする。
+
+    pgrep は plateau_importer2postgis.py という一般的な名前ではなく、
+    このテスト専用の --data-dir (tmp_path 配下の一意なパス) で絞る。
+    無関係なプロセスを誤って拾わないようにするため。プロセスは
+    finally で必ず後始末する。assert 失敗時に生き残らせない。
     """
     import signal
     import time
 
-    _city(env, osm=2)
-    # 取り込み器を、すぐには終わらない偽物に差し替える
+    d = _city(env, osm=2)
+    marker = str(d)  # --data-dir に渡る一意なパス。pgrep の的をこれに絞る。
     env.stub.write_text('import time\ntime.sleep(60)\n')
 
     proc = subprocess.Popen(['bash', str(ONE), '30406'], env=env.run_env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    # 子が起動するまで待つ
-    deadline = time.time() + 20
     child = None
-    while time.time() < deadline:
-        out = subprocess.run(['pgrep', '-f', 'plateau_importer2postgis.py'],
-                             capture_output=True, text=True)
-        if out.stdout.strip():
-            child = out.stdout.split()[0]
-            break
-        time.sleep(0.2)
-    assert child, '取り込みの子が起動しなかった'
+    try:
+        # 子が起動するまで待つ
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            out = subprocess.run(['pgrep', '-f', marker],
+                                 capture_output=True, text=True)
+            if out.stdout.strip():
+                child = out.stdout.split()[0]
+                break
+            time.sleep(0.2)
+        assert child, '取り込みの子が起動しなかった'
 
-    proc.send_signal(signal.SIGTERM)
-    proc.wait(timeout=30)
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=30)
 
-    # 子が落ちるまで少し待つ
-    deadline = time.time() + 15
-    alive = True
-    while time.time() < deadline:
-        if subprocess.run(['kill', '-0', child],
-                          capture_output=True).returncode != 0:
-            alive = False
-            break
-        time.sleep(0.2)
-    if alive:
-        subprocess.run(['kill', '-9', child], capture_output=True)
-    assert not alive, '取り込みの子が生き残った (IMPORT_PID が親に伝わっていない)'
+        # 子が落ちるまで少し待つ
+        deadline = time.time() + 15
+        alive = True
+        while time.time() < deadline:
+            if subprocess.run(['kill', '-0', child],
+                              capture_output=True).returncode != 0:
+                alive = False
+                break
+            time.sleep(0.2)
+        assert not alive, '取り込みの子が生き残った (IMPORT_PID が親に伝わっていない)'
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+        if child is not None:
+            subprocess.run(['kill', '-9', child], capture_output=True)
 ```
 
 - [ ] **Step 2: テストが落ちることを確かめる**

@@ -30,6 +30,11 @@ PostgreSQL + PostGIS
 
 ---
 
+# 第 1 部 新規構築
+
+サーバをまっさらな状態から立ち上げる手順。
+0 から 7 まで順番に進める。
+
 ## 0. SSH 接続設定
 
 ### 初回接続とユーザー作成
@@ -233,7 +238,9 @@ sudo chown $USER:$USER /opt/plateau-api
 
 # ファイルをコピー (ローカルから scp)
 scp osmfj_plateau_api.py plateau_downloader.py plateau_importer2postgis.py \
+    plateau_coverage.py plateau_purge.py \
     user@vps:/opt/plateau-api/
+scp -r deploy user@vps:/opt/plateau-api/
 
 # または git で取得
 cd /opt/plateau-api
@@ -259,24 +266,23 @@ EOF
 chmod 600 /opt/plateau-api/.env
 ```
 
-### データのダウンロードとインポート
+### データの取り込み
+
+`plateau_downloader.py` が読みに行っていた配信元は停止している。
+現在は手元 (Mac) で CityGML を変換し、サーバへ送って取り込む経路を使う。
+
+手順、必要な環境変数、開始前に確かめる項目は `deploy/README.md` にまとめてある。
+ここでは重複させないので、そちらを参照して全都市の取り込みを終わらせる。
+
+取り込みが終わったら、対応エリアのビューを作る。
 
 ```bash
-cd /opt/plateau-api
-source venv/bin/activate
-
-# 対象市区町村のデータをダウンロード (例: 米子市)
-python plateau_downloader.py --citycode 31202
-
-# PostGIS にインポート
-python plateau_importer2postgis.py \
-  --data-dir ./plateau_data/31202 \
-  --citycode 31202 \
-  --postgres-url "postgresql://osmfj_user:パスワード@localhost:5432/osmfj_plateau"
-
-# 全市区町村を一括で行う場合
-# python plateau_downloader.py --all --city-interval 30
+python3 plateau_coverage.py --init --postgres-url "$DATABASE_URL"
 ```
+
+`--init` はビューを作ったあとリフレッシュまで済ませる。
+このビューが無いと、RapiD エディタの対応エリア表示が出ない。
+以降に都市を足したときの再計算は第 2 部の 8-4 を参照する。
 
 ### systemd サービス登録
 
@@ -345,8 +351,13 @@ return `https://plateau.example.com/api/mapwithai/buildings?${params.toString()}
 ```bash
 cd /path/to/Rapid
 npm install
+npm run build
 npm run dist
 ```
+
+`dist` の前に `build` を通す。
+`dist/data/l10n/*.min.json` は `build` 側が作るので、`dist` だけ流すと
+JavaScript は新しいのに文言だけ古いままのビルドができる (2026-07-19 に実際に起きた)。
 
 `dist/` ディレクトリに以下が生成されます:
 - `index.html`
@@ -361,9 +372,18 @@ npm run dist
 # VPS 側のディレクトリ作成
 ssh user@vps "sudo mkdir -p /var/www/rapid && sudo chown www-data:www-data /var/www/rapid"
 
+# ドライランで削除対象を確認する (Deleting が 1 件も出ないことを確かめる)
+rsync -avzn --delete --exclude '/dashboard/' dist/ user@vps:/var/www/rapid/
+
 # dist の中身をアップロード
-rsync -avz --delete dist/ user@vps:/var/www/rapid/
+rsync -avz --delete --exclude '/dashboard/' dist/ user@vps:/var/www/rapid/
 ```
+
+`--exclude '/dashboard/'` を必ず付ける。
+ダッシュボードは web root の中に置かれるが `dist/` の生成物には含まれないため、
+このオプションが無いと更新のたびにダッシュボードごと削除される。
+新規構築の時点ではダッシュボードがまだ存在しないので実害は出ないが、
+次に Rapid を更新するときから効いてくる。
 
 ---
 
@@ -465,6 +485,11 @@ curl "https://plateau.example.com/api/mapwithai/buildings?bbox=133.33,35.42,133.
 
 ---
 
+# 第 2 部 更新
+
+構築済みのサーバに対して繰り返す作業をまとめる。
+API のコード更新、Rapid の更新、都市の追加や取り込み直し、対応エリアの再計算の 4 つがある。
+
 ## 8. 運用
 
 ### ログ確認
@@ -478,24 +503,75 @@ sudo tail -f /var/log/nginx/access.log
 sudo tail -f /var/log/nginx/error.log
 ```
 
-### データの追加
-
-新しい市区町村のデータを追加する場合:
+### 8-1. API のコード更新
 
 ```bash
 cd /opt/plateau-api
-source venv/bin/activate
+git pull
 
-# ダウンロード
-python plateau_downloader.py --citycode 13101
+# スキーマ変更を伴う更新のときだけ、対応するマイグレーションをこの時点で流す
+# 例: source venv/bin/activate && python plateau_migrate.py --postgres-url "$DATABASE_URL"
 
-# インポート
-python plateau_importer2postgis.py \
-  --data-dir ./plateau_data/13101 \
-  --citycode 13101
+sudo systemctl restart plateau-api
 ```
 
-API の再起動は不要です（DB を直接参照しているため）。
+`git pull` だけでは動いているプロセスには反映されない。
+uvicorn は起動時に読み込んだコードのまま動き続けるので、再起動するまで古いコードで応答する。
+順番が大事で、スキーマ移行が要る変更では、再起動より先にマイグレーションを終わらせる。
+先に再起動すると、新しいコードが移行前のスキーマにアクセスして落ちる。
+
+### 8-2. Rapid の更新
+
+```bash
+cd /path/to/Rapid
+npm run build
+npm run dist
+```
+
+`dist` の前に `build` を通す。
+`dist/data/l10n/*.min.json` は `build` 側が作るので、`dist` だけ流すと
+JavaScript は新しいのに文言だけ古いままのビルドになる。
+
+送る前にドライランで削除対象を確かめる。
+
+```bash
+rsync -avzn --delete --exclude '/dashboard/' dist/ user@vps:/var/www/rapid/
+```
+
+`Deleting` として出てくるものが無いことを確認してから、`-n` を外して送る。
+
+```bash
+rsync -avz --delete --exclude '/dashboard/' dist/ user@vps:/var/www/rapid/
+```
+
+`--exclude '/dashboard/'` を落とすと、ダッシュボードごと削除される。
+ダッシュボードは web root の中に置かれるが `dist/` の生成物には含まれない。
+
+### 8-3. 都市を足す、取り込み直す
+
+新しい都市の追加も、既存都市の取り込み直しも同じ手順を使う。
+
+1. 手元 (Mac) で `scripts/reimport/ship_city.sh <citycode>` を実行する。抽出、変換、転送までを 1 本で行う
+2. サーバで `~/reimport_one.sh <citycode>` を実行する。取り込みがその都市の既存データを消してから入れ直すので、別途 purge を呼ぶ必要は無い
+
+複数都市をまとめて流す場合や、環境変数、開始前の確認事項は `deploy/README.md` を参照する。
+
+API の再起動は不要。DB を直接参照しているため。
+
+### 8-4. 対応エリアの再計算
+
+都市を足したあと、対応エリアのビュー (coverage) を作り直す。
+都市ごとには行わず、一連の追加が終わったところで 1 回にまとめる。
+
+```bash
+python3 plateau_coverage.py --refresh --no-concurrent --postgres-url "$DATABASE_URL"
+```
+
+`--no-concurrent` を必ず付ける。
+省略すると CONCURRENTLY を選び、メモリの小さいサーバでは postgres が OOM で落ちる。
+
+メモリが足りない場合は、実行のあいだだけ一時的に swap を足す。
+swap の増設には管理者権限が要る。
 
 ### サービス管理
 

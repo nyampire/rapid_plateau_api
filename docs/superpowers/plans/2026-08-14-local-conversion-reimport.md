@@ -1856,10 +1856,13 @@ Expected: 4 failed。`deploy/reimport_watchdog.sh` がまだ無いので `read_t
 # 打ち切りや連続失敗で pause を立て、自分も終わる。
 # 再開には reimport_pause を消して、バッチと watchdog の両方を起動し直す。
 set -uo pipefail
-INTERVAL=${INTERVAL:-60}
-DISK_WARN_KB=${DISK_WARN_KB:-5242880}
-DISK_HALT_KB=${DISK_HALT_KB:-3145728}
-MAX_CITY_MIN=${MAX_CITY_MIN:-90}
+# 未設定なら既定を使うが、空文字や数字以外を明示された場合はそのまま残し、
+# 下の need_int で弾く。:- だと空文字も未設定と同じ扱いになって既定に
+# すり替わり、壊れた設定が素通りしてしまう。
+[ -z "${INTERVAL+x}" ] && INTERVAL=60
+[ -z "${DISK_WARN_KB+x}" ] && DISK_WARN_KB=5242880
+[ -z "${DISK_HALT_KB+x}" ] && DISK_HALT_KB=3145728
+[ -z "${MAX_CITY_MIN+x}" ] && MAX_CITY_MIN=90
 : "${REIMPORT_LOG_DIR:=$HOME/reimport_logs}"
 # wrapper の判定に使うパス。置き場所を変えるとここが一致しなくなり、
 # 打ち切りも kill も黙って効かなくなる。ログだけは正常に出続ける。
@@ -1876,8 +1879,9 @@ need_int() {
 
 # 設定の書き損じで見張りそのものが効かなくなるのを防ぐ。
 # DISK_HALT_KB が数字でないと [ がエラー終了し、if がそれを偽と扱って
-# ディスクの門が黙って消える。MAX_CITY_MIN が空だと $(( * 60 )) が 0 になり、
-# 最初の都市が 0 秒で打ち切られて全体が pause する。
+# ディスクの門が黙って消える。これが実在する危険で、既定値の書き方に関わらず起きる。
+# 空文字は上の存在検査によってここへ届く。:- で既定にすり替えると
+# 書き損じが素通りするので、届かせて弾く。
 for _v in INTERVAL DISK_WARN_KB DISK_HALT_KB MAX_CITY_MIN; do
   eval "_val=\$$_v"
   if ! need_int "$_val"; then

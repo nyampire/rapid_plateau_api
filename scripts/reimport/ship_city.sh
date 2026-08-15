@@ -90,4 +90,53 @@ if [ "$GML_N" -ne "$MESHES" ]; then
   bail "$EXIT_EXTRACT" ".gml の数が報告と違う ($GML_N != $MESHES)"
 fi
 
-say "=== 取り出しまで完了 ==="
+say "2/5 変換"
+cp "$CONVERSION_JSON" "$WORK/conversion.json"
+(
+  cd "$WORK" || exit 1
+  "$JAVA_BIN" -Xmx4096m -Dfile.encoding=utf-8 -jar "$CITYGML_OSM_JAR" 1st
+)
+JAVA_EXIT=$?
+if [ "$JAVA_EXIT" -ne 0 ]; then
+  bail "$EXIT_CONVERT" "java が exit $JAVA_EXIT"
+fi
+
+OSM_N=$(find "$WORK" -maxdepth 1 -name '*.osm' | wc -l | tr -d ' ')
+say ".osm $OSM_N 個"
+if [ "$OSM_N" -ne "$GML_N" ]; then
+  bail "$EXIT_CONVERT" ".osm の数が .gml と違う ($OSM_N != $GML_N)"
+fi
+
+# 数の一致では切り詰めを検出できない。JVM が途中で落ちると、
+# 書きかけの .osm も 1 個として数えられる。
+for f in "$WORK"/*.osm; do
+  if [ ! -s "$f" ]; then
+    bail "$EXIT_CONVERT" "空のファイル: $(basename "$f")"
+  fi
+  if ! tail -c 200 "$f" | grep -q '</osm>'; then
+    bail "$EXIT_CONVERT" "閉じタグが無い: $(basename "$f")"
+  fi
+done
+
+say "3/5 manifest"
+echo "$OSM_N" > "$WORK/manifest.txt"
+
+say "4/5 転送"
+rsync -az --delete \
+  --include='*.osm' --include='manifest.txt' --exclude='*' \
+  "$WORK/" "$SHIP_HOST:$SHIP_PATH/$CITY/"
+RSYNC_EXIT=$?
+if [ "$RSYNC_EXIT" -ne 0 ]; then
+  bail "$EXIT_TRANSFER" "rsync が exit $RSYNC_EXIT"
+fi
+
+REMOTE_N=$(ssh "$SHIP_HOST" "find '$SHIP_PATH/$CITY' -maxdepth 1 -name '*.osm' | wc -l" | tr -d ' ')
+say "転送先 $REMOTE_N 個"
+if [ "$REMOTE_N" -ne "$OSM_N" ]; then
+  bail "$EXIT_TRANSFER" "転送先の枚数が違う ($REMOTE_N != $OSM_N)"
+fi
+
+say "5/5 記録して掃除"
+echo "$CITY $OSM_N" >> "$SHIPPED_TXT"
+rm -rf "$WORK"
+say "=== DONE ($OSM_N メッシュ) ==="

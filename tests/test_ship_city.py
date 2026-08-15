@@ -137,3 +137,80 @@ def test_extract_gate_uses_the_number_from_the_report(env):
 
     assert r.returncode != 10, r.stdout + r.stderr
     assert '報告 3 メッシュ、実ファイル 3' in r.stdout
+
+
+def _good_extract(e, n=2):
+    """n 個の .gml を書き出し、meshes=n を報告する偽 extract。"""
+    body = 'mkdir -p "$2"\n'
+    for i in range(n):
+        body += 'printf "<x/>" > "$2/5339450%d_bldg_6697_op.gml"\n' % i
+    body += 'echo \'{"city_code":"30406","meshes":%d,"raw_bytes":5}\'' % n
+    _stub(e.bin, 'extract_stub', body)
+
+
+def _good_java(e):
+    """cwd の .gml と同じ数だけ、閉じタグ付きの .osm を書く偽 java。"""
+    _stub(e.bin, 'java',
+          'for f in *.gml; do\n'
+          '  printf "<osm><node/></osm>" > "${f%.gml}.osm"\n'
+          'done\n'
+          'exit 0')
+
+
+def _good_transfer(e, remote_count=None):
+    """rsync と ssh の偽物。ssh は転送先の枚数を答える。"""
+    _stub(e.bin, 'rsync', 'exit 0')
+    n = 'echo "$REMOTE_N"' if remote_count is None else 'echo %d' % remote_count
+    _stub(e.bin, 'ssh', n)
+
+
+def test_convert_gate_fails_on_truncated_osm(env):
+    """閉じタグの無い .osm があれば、変換の門で落ちる。"""
+    _good_extract(env, n=2)
+    _stub(env.bin, 'java',
+          'printf "<osm><node/></osm>" > 53394500_bldg_6697_op.osm\n'
+          'printf "<osm><node" > 53394501_bldg_6697_op.osm\n'
+          'exit 0')
+    _good_transfer(env)
+
+    r = _run(env)
+
+    assert r.returncode == 11, r.stdout + r.stderr
+
+
+def test_convert_gate_fails_when_java_exits_nonzero(env):
+    """java が 0 以外で終われば、変換の門で落ちる。"""
+    _good_extract(env, n=2)
+    _stub(env.bin, 'java',
+          'printf "<osm><node/></osm>" > 53394500_bldg_6697_op.osm\n'
+          'printf "<osm><node/></osm>" > 53394501_bldg_6697_op.osm\n'
+          'exit 3')
+    _good_transfer(env)
+
+    r = _run(env)
+
+    assert r.returncode == 11, r.stdout + r.stderr
+
+
+def test_transfer_gate_fails_when_remote_count_differs(env):
+    """転送先の枚数が手元と違えば、転送の門で落ちる。"""
+    _good_extract(env, n=2)
+    _good_java(env)
+    _good_transfer(env, remote_count=1)
+
+    r = _run(env)
+
+    assert r.returncode == 12, r.stdout + r.stderr
+
+
+def test_records_city_and_count_when_everything_passes(env):
+    """全部通れば shipped.txt に <citycode> <osm数> が入り、作業を消す。"""
+    _good_extract(env, n=2)
+    _good_java(env)
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.shipped.read_text().strip() == '30406 2'
+    assert not (env.work_root / '30406').exists()

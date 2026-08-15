@@ -117,3 +117,23 @@ def test_extract_gate_fails_when_the_report_is_unreadable(env):
     r = _run(env)
 
     assert r.returncode == 10, r.stdout + r.stderr
+
+
+def test_extract_gate_uses_the_number_from_the_report(env):
+    """比較に使う数が、報告された meshes から来ている。
+
+    他の 3 件はどれも meshes が 2 なので、比較対象を 2 に固定して
+    $EXTRACT_JSON を読まない実装でも全部通ってしまう。
+    3 メッシュの報告に 3 ファイルを添えると、2 固定の実装はここで落ちる。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'printf "<x/>" > "$2/53394501_bldg_6697_op.gml"\n'
+          'printf "<x/>" > "$2/53394502_bldg_6697_op.gml"\n'
+          'echo \'{"city_code":"30406","meshes":3,"raw_bytes":15}\'')
+
+    r = _run(env)
+
+    assert r.returncode != 10, r.stdout + r.stderr
+    assert '報告 3 メッシュ、実ファイル 3' in r.stdout

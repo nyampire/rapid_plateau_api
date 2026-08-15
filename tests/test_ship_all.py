@@ -122,3 +122,75 @@ def test_one_failure_does_not_stop_the_rest(env):
     assert r.returncode == 1, r.stdout + r.stderr
     assert env.called.read_text().split() == ['13402', '30406', '43213']
     assert '30406' in r.stdout
+
+
+def test_disk_shortage_aborts_the_whole_run(env):
+    """空きが下限を割ったら、その場で全体を止める。
+
+    このテストが無いと、ディスクチェックを丸ごと消した実装でも通る。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    env.run_env['SHIP_ENV'] = str(env.tmp / 'ship_tight.env')
+    (env.tmp / 'ship_tight.env').write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'DISK_MIN_KB=0', 'DISK_MIN_KB=999999999999'))
+
+    r = _run(env)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert not env.called.exists()
+
+
+def test_ship_city_disk_exit_aborts_the_whole_run(env):
+    """ship_city.sh が exit 2 を返したら、次の都市へ進まずに止める。
+
+    2 はディスク不足の合図で、他の失敗と混ぜてはいけない。
+    このテストが無いと、exit 2 の分岐を消した実装でも通る。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    _stub(env.bin, 'ship_city_stub',
+          'echo "$1" >> "%s"\n'
+          'if [ "$1" = "30406" ]; then exit 2; fi\n'
+          'echo "$1 3" >> "%s"\n'
+          'exit 0' % (env.called, env.shipped))
+
+    r = _run(env)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert env.called.read_text().split() == ['13402', '30406']
+
+
+def test_target_list_holds_only_city_codes(env):
+    """サーバへ渡す一覧は都市コード 1 列だけにする。
+
+    shipped.txt は <citycode> <osm数> の 2 列。第 2 段のバッチは行から
+    空白を全部除くので、2 列のまま渡すと 43213 103 が 43213103 になり、
+    その都市は永久に取り込まれない。
+    """
+    # ship.env の EXPECTED_CITIES は 3 (fixture 参照)。ブリーフ本文は 2 都市の
+    # 計画だったが、それだと件数ゲートで exit 3 になり、この関数が確かめたい
+    # 列の切り出しまで到達しない。他の新規テストと同じ 3 都市に揃える。
+    _write_plan(env, ['13402', '30406', '43213'])
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    written = sorted(env.tmp.glob('reimport_targets_*.txt'))
+    assert written, '一覧が作られていない'
+    lines = [ln for ln in written[-1].read_text().splitlines() if ln]
+    assert lines == ['13402', '30406', '43213'], lines
+
+
+def test_resume_does_not_skip_on_a_prefix_match(env):
+    """都市コードの前方一致で誤って飛ばさない。
+
+    照合が行頭と末尾の空白で挟まれていないと、1340 が 13402 に一致する。
+    """
+    # 同上: EXPECTED_CITIES=3 に合わせて 3 都市の計画にする。
+    _write_plan(env, ['13402', '30406', '43213'])
+    env.shipped.write_text('1340 8\n')
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.called.read_text().split() == ['13402', '30406', '43213']

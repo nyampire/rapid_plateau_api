@@ -96,10 +96,11 @@ bash ship_all.sh
 | コード | 意味 |
 |---|---|
 | 0 | 成功 |
-| 1 | `ship.env` が無い、または必須の項目が未設定 |
+| 1 | `ship.env` が無い、必須の項目が未設定、`CONVERSION_JSON` / `CITYGML_OSM_JAR` の実体が無い、または `DISK_MIN_KB` が数字でない |
 | 2 | ディスク不足、または空き容量を読めない |
+| 3 | 取り出し前の準備の失敗 (`WORK_ROOT` を作れない、前回の作業ディレクトリを退避または再作成できない) |
 | 10 | 取り出し (`extract_city.py`) の失敗。`.gml` が 1 つも無い場合を含む |
-| 11 | 変換 (`java`) の失敗、`.osm` の枚数不一致、空ファイル、閉じタグの欠落 |
+| 11 | 変換 (`java`) の失敗、`conversion.json` を複製できない、`.osm` の枚数不一致、空ファイル、閉じタグの欠落 |
 | 12 | 転送 (`rsync` / `ssh`) の失敗、または転送先の枚数を数えられないか一致しない |
 
 ### `ship_all.sh`
@@ -109,7 +110,7 @@ bash ship_all.sh
 | 0 | 全都市成功 |
 | 1 | `ship.env` が無い、必須の項目が未設定、または失敗した都市が 1 つ以上ある (最終結果) |
 | 2 | ディスク不足、または空き容量を読めない |
-| 3 | 設定検査の失敗 (`DISK_MIN_KB` / `EXPECTED_CITIES` が数字でない)、`WORK_ROOT` を作れない、計画の件数が `EXPECTED_CITIES` と合わない |
+| 3 | 設定検査の失敗 (`DISK_MIN_KB` / `EXPECTED_CITIES` が数字でない)、`SHIPPED_TXT` に書けない、`WORK_ROOT` を作れない、計画ファイル (`PLAN_CSV`) が無い、計画の件数が `EXPECTED_CITIES` と合わない、書き出した一覧が 0 都市 |
 | 4 | 一覧 (`reimport_targets_<日時>.txt`) のサーバへの転送に失敗 |
 
 `ship_city.sh` の exit 2 (ディスク不足) は `ship_all.sh` にそのまま伝わり、全体を止める。

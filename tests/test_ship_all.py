@@ -329,3 +329,60 @@ def test_target_list_transfer_failure_aborts_with_exit_4(env):
     assert r.returncode == 4, r.stdout + r.stderr
     assert env.called.read_text().split() == ['13402', '30406', '43213']
     assert '一覧の転送が exit' in r.stdout
+
+
+def test_missing_plan_csv_exits_3_with_a_distinct_message(env):
+    """PLAN_CSV が無ければ、件数の門とは別のメッセージで exit 3 になる。
+
+    PLAN_CSV が無いと tail が失敗するが、その出力を受ける grep -c . は
+    入力 0 行でも exit 0 で 0 を返す。件数の門にそのまま落ちて
+    「計画の件数が合わない。build_download_plan.py で足りない都市を足す」
+    と出ると、運用者は CSV の中身を疑ってそちらを直しに行くが、
+    実際にはパスが違うだけ (brief 実測)。
+    env fixture は _write_plan を呼ばない限り PLAN_CSV の実体を作らない。
+    """
+    r = _run(env)
+
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert '計画のファイルが無い' in r.stdout, r.stdout
+    assert '計画の件数が合わない' not in r.stdout, r.stdout
+    assert not env.called.exists()
+
+
+def test_shipped_txt_touch_failure_exits_3(env):
+    """SHIPPED_TXT に書けなければ、1 都市も処理せずに exit 3 で止まる。
+
+    touch が失敗すると、再開の飛ばし (grep -q "^$CITY ") が無言で無効に
+    なり、最後の cut もリダイレクト先が無いまま TARGETS を空で作る。
+    rsync 自体は空ファイルの転送に成功するので exit 4 にはならず、
+    「一覧を置いた: (0 都市)」が正常終了に見えてしまう (brief 実測)。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    missing_parent = env.tmp / 'no_such_dir' / 'shipped.txt'
+    ship_bad = env.tmp / 'ship_bad_shipped.env'
+    ship_bad.write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'SHIPPED_TXT="%s"' % env.shipped, 'SHIPPED_TXT="%s"' % missing_parent))
+    env.run_env['SHIP_ENV'] = str(ship_bad)
+
+    r = _run(env)
+
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert not env.called.exists()
+
+
+def test_empty_target_list_after_all_cities_fail_exits_3(env):
+    """全都市が失敗して SHIPPED_TXT が空のままなら、一覧を空で置かず exit 3 で止まる。
+
+    touch 自体が成功しても、shipped.txt に一度も追記されなければ最後の
+    cut は空を書き出す。rsync は空ファイルの転送に成功するので exit 4 には
+    ならず、「一覧を置いた: (0 都市)」が正常終了に見えてしまう。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    _stub(env.bin, 'ship_city_stub',
+          'echo "$1" >> "%s"\nexit 9' % env.called)
+
+    r = _run(env)
+
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert 'ABORT: 一覧が 0 都市' in r.stdout, r.stdout

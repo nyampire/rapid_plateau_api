@@ -213,6 +213,24 @@ def test_low_disk_exits_2(env):
     assert r.returncode == 2, r.stdout + r.stderr
 
 
+def test_threshold_kb_not_a_number_exits_the_config_code(env):
+    """THRESHOLD_KB が数字でなければ、比較へ進まず専用の設定コードで落ちる。
+
+    THRESHOLD_KB は ~/.profile から来るので、書き損じ (例 "5G") は
+    148 都市すべてに等しく効く。[ "$AVAIL" -lt "$THRESHOLD_KB" ] は
+    integer expression expected でエラー終了し、if がそれを偽として
+    扱うので、ディスクの門が消えたまま取り込みが走ってしまう
+    (brief 実測)。起動時に need_int で検査して落とす。
+    """
+    _city(env, osm=2)
+    env.run_env['THRESHOLD_KB'] = '5G'
+
+    r = _run(env)
+
+    assert r.returncode == 15, r.stdout + r.stderr
+    assert not env.called.exists()
+
+
 def test_counts_the_osm_files_instead_of_assuming_two(env):
     """.osm の枚数を実際に数えている。定数と比べていない。
 

@@ -52,7 +52,14 @@ for v in DISK_MIN_KB EXPECTED_CITIES; do
   fi
 done
 
-touch "$SHIPPED_TXT"
+# 失敗すると再開の飛ばしが無言で無効になり (grep が読む相手が無い)、
+# 最後の cut もリダイレクト先が無く失敗して TARGETS が空のまま作られる。
+# rsync 自体は成功するので exit 4 にはならず、「一覧を置いた: (0 都市)」と
+# 出て正常終了に見える。設定検査と同じ exit 3 で、ここで止める。
+if ! touch "$SHIPPED_TXT"; then
+  say "ABORT: SHIPPED_TXT に書けない (値: ${SHIPPED_TXT})"
+  exit 3
+fi
 # WORK_ROOT を先に作る。無いまま disk_kb "$WORK_ROOT" を掛けると df が
 # エラー終了し、1 都市目の手前で「空き容量を読めない」と exit 2 になる。
 # exit 2 はディスク不足の予約番号なので、運用者はディスクを疑って調べ始めるが
@@ -64,6 +71,16 @@ touch "$SHIPPED_TXT"
 # 設定検査 (DISK_MIN_KB / EXPECTED_CITIES) と同じ exit 3 で、ここで止める。
 if ! mkdir -p "$WORK_ROOT"; then
   say "ABORT: WORK_ROOT を作れない (値: ${WORK_ROOT})"
+  exit 3
+fi
+
+# PLAN_CSV が無いと tail が失敗するが、その出力を受ける grep -c . は
+# 入力 0 行でも exit 0 で 0 を返す。件数の門にそのまま落ちて
+# 「計画の件数が合わない」と出るので、運用者は CSV の中身を疑って
+# build_download_plan.py を探しに行くが、実際にはパスが違うだけ。
+# 実体を先に確かめて、別のメッセージで exit 3 にする。
+if [ ! -f "$PLAN_CSV" ]; then
+  say "ABORT: 計画のファイルが無い: $PLAN_CSV"
   exit 3
 fi
 
@@ -130,7 +147,16 @@ if [ "$TARGETS_EXIT" -ne 0 ]; then
   say "ABORT: 一覧の転送が exit ${TARGETS_EXIT}。手元には ${TARGETS} が残っている"
   exit 4
 fi
-say "一覧を置いた: reimport_targets_${STAMP}.txt ($(grep -c . "$TARGETS") 都市)"
+# touch "$SHIPPED_TXT" が失敗していると cut の出力先も無言で空になり、
+# rsync 自体は空ファイルの転送に成功するので exit 4 では止まらない。
+# 「一覧を置いた: (0 都市)」が正常終了に見えてしまうので、件数 0 も
+# 同じ exit 3 で止める。
+TARGET_COUNT=$(grep -c . "$TARGETS")
+if [ "$TARGET_COUNT" -eq 0 ]; then
+  say "ABORT: 一覧が 0 都市。SHIPPED_TXT (${SHIPPED_TXT}) の書き込みを確認する"
+  exit 3
+fi
+say "一覧を置いた: reimport_targets_${STAMP}.txt (${TARGET_COUNT} 都市)"
 
 say "=== DONE === ok=$ok skip=$skip failed=$(echo "$failed" | wc -w | tr -d ' ')"
 if [ -n "$failed" ]; then

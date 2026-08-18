@@ -15,6 +15,11 @@ LIST="${1:-$HOME/reimport_targets.txt}"
 # 二重取り込み検出の的。テストがこの機械全体ではなくテスト専用のプロセスに
 # 絞れるよう変数に出す。既定はいまと同じ文字列のまま変えない。
 : "${STRAY_IMPORT_PATTERN:=plateau_importer2postgis.py}"
+# 連続失敗の早期打ち切り。既定 3、0 で無効。reimport_watchdog.sh は
+# WRAPPER_PATH のずれや連続失敗を見張るが、監視間隔が 60 秒あるうえ
+# batch_status=DONE を見ると即座に終わるので、数秒で完走する失敗の
+# 連鎖には間に合わない。バッチ自身にも同じ形の門を持たせる。
+: "${EARLY_ABORT_FAILS:=3}"
 
 DONE="$REIMPORT_LOG_DIR/done.txt"
 FAILED="$REIMPORT_LOG_DIR/failed.txt"
@@ -37,6 +42,24 @@ mkdir -p "$REIMPORT_LOG_DIR"
 if [ ! -f "$LIST" ]; then
   echo "[$(date '+%F %T')] ABORT: 一覧が無い: $LIST" | tee -a "$SUMMARY"
   echo NO_LIST > "$STATUS"
+  exit 6
+fi
+
+# REIMPORT_ONE は未設定かどうかしか検査していなかったので、既定
+# ($HOME/reimport_one.sh) を実際に置き忘れていても bash "$REIMPORT_ONE" が
+# 「そんなファイルは無い」で exit 127 を返すだけで、148 都市すべてが
+# failed.txt に積まれたまま最後は batch_status=DONE、exit 0 で終わる。
+# reimport_watchdog.sh は同じ WRAPPER_PATH の実体を検査して exit 3 で
+# 止まるので、バッチ側にも揃える。
+if [ ! -f "$REIMPORT_ONE" ]; then
+  echo "[$(date '+%F %T')] ABORT: wrapper が無い: $REIMPORT_ONE" | tee -a "$SUMMARY"
+  echo NO_WRAPPER > "$STATUS"
+  exit 6
+fi
+
+if ! need_int "$EARLY_ABORT_FAILS"; then
+  echo "[$(date '+%F %T')] ABORT: EARLY_ABORT_FAILS が数字でない (値: $EARLY_ABORT_FAILS)" | tee -a "$SUMMARY"
+  echo BAD_CONFIG > "$STATUS"
   exit 6
 fi
 
@@ -88,6 +111,7 @@ i=0
 ok=0
 fail=0
 skip=0
+consec_fail=0
 while IFS= read -r CITY; do
   i=$((i+1))
   CITY=$(echo "$CITY" | tr -d '[:space:]')
@@ -116,15 +140,28 @@ while IFS= read -r CITY; do
   if [ "$EXIT" -eq 0 ]; then
     echo "$CITY" >> "$DONE"
     ok=$((ok+1))
+    consec_fail=0
     echo "[$(date '+%F %T')] [$i/$TOTAL] $CITY: OK (cumulative ok=$ok)" | tee -a "$SUMMARY"
   else
     echo "$CITY $EXIT" >> "$FAILED"
     fail=$((fail+1))
+    consec_fail=$((consec_fail+1))
     echo "[$(date '+%F %T')] [$i/$TOTAL] $CITY: FAIL exit=$EXIT" | tee -a "$SUMMARY"
     if [ "$EXIT" -eq 2 ]; then
       echo "[$(date '+%F %T')] Disk threshold breached. ABORT." | tee -a "$SUMMARY"
       echo DISK_ABORT > "$STATUS"
       exit 2
+    fi
+    # wrapper が無い、設定を書き損じた等で全都市が数秒で失敗する形は、
+    # 成功が 1 件も無いまま完走して batch_status=DONE になる。5 秒後に
+    # 上げる watchdog は既に無意味な監視をするだけで、連続失敗の検出も
+    # 60 秒間隔なので瞬時の失敗連鎖には間に合わない。ここで自前に打ち切る。
+    # 成功が 1 件でもあれば、途中の都市が個別に失敗する通常の運用を
+    # 止めないよう打ち切らない。
+    if [ "$EARLY_ABORT_FAILS" -gt 0 ] && [ "$consec_fail" -ge "$EARLY_ABORT_FAILS" ] && [ "$ok" -eq 0 ]; then
+      echo "[$(date '+%F %T')] ABORT: 連続 $consec_fail 件失敗し成功が 1 件も無い (閾値 $EARLY_ABORT_FAILS)" | tee -a "$SUMMARY"
+      echo EARLY_ABORT > "$STATUS"
+      exit 8
     fi
   fi
 done < "$LIST"

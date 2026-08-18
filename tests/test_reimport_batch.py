@@ -281,3 +281,115 @@ def test_done_txt_match_is_the_whole_line_not_a_substring(batch_env):
     assert r.returncode == 0, r.stdout + r.stderr
     assert batch_env.called.exists(), '13402 が誤って skip された'
     assert batch_env.called.read_text().split() == ['13402']
+
+
+def test_missing_wrapper_exits_6_with_no_wrapper_status(batch_env):
+    """REIMPORT_ONE の実体が無ければ、都市を 1 つも触らずに exit 6 で止まる。
+
+    未設定かどうかしか見ていないと、既定 ($HOME/reimport_one.sh) を
+    置き忘れていても bash "$REIMPORT_ONE" が「そんなファイルは無い」で
+    exit 127 を返すだけになる。148 都市すべてが failed.txt に積まれた
+    まま最後は batch_status=DONE、exit 0 で終わり、5 秒後に上げる
+    watchdog も DONE を見て即座に終了するので監視も一緒に消える。
+    reimport_watchdog.sh は同じ WRAPPER_PATH の実体を検査して exit 3 で
+    止まるので、バッチ側にも揃える。
+    """
+    targets = batch_env.tmp / 'targets.txt'
+    targets.write_text('13402\n')
+    batch_env.run_env['REIMPORT_ONE'] = str(batch_env.tmp / 'does_not_exist.sh')
+
+    r = subprocess.run(['bash', str(BATCH), str(targets)],
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert (batch_env.logs / 'batch_status').read_text().strip() == 'NO_WRAPPER'
+    assert not batch_env.called.exists()
+
+
+def test_early_abort_fails_not_a_number_exits_6_with_bad_config(batch_env):
+    """EARLY_ABORT_FAILS が数字でなければ、都市を 1 つも触らずに exit 6 で止まる。
+
+    [ "$consec_fail" -ge "$EARLY_ABORT_FAILS" ] は数字でない値だと
+    integer expression expected でエラー終了する。need_int で先に検査する。
+    """
+    targets = batch_env.tmp / 'targets.txt'
+    targets.write_text('13402\n')
+    batch_env.run_env['EARLY_ABORT_FAILS'] = 'three'
+
+    r = subprocess.run(['bash', str(BATCH), str(targets)],
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert (batch_env.logs / 'batch_status').read_text().strip() == 'BAD_CONFIG'
+    assert not batch_env.called.exists()
+
+
+def test_early_abort_after_consecutive_failures_with_no_success(batch_env):
+    """成功が 1 件も無いまま連続失敗が閾値に達すれば、一覧の途中でも exit 8 で止まる。
+
+    wrapper が無い、`PLATEAU_ENV_FILE` の書き間違い、`PLATEAU_IMPORT_DIR` が
+    `SHIP_PATH` とずれている等の設定ミスは、全都市が数秒で同じ理由で
+    失敗し、成功が 1 件も無いまま完走して batch_status=DONE になる。
+    5 秒後に上げる watchdog の連続失敗検出は監視間隔が 60 秒あるので、
+    瞬時に終わる失敗の連鎖には届かない。バッチ自身に閾値を持たせて確かめる。
+    """
+    targets = batch_env.tmp / 'targets.txt'
+    targets.write_text('11111\n22222\n33333\n44444\n55555\n')
+    one = batch_env.tmp / 'one_stub.sh'
+    one.write_text('#!/usr/bin/env bash\nexit 9\n')
+    one.chmod(0o755)
+    batch_env.run_env['EARLY_ABORT_FAILS'] = '3'
+
+    r = subprocess.run(['bash', str(BATCH), str(targets)],
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 8, r.stdout + r.stderr
+    assert (batch_env.logs / 'batch_status').read_text().strip() == 'EARLY_ABORT'
+    failed_lines = (batch_env.logs / 'failed.txt').read_text().splitlines()
+    assert failed_lines == ['11111 9', '22222 9', '33333 9'], failed_lines
+    assert (batch_env.logs / 'done.txt').read_text().strip() == ''
+
+
+def test_early_abort_does_not_trigger_when_at_least_one_success(batch_env):
+    """成功が 1 件でもあれば、閾値を超える失敗が続いても打ち切らない。
+
+    途中の都市が個別に失敗する通常の運用まで、この安全装置で止めたくない。
+    最初の都市だけ成功させ、残り全部を失敗させても最後まで回ることを確かめる。
+    """
+    targets = batch_env.tmp / 'targets.txt'
+    targets.write_text('11111\n22222\n33333\n44444\n55555\n')
+    one = batch_env.tmp / 'one_stub.sh'
+    one.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [ "$1" = "11111" ]; then exit 0; fi\n'
+        'exit 9\n'
+    )
+    one.chmod(0o755)
+    batch_env.run_env['EARLY_ABORT_FAILS'] = '3'
+
+    r = subprocess.run(['bash', str(BATCH), str(targets)],
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (batch_env.logs / 'batch_status').read_text().strip() == 'DONE'
+    assert (batch_env.logs / 'done.txt').read_text().splitlines() == ['11111']
+    failed_lines = (batch_env.logs / 'failed.txt').read_text().splitlines()
+    assert len(failed_lines) == 4, failed_lines
+
+
+def test_early_abort_fails_zero_disables_the_early_abort(batch_env):
+    """EARLY_ABORT_FAILS=0 なら、成功が 1 件も無くても打ち切らない。"""
+    targets = batch_env.tmp / 'targets.txt'
+    targets.write_text('11111\n22222\n33333\n44444\n')
+    one = batch_env.tmp / 'one_stub.sh'
+    one.write_text('#!/usr/bin/env bash\nexit 9\n')
+    one.chmod(0o755)
+    batch_env.run_env['EARLY_ABORT_FAILS'] = '0'
+
+    r = subprocess.run(['bash', str(BATCH), str(targets)],
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (batch_env.logs / 'batch_status').read_text().strip() == 'DONE'
+    failed_lines = (batch_env.logs / 'failed.txt').read_text().splitlines()
+    assert len(failed_lines) == 4, failed_lines

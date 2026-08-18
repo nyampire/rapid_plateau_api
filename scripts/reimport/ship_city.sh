@@ -28,6 +28,20 @@ fi
 : "${SHIPPED_TXT:?SHIPPED_TXT が未設定}"
 : "${DISK_MIN_KB:=5242880}"
 
+# 未設定かどうかだけでなく、実体があるかも確かめる。ship.env.example の
+# 既定はどちらもプレースホルダのパスなので、書き換え漏れがあると
+# cp や java の実行時まで気づけない。cp は結果を見ずに次の段へ進む形に
+# なっていたので、既定のまま走らせると conversion.json が複製されずに
+# 変換器が既定の設定で走り切ってしまう。
+if [ ! -f "$CONVERSION_JSON" ]; then
+  echo "設定の実体が無い: CONVERSION_JSON=$CONVERSION_JSON (ship.env を確認する)" >&2
+  exit 1
+fi
+if [ ! -f "$CITYGML_OSM_JAR" ]; then
+  echo "設定の実体が無い: CITYGML_OSM_JAR=$CITYGML_OSM_JAR (ship.env を確認する)" >&2
+  exit 1
+fi
+
 EXIT_EXTRACT=10
 EXIT_CONVERT=11
 EXIT_TRANSFER=12
@@ -63,9 +77,24 @@ need_int() {
   esac
 }
 
+# ship.env はファイルなので、そこから来る数値も検査する。DISK_MIN_KB が
+# 壊れていると [ "$AVAIL" -lt "$DISK_MIN_KB" ] が integer expression
+# expected でエラー終了し、if がそれを偽として扱う。ディスクの門そのものが
+# 「設定を書き損じたときに限って」消える。ship_all.sh と同じ検査を足す。
+if ! need_int "$DISK_MIN_KB"; then
+  say "ABORT: DISK_MIN_KB が数字でない (値: $DISK_MIN_KB)"
+  exit 1
+fi
+
 say "=== START ==="
 
-mkdir -p "$WORK_ROOT"
+# WORK_ROOT を作れないと、この先の disk_kb や extract がその場所へ
+# 書けずに失敗し、「取り出しの失敗」(exit 10) に化けて原因が分かりにくくなる。
+# ship_all.sh は同じ mkdir の失敗を exit 3 として分けているので揃える。
+if ! mkdir -p "$WORK_ROOT"; then
+  say "ABORT: WORK_ROOT を作れない (値: $WORK_ROOT)"
+  exit 3
+fi
 AVAIL=$(disk_kb "$WORK_ROOT")
 if ! need_int "$AVAIL"; then
   say "ABORT: 空き容量を読めない (df の出力: $AVAIL)"
@@ -77,11 +106,19 @@ if [ "$AVAIL" -lt "$DISK_MIN_KB" ]; then
   exit 2
 fi
 
-# 再試行は必ず空のディレクトリから始める
+# 再試行は必ず空のディレクトリから始める。退避 (mv) や再作成 (mkdir) が
+# 黙って失敗すると、前回の .gml と .osm を抱えたまま先へ進んでしまい、
+# 上のコメントが避けたかった状態に戻る。
 if [ -e "$WORK" ]; then
-  mv "$WORK" "$WORK.stale.$(date '+%Y%m%d-%H%M%S')"
+  if ! mv "$WORK" "$WORK.stale.$(date '+%Y%m%d-%H%M%S')"; then
+    say "ABORT: 前回の作業ディレクトリを退避できない (値: $WORK)"
+    exit 3
+  fi
 fi
-mkdir -p "$WORK"
+if ! mkdir -p "$WORK"; then
+  say "ABORT: 作業ディレクトリを作れない (値: $WORK)"
+  exit 3
+fi
 
 say "1/5 取り出し"
 EXTRACT_JSON=$($EXTRACT_CMD "$CITY" "$WORK")
@@ -113,7 +150,9 @@ if [ "$GML_N" -ne "$MESHES" ]; then
 fi
 
 say "2/5 変換"
-cp "$CONVERSION_JSON" "$WORK/conversion.json"
+if ! cp "$CONVERSION_JSON" "$WORK/conversion.json"; then
+  bail "$EXIT_CONVERT" "conversion.json を複製できない"
+fi
 (
   cd "$WORK" || exit 1
   "$JAVA_BIN" -Xmx4096m -Dfile.encoding=utf-8 -jar "$CITYGML_OSM_JAR" 1st

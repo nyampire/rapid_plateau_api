@@ -266,12 +266,18 @@ def test_mkdir_failure_aborts_with_exit_3_not_disk_exit_2(env):
 
 
 def test_target_list_transfer_uses_the_expected_destination(env):
-    """一覧の転送先が SHIP_HOST の SHIP_PATH の親であることを実測する。
+    """一覧の転送元と転送先を実測する。
 
     fixture の偽 rsync は何を渡されても exit 0 を返すだけだったので、
     一覧の宛先を別ホストにする変異も、この行そのものを `true` に
-    置き換える変異も素通りしていた (brief 実測)。引数を記録させて、
-    実際に渡った宛先を確かめる。
+    置き換える変異も素通りしていた (brief 実測)。宛先 (argv[-1]) だけを
+    見ていると、送信元を shipped.txt そのものにすり替える変異
+    (`rsync -az "$SHIPPED_TXT" "$SHIP_HOST:..."`) も宛先の形が同じなら
+    通ってしまう。shipped.txt は 2 列 (都市コードと件数) なので、
+    それをそのまま送ると第 2 段が `43213 103` を `43213103` として読み、
+    その都市は永久に取り込まれない (ship_all.sh のコメント参照)。
+    引数を記録させて、転送元 (argv[-2]) と転送先 (argv[-1]) の両方を
+    確かめる。
     """
     _write_plan(env, ['13402', '30406', '43213'])
     rsync_args = env.tmp / 'rsync_args.txt'
@@ -286,6 +292,9 @@ def test_target_list_transfer_uses_the_expected_destination(env):
     argv = rsync_args.read_text().splitlines()
     assert argv, '一覧の転送で rsync に引数が渡っていない'
     assert re.match(
+        r'^%s/reimport_targets_\d{8}-\d{6}\.txt$' % re.escape(str(env.tmp)),
+        argv[-2]), argv
+    assert re.match(
         r'^stubhost:/stub/import/\.\./reimport_targets_\d{8}-\d{6}\.txt$',
         argv[-1]), argv
 
@@ -297,6 +306,13 @@ def test_target_list_transfer_failure_aborts_with_exit_4(env):
     丸ごと削除しても他のテストは全部通っていた (brief 実測)。
     偽 rsync を呼び出し回数で数え、この 1 回きりの呼び出しを非 0 にして
     確かめる。
+
+    このカウンタは現状では効いていない。
+    fixture の SHIP_CITY_CMD (ship_city_stub) は rsync を呼ばない偽物なので、
+    ship_all.sh 内で rsync が呼ばれるのは一覧の転送 1 回きりであり、
+    この仕掛けは「無条件に exit 1 を返す偽物」と等価になっている。
+    ship_city.sh 経由の rsync 呼び出しが同じ偽 rsync を共有するように
+    なった場合の保険として、カウンタのまま残している。
     """
     _write_plan(env, ['13402', '30406', '43213'])
     call_count = env.tmp / 'rsync_calls.txt'

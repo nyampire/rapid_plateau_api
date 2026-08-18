@@ -19,12 +19,36 @@ PAUSE="$HOME/reimport_pause"
 SUMMARY="$REIMPORT_LOG_DIR/summary.log"
 STATUS="$REIMPORT_LOG_DIR/batch_status"
 
+need_int() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 mkdir -p "$REIMPORT_LOG_DIR"
+
+# 一覧の打ち間違いを握りつぶさない。無いまま進むと 148 都市が 1 件も
+# 走らないまま exit 0 で終わり、5 秒後に上げる watchdog も batch_status を
+# 見て即座に終了するので、監視も一緒に消える。
+if [ ! -f "$LIST" ]; then
+  echo "[$(date '+%F %T')] ABORT: 一覧が無い: $LIST" | tee -a "$SUMMARY"
+  echo NO_LIST > "$STATUS"
+  exit 6
+fi
+
 touch "$DONE" "$FAILED"
 
 rm -f "$STATUS"
 echo "[$(date '+%F %T')] === BATCH START === list=$LIST" | tee -a "$SUMMARY"
 TOTAL=$(grep -c . "$LIST")
+# grep -c が壊れた値を返す、または一覧が空 (0 件) だと、この先の全ての
+# ループが 0 回で完走し「成功」に見える。need_int で読み、0 件も同じ形で止める。
+if ! need_int "$TOTAL" || [ "$TOTAL" -eq 0 ]; then
+  echo "[$(date '+%F %T')] ABORT: 一覧が空か件数を数えられない (値: $TOTAL)" | tee -a "$SUMMARY"
+  echo EMPTY_LIST > "$STATUS"
+  exit 6
+fi
 echo "[$(date '+%F %T')] Total cities: $TOTAL" | tee -a "$SUMMARY"
 
 wait_through_upgrade_window() {
@@ -81,7 +105,10 @@ while IFS= read -r CITY; do
   assert_no_stray_import
 
   echo "[$(date '+%F %T')] [$i/$TOTAL] $CITY: START" | tee -a "$SUMMARY"
-  bash "$REIMPORT_ONE" "$CITY"
+  # < /dev/null で while の stdin (一覧ファイル) を子に継がせない。
+  # いまの取り込み器は stdin を読まないので無害だが、読む処理が入ると
+  # 都市が黙って食われる。
+  bash "$REIMPORT_ONE" "$CITY" < /dev/null
   EXIT=$?
   if [ "$EXIT" -eq 0 ]; then
     echo "$CITY" >> "$DONE"

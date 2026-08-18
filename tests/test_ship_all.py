@@ -194,3 +194,26 @@ def test_resume_does_not_skip_on_a_prefix_match(env):
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert env.called.read_text().split() == ['13402', '30406', '43213']
+
+
+def test_creates_work_root_before_checking_disk(env):
+    """WORK_ROOT が無くても、作ってから df を掛けるので初回で落ちない。
+
+    mkdir -p が無いと、初回の disk_kb "$WORK_ROOT" は「ディレクトリが無い」
+    ことを「空き容量を読めない」に見せかけて exit 2 で落ちる。exit 2 は
+    ディスク不足の予約番号なので、運用者はディスクを疑って調べ始めるが、
+    実際にはディレクトリが無いだけ。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    missing_root = env.tmp / 'fresh_work_root'
+    assert not missing_root.exists()
+    env.run_env['SHIP_ENV'] = str(env.tmp / 'ship_missing_root.env')
+    (env.tmp / 'ship_missing_root.env').write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'WORK_ROOT="%s"' % env.tmp, 'WORK_ROOT="%s"' % missing_root))
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.called.read_text().split() == ['13402', '30406', '43213']
+    assert missing_root.is_dir()

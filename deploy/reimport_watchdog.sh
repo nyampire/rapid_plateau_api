@@ -47,6 +47,15 @@ low_mem_streak=0
 
 mkdir -p "$REIMPORT_LOG_DIR"
 START_LINES=$(wc -l < "$REIMPORT_LOG_DIR/summary.log" 2>/dev/null || echo 0)
+
+# WRAPPER_PATH がずれていると is_real_wrapper の前方一致が永久に false になり、
+# 90 分の打ち切りも kill も黙って効かなくなる。ログだけは正常に出続けるので
+# ここで実体を確かめる。設定値の need_int (35-41) と同じ、起動時に exit 3 で止める扱い。
+if [ ! -f "$WRAPPER_PATH" ]; then
+  echo "[$(date '+%F %T')] ABORT: WRAPPER_PATH が存在しない: ${WRAPPER_PATH}" | tee -a "$WATCH_LOG"
+  exit 3
+fi
+
 echo "[$(date '+%F %T')] === WATCHDOG START === baseline_lines=$START_LINES interval=${INTERVAL}s warn=${DISK_WARN_KB}KB halt=${DISK_HALT_KB}KB max_city=${MAX_CITY_MIN}min wrapper=$WRAPPER_PATH" | tee -a "$WATCH_LOG"
 
 is_real_wrapper() {
@@ -106,6 +115,14 @@ while true; do
 
   AVAIL_KB=$(df -k / | awk 'NR==2 {print $4}')
 
+  # df がメモリ逼迫時の fork 失敗などで空を返すと、そのまま比較した時点で
+  # [ がエラー終了し、if がそれを偽と扱ってディスクの門ごと消える。
+  # 分からないまま回し続けるより、pause に倒すほうが安全。
+  if ! need_int "$AVAIL_KB"; then
+    trigger_pause "disk AVAIL_KB を読めない (df の出力: ${AVAIL_KB})"
+    exit 2
+  fi
+
   if [ "$AVAIL_KB" -lt "$DISK_HALT_KB" ]; then
     trigger_pause "disk HALT: ${AVAIL_KB}KB < ${DISK_HALT_KB}KB"
     exit 2
@@ -121,7 +138,10 @@ while true; do
     RECENT_FAIL=$(tail -n "$NEW_TAIL" "$REIMPORT_LOG_DIR/summary.log" 2>/dev/null | tail -n "$LOOK" | grep -c "FAIL exit=")
     if [ "$RECENT_FAIL" -ge 3 ]; then
       trigger_pause "$RECENT_FAIL FAILs in last $LOOK observed entries (since watchdog start)"
-      exit 3
+      # 設定検査の失敗 (exit 3) と連続失敗による pause を終了コードで
+      # 区別できるよう、こちらは 7 にする。5 は reimport_batch.sh の
+      # 二重取り込み検出と衝突するので避ける。
+      exit 7
     fi
   fi
 

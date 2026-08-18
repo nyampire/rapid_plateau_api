@@ -241,3 +241,33 @@ def test_kills_the_importer_when_the_wrapper_is_terminated(env):
                 pass
         if child is not None:
             subprocess.run(['kill', '-9', child], capture_output=True)
+
+
+def test_missing_env_file_exits_with_dedicated_config_code(env):
+    """PLATEAU_ENV_FILE の実体が無ければ専用の終了コードで落ちる。
+
+    : "${PLATEAU_ENV_FILE:?...}" が保証するのは変数が設定されていることだけで、
+    ファイルの実在ではない。無いまま進むと後段の source が set -e 無しで
+    黙って失敗し、DATABASE_URL の unbound variable という分かりにくい形で
+    落ちる。13 (入力の枚数不一致) と混ぜないよう別コードにする。
+    """
+    _city(env, osm=2)
+    env.run_env['PLATEAU_ENV_FILE'] = str(env.tmp / 'does_not_exist.env')
+
+    r = _run(env)
+
+    assert r.returncode == 15, r.stdout + r.stderr
+
+
+def test_existing_env_file_does_not_use_the_config_code(env):
+    """PLATEAU_ENV_FILE の実体があれば、専用コードでは落ちない。
+
+    このテストが無いと「PLATEAU_ENV_FILE を見た瞬間に必ず exit 15 する」
+    実装でも上のテストが通ってしまう。
+    """
+    _city(env, osm=2)
+
+    r = _run(env)
+
+    assert r.returncode != 15, r.stdout + r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr

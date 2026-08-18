@@ -53,6 +53,12 @@ for v in DISK_MIN_KB EXPECTED_CITIES; do
 done
 
 touch "$SHIPPED_TXT"
+# WORK_ROOT を先に作る。無いまま disk_kb "$WORK_ROOT" を掛けると df が
+# エラー終了し、1 都市目の手前で「空き容量を読めない」と exit 2 になる。
+# exit 2 はディスク不足の予約番号なので、運用者はディスクを疑って調べ始めるが
+# 実際にはディレクトリが無いだけ。後段の TARGETS の書き出し先も同じ
+# ディレクトリなので、ここで作っておけばそちらの保険にもなる。
+mkdir -p "$WORK_ROOT"
 
 CODES=$(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | grep -c .)
 say "計画 $CODES 都市 (期待 $EXPECTED_CITIES)"

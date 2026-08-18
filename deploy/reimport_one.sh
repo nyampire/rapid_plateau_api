@@ -26,6 +26,17 @@ CITY="${1:?citycode required}"
 
 EXIT_DISK=2
 EXIT_INPUT=13
+EXIT_CONFIG=15
+
+# : "${PLATEAU_ENV_FILE:?...}" が保証するのは変数が設定されていることだけで、
+# ファイルの実在ではない。無いまま進むと後段の `. "$PLATEAU_ENV_FILE"` が
+# 失敗しても set -e が無いので気づかれず、DATABASE_URL の unbound variable と
+# いう分かりにくい形で落ちる。13 (入力の枚数不一致) と混ぜないよう専用の
+# コードを使う。
+if [ ! -f "$PLATEAU_ENV_FILE" ]; then
+  echo "設定が無い: ${PLATEAU_ENV_FILE}" >&2
+  exit "$EXIT_CONFIG"
+fi
 
 mkdir -p "$PLATEAU_LOG_DIR"
 LOG="$PLATEAU_LOG_DIR/${CITY}.log"

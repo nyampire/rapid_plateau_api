@@ -101,6 +101,13 @@ if [ "$MESHES_EXIT" -ne 0 ] || ! need_int "$MESHES"; then
 fi
 GML_N=$(find "$WORK" -maxdepth 1 -name '*.gml' | wc -l | tr -d ' ')
 say "報告 $MESHES メッシュ、実ファイル $GML_N"
+# extract_city.py は udx/bldg/ で始まる .gml だけを拾う。zip の内部配置が
+# 想定と違う版だと members が空になり、meshes: 0 で数の一致だけを見る門を
+# 全部素通りしてしまう。shipped.txt に成功として記録されると
+# ship_all.sh がその都市を以後永久に飛ばす。
+if [ "$MESHES" -lt 1 ]; then
+  bail "$EXIT_EXTRACT" ".gml が 1 つも無い (zip の内部配置が想定と違う可能性)"
+fi
 if [ "$GML_N" -ne "$MESHES" ]; then
   bail "$EXIT_EXTRACT" ".gml の数が報告と違う ($GML_N != $MESHES)"
 fi

@@ -11,6 +11,7 @@ macOS に /proc は無いので、読み先のパスだけ差し替える。
 """
 
 import os
+import platform
 import re
 import subprocess
 import time
@@ -308,3 +309,79 @@ def test_continuous_failures_pause_with_exit_7_not_3(tmp_path):
         assert (tmp_path / 'reimport_pause').exists()
     finally:
         _terminate(proc)
+
+
+def test_valid_config_enters_the_loop_and_exits_when_batch_status_appears(tmp_path):
+    """正しい設定で起動すると、ループへ入って batch_status を検出し exit 0 で終わる。
+
+    「起動して即 exit 3」の実装でも、設定検査だけを見るテストは全部通ってしまう。
+    batch_status の検出はループの中でしか起きない。
+    ここが exit 0 になること自体が、起動時の検査
+    (need_int や WRAPPER_PATH の実在確認) を通り抜けた証拠になる。
+    """
+    wrapper = _existing_wrapper(tmp_path)
+    run_env = _config_env(tmp_path, INTERVAL='1', WRAPPER_PATH=str(wrapper))
+    (tmp_path / 'logs' / 'batch_status').write_text('DONE\n')
+
+    r = subprocess.run(['bash', str(WATCHDOG)], env=run_env,
+                       capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_disk_halt_kb_breach_pauses_and_exits_2(tmp_path):
+    """DISK_HALT_KB を実機の空き容量よりずっと大きくすると、pause を立てて exit 2 になる。
+
+    df は差し替えない。
+    テストを動かす機械の実際の空き容量が、この極端な閾値を必ず下回ることを利用する。
+    ディスク HALT の分岐そのものを消した実装や、
+    閾値を無視して回し続ける実装はタイムアウトで検出する。
+    """
+    wrapper = _existing_wrapper(tmp_path)
+    run_env = _config_env(tmp_path, INTERVAL='1', WRAPPER_PATH=str(wrapper),
+                          DISK_HALT_KB='999999999999999')
+
+    r = subprocess.run(['bash', str(WATCHDOG)], env=run_env,
+                       capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert (tmp_path / 'reimport_pause').exists()
+
+
+@pytest.mark.skipif(
+    platform.system() != 'Linux',
+    reason='is_real_wrapper は /proc/$pid/cmdline を読むので Linux でしか動かない',
+)
+def test_max_city_min_zero_kills_a_real_stuck_wrapper(tmp_path):
+    """MAX_CITY_MIN を 0 にすると、90 分の打ち切りが実物の子プロセスに対して発動する。
+
+    is_real_wrapper は /proc/$pid/cmdline を読むので、macOS では動かせない。
+    ここだけは書き写しではなく、実物の watchdog を実物の子プロセスに対して走らせて確かめる。
+    """
+    wrapper = tmp_path / 'wrapper.sh'
+    wrapper.write_text('#!/usr/bin/env bash\nsleep 30\n')
+    wrapper.chmod(0o755)
+
+    child = subprocess.Popen(['bash', str(wrapper), 'stuckcity'])
+    try:
+        run_env = _config_env(tmp_path, INTERVAL='1', WRAPPER_PATH=str(wrapper),
+                              MAX_CITY_MIN='0')
+
+        r = subprocess.run(['bash', str(WATCHDOG)], env=run_env,
+                           capture_output=True, text=True, timeout=20)
+
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert (tmp_path / 'reimport_pause').exists()
+
+        deadline = time.time() + 10
+        alive = True
+        while time.time() < deadline:
+            if child.poll() is not None:
+                alive = False
+                break
+            time.sleep(0.2)
+        assert not alive, '打ち切りの kill -TERM が実物の子プロセスに届かなかった'
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)

@@ -12,6 +12,9 @@ set -uo pipefail
 LIST="${1:-$HOME/reimport_targets.txt}"
 : "${REIMPORT_LOG_DIR:=$HOME/reimport_logs}"
 : "${REIMPORT_ONE:=$HOME/reimport_one.sh}"
+# 二重取り込み検出の的。テストがこの機械全体ではなくテスト専用のプロセスに
+# 絞れるよう変数に出す。既定はいまと同じ文字列のまま変えない。
+: "${STRAY_IMPORT_PATTERN:=plateau_importer2postgis.py}"
 
 DONE="$REIMPORT_LOG_DIR/done.txt"
 FAILED="$REIMPORT_LOG_DIR/failed.txt"
@@ -74,7 +77,7 @@ wait_through_upgrade_window() {
 # 取り込みが 2 つ同時に走ると osm_id の採番が重なり、ノードが別都市の
 # 建物にぶら下がる。例外も出ず行数も 0 にならないので、他では検出できない。
 assert_no_stray_import() {
-  if pgrep -f plateau_importer2postgis.py > /dev/null 2>&1; then
+  if pgrep -f "$STRAY_IMPORT_PATTERN" > /dev/null 2>&1; then
     echo "[$(date '+%F %T')] ABORT: 取り込みが既に走っている" | tee -a "$SUMMARY"
     echo STRAY_IMPORT > "$STATUS"
     exit 5

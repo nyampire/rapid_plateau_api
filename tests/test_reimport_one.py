@@ -196,6 +196,13 @@ def test_kills_the_importer_when_the_wrapper_is_terminated(env):
     このテスト専用の --data-dir (tmp_path 配下の一意なパス) で絞る。
     無関係なプロセスを誤って拾わないようにするため。プロセスは
     finally で必ず後始末する。assert 失敗時に生き残らせない。
+
+    途中の assert が落ちて child が None のまま finally に来ても、
+    marker で pgrep をやり直して見つかったものを全部 SIGKILL する。
+    proc.kill() は SIGKILL なので wrapper の EXIT トラップは走らない。
+    child 変数だけを頼ると time.sleep(60) の子が 60 秒近く生き残り、
+    その間に他のテスト (reimport_batch の二重取り込み検出など) が無関係な理由で赤くなる。
+    実際に起きた。
     """
     import signal
     import time
@@ -239,8 +246,11 @@ def test_kills_the_importer_when_the_wrapper_is_terminated(env):
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 pass
-        if child is not None:
-            subprocess.run(['kill', '-9', child], capture_output=True)
+        # child 変数を頼らず、marker で pgrep をやり直して見つかったもの
+        # 全部を後始末する。assert が起動待ちの途中で落ちた場合も含む。
+        out = subprocess.run(['pgrep', '-f', marker], capture_output=True, text=True)
+        for pid in out.stdout.split():
+            subprocess.run(['kill', '-9', pid], capture_output=True)
 
 
 def test_missing_env_file_exits_with_dedicated_config_code(env):

@@ -17,11 +17,11 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 
 | 変数 | 用途 |
 |---|---|
-| `PLATEAU_APP_DIR` | リポジトリの置き場所 |
+| `PLATEAU_APP_DIR` | リポジトリの置き場所。必須 (既定なし)。未設定だと `reimport_one.sh` は exit 1 で落ちる |
 | `PLATEAU_VENV` | Python の仮想環境。省略すると `PYTHON_BIN` をそのまま使う |
 | `PYTHON_BIN` | `reimport_one.sh` が呼ぶ Python の実行ファイル。既定 `python3` |
-| `PLATEAU_ENV_FILE` | `DATABASE_URL` を含む設定。実体が無いと `reimport_one.sh` は exit 15 で止まる |
-| `PLATEAU_IMPORT_DIR` | 手元から送られた `.osm` の置き場所。手元の `SHIP_PATH` と同じ絶対パスを指す |
+| `PLATEAU_ENV_FILE` | `DATABASE_URL` を含む設定。必須 (既定なし)。未設定だと exit 1、設定されていても実体が無いと exit 15 で止まる |
+| `PLATEAU_IMPORT_DIR` | 手元から送られた `.osm` の置き場所。必須 (既定なし)。手元の `SHIP_PATH` と同じ絶対パスを指す |
 | `PLATEAU_LOG_DIR` | `reimport_one.sh` が都市ごとのログを書く場所。既定は `$HOME/reimport_logs` |
 | `REIMPORT_LOG_DIR` | `reimport_batch.sh` と `reimport_watchdog.sh` が読み書きする場所 (`done.txt`、`failed.txt`、`summary.log`、`batch_status` など)。既定は `$HOME/reimport_logs` |
 | `THRESHOLD_KB` | `reimport_one.sh` が取り込み前に要求する空き (1K ブロック)。既定 5GB |
@@ -30,7 +30,7 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 | `INTERVAL` | watchdog の監視間隔 (秒)。既定 60 |
 | `MAX_CITY_MIN` | 1 都市の取り込みがこれを超えて続いたら watchdog が打ち切る時間 (分)。既定 90 |
 | `WRAPPER_PATH` | watchdog が wrapper を見分けるために使う `reimport_one.sh` の絶対パス |
-| `REIMPORT_ONE` | バッチが呼ぶ `reimport_one.sh` の場所 |
+| `REIMPORT_ONE` | バッチが呼ぶ `reimport_one.sh` の場所。既定 `$HOME/reimport_one.sh` |
 | `STRAY_IMPORT_PATTERN` | バッチが二重取り込み検出に使う `pgrep -f` の対象文字列。既定 `plateau_importer2postgis.py` |
 
 `PLATEAU_LOG_DIR` と `REIMPORT_LOG_DIR` は既定値が同じなので黙って一致しているように見えるが、別の変数である。
@@ -65,6 +65,7 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 | コード | 意味 |
 |---|---|
 | 0 | 成功 |
+| 1 | 必須の環境変数 (`PLATEAU_APP_DIR` / `PLATEAU_ENV_FILE` / `PLATEAU_IMPORT_DIR`) が未設定。bash 自身が落ちる |
 | 2 | ディスク不足、または空き容量を読めない |
 | 13 | 入力が無い、`manifest.txt` が無いか数字でない、`.osm` の枚数が manifest と違う |
 | 14 | 取り込み器が exit 2 を返した写し (引数の不整合の可能性) |
@@ -87,12 +88,14 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 | コード | 意味 |
 |---|---|
 | 0 | `batch_status` の出現を見て正常終了 |
-| 2 | ディスクが `DISK_HALT_KB` を割った、または空き容量を読めない |
-| 3 | 起動時の設定検査 (`INTERVAL` / `DISK_WARN_KB` / `DISK_HALT_KB` / `MAX_CITY_MIN` が数字でない)、または `WRAPPER_PATH` の実体が無い |
-| 4 | 1 都市の所要が `MAX_CITY_MIN` を超えて打ち切った |
-| 7 | 直近の失敗が 3 件以上連続した |
+| 2 | ディスクが `DISK_HALT_KB` を割った、または空き容量を読めない (pause を立てる) |
+| 3 | 起動時の設定検査 (`INTERVAL` / `DISK_WARN_KB` / `DISK_HALT_KB` / `MAX_CITY_MIN` が数字でない)、または `WRAPPER_PATH` の実体が無い。pause は立てず watchdog だけが終わる |
+| 4 | 1 都市の所要が `MAX_CITY_MIN` を超えて打ち切った (pause を立てる) |
+| 7 | 直近 12 件の観測行のうち 3 件以上が `FAIL exit=` だった (pause を立てる) |
 
-設定検査の失敗 (3) と連続失敗による pause (7) は、どちらも pause を立てるが終了コードで区別できる。
+pause を立てる経路はディスク (2)、打ち切り (4)、連続失敗 (7) の 3 つに限る。
+設定検査の失敗 (3) は pause を立てず、watchdog だけが終わる。
+バッチは走り続けるので、監視が止まったと気づいたら watchdog を上げ直す。
 
 ## 148 都市を流す
 
@@ -155,8 +158,15 @@ nohup bash ~/reimport_watchdog.sh > /dev/null 2>&1 &
 
 ## 1 都市目で止めて確かめる
 
-バッチを起動したらすぐ `touch ~/reimport_pause` する。
-バッチは都市の切れ目でこのファイルを見るので、1 都市目が終わったところで次へ進まずに止まる。
+`touch ~/reimport_pause` は `summary.log` に `[1/148] <都市>: START` が出てから行う。
+バッチはループの先頭、つまり次の都市を始める手前でこのファイルを見る。
+起動直後にすぐ触ると、1 都市目を走らせる前にこれを検出してしまい、
+1 都市も取り込まないまま `PAUSED` を書いて exit 0 する。
+5 秒後に上げる watchdog も `batch_status` にその `PAUSED` を見つけて即座に終了するので、
+両方が消えて何も確かめないまま節の目的を失う。
+
+`START` を確かめてから触れば、1 都市目の取り込みが進んでいる間に pause が立ち、
+バッチは 1 都市目を終えたところで次の都市に進まず止まる。
 
 1 都市目が終わったところで、いったん見る。
 ここで見つかる不具合は全都市に及ぶので、148 都市を流し切ってからでは遅い。
@@ -195,9 +205,9 @@ nohup bash ~/reimport_watchdog.sh > /dev/null 2>&1 &
 
 ```bash
 cd "$PLATEAU_APP_DIR"
-[ -n "$PLATEAU_VENV" ] && . "$PLATEAU_VENV/bin/activate"
+[ -n "${PLATEAU_VENV:-}" ] && . "$PLATEAU_VENV/bin/activate"
 set -a; . "$PLATEAU_ENV_FILE"; set +a
-python3 plateau_coverage.py --init --postgres-url "$DATABASE_URL"
+"${PYTHON_BIN:-python3}" plateau_coverage.py --init --postgres-url "$DATABASE_URL"
 ```
 
 `.env` 相当の `PLATEAU_ENV_FILE` を読み込む前に実行すると、`$DATABASE_URL` が

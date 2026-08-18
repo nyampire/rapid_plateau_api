@@ -58,7 +58,15 @@ touch "$SHIPPED_TXT"
 # exit 2 はディスク不足の予約番号なので、運用者はディスクを疑って調べ始めるが
 # 実際にはディレクトリが無いだけ。後段の TARGETS の書き出し先も同じ
 # ディレクトリなので、ここで作っておけばそちらの保険にもなる。
-mkdir -p "$WORK_ROOT"
+# ただし set -e が無いので、mkdir -p 自体の失敗は放っておくと無視される。
+# 親が書けない・同名のファイルが既にあるなどで mkdir が失敗しても、
+# 後段の disk_kb "$WORK_ROOT" が exit 2 で落ちるだけになり、
+# 「ディレクトリが無いだけ」を「ディスク不足」と誤認させる同じ罠に落ちる。
+# 設定検査 (DISK_MIN_KB / EXPECTED_CITIES) と同じ exit 3 で、ここで止める。
+if ! mkdir -p "$WORK_ROOT"; then
+  say "ABORT: WORK_ROOT を作れない (値: ${WORK_ROOT})"
+  exit 3
+fi
 
 CODES=$(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | grep -c .)
 say "計画 $CODES 都市 (期待 $EXPECTED_CITIES)"

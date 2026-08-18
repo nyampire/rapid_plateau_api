@@ -217,3 +217,26 @@ def test_creates_work_root_before_checking_disk(env):
     assert r.returncode == 0, r.stdout + r.stderr
     assert env.called.read_text().split() == ['13402', '30406', '43213']
     assert missing_root.is_dir()
+
+
+def test_mkdir_failure_aborts_with_exit_3_not_disk_exit_2(env):
+    """WORK_ROOT を作れないときは exit 3 で止まり、exit 2 にはならない。
+
+    WORK_ROOT と同名の通常ファイルがあると mkdir -p は失敗する。
+    set -e が無いこのスクリプトでは、失敗を捕まえないと mkdir の失敗が
+    無視され、後段の disk_kb "$WORK_ROOT" が exit 2 で落ちる。それは
+    「ディレクトリを作れない」を「ディスク不足」に見せかける、
+    同じ誤誘導を条件だけ変えて再現してしまう。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    blocked_root = env.tmp / 'blocked_work_root'
+    blocked_root.write_text('mkdir -p を邪魔する通常ファイル\n')
+    env.run_env['SHIP_ENV'] = str(env.tmp / 'ship_blocked_root.env')
+    (env.tmp / 'ship_blocked_root.env').write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'WORK_ROOT="%s"' % env.tmp, 'WORK_ROOT="%s"' % blocked_root))
+
+    r = _run(env)
+
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert not env.called.exists()

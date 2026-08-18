@@ -224,6 +224,9 @@ SQL
 > インポーターは行政界 N03 フィルタ (source city の境界外に落ちる建物 = 隣接市との重複を削除する) でこれを参照するが、**存在しなくてよい**。
 > 無い場合はフィルタだけを警告付きでスキップし、取り込み自体は通常どおり完走する (重複が残るだけで、API 側の同等フィルタが効く)。
 > ダッシュボードを併設しない構成でも、この表を作る必要は無い。
+>
+> 148 都市を一括で入れる場合は、流し始める前に `deploy/README.md` の開始前確認を読む。
+> ダッシュボードを併設する構成では、そこで挙げている「148 都市すべてが行を持つこと」の確認が必須になる。
 
 ---
 
@@ -271,14 +274,28 @@ chmod 600 /opt/plateau-api/.env
 `plateau_downloader.py` が読みに行っていた配信元は停止している。
 現在は手元 (Mac) で CityGML を変換し、サーバへ送って取り込む経路を使う。
 
-手順、必要な環境変数、開始前に確かめる項目は `deploy/README.md` にまとめてある。
-ここでは重複させないので、そちらを参照して全都市の取り込みを終わらせる。
+第 1 段 (手元での変換と転送) の手順は `scripts/reimport/README.md` にまとめてある。
+第 2 段 (サーバでの取り込み) の手順、必要な環境変数、開始前に確かめる項目は `deploy/README.md` にまとめてある。
+ここでは重複させないので、両方を参照して全都市の取り込みを終わらせる。
+
+取り込みは 20 時間以上かかる。
+節 4 から節 6 (RapiD エディタのビルドとデプロイ、nginx 設定、SSL) はこの取り込みに依存しないので、完了を待たずに進めてよい。
+対応エリアのビューの作成だけは、取り込みが全都市終わってからにする。
 
 取り込みが終わったら、対応エリアのビューを作る。
 
 ```bash
+cd /opt/plateau-api
+source venv/bin/activate
+set -a
+source .env
+set +a
 python3 plateau_coverage.py --init --postgres-url "$DATABASE_URL"
 ```
+
+`$DATABASE_URL` は `.env` を読み込まないと空文字のままで、`--postgres-url ""` が
+環境変数 `DATABASE_URL` へのフォールバックより優先されてしまう。
+システムの `python3` には `psycopg2` が無いので、venv の有効化も必ず先に行う。
 
 `--init` はビューを作ったあとリフレッシュまで済ませる。
 このビューが無いと、RapiD エディタの対応エリア表示が出ない。
@@ -554,7 +571,8 @@ rsync -avz --delete --exclude '/dashboard/' dist/ user@vps:/var/www/rapid/
 1. 手元 (Mac) で `scripts/reimport/ship_city.sh <citycode>` を実行する。抽出、変換、転送までを 1 本で行う
 2. サーバで `~/reimport_one.sh <citycode>` を実行する。取り込みがその都市の既存データを消してから入れ直すので、別途 purge を呼ぶ必要は無い
 
-複数都市をまとめて流す場合や、環境変数、開始前の確認事項は `deploy/README.md` を参照する。
+`ship.env` の用意など手元側の詳細は `scripts/reimport/README.md` を参照する。
+複数都市をまとめて流す場合や、サーバ側の環境変数、開始前の確認事項は `deploy/README.md` を参照する。
 
 API の再起動は不要。DB を直接参照しているため。
 
@@ -564,8 +582,16 @@ API の再起動は不要。DB を直接参照しているため。
 都市ごとには行わず、一連の追加が終わったところで 1 回にまとめる。
 
 ```bash
+cd /opt/plateau-api
+source venv/bin/activate
+set -a
+source .env
+set +a
 python3 plateau_coverage.py --refresh --no-concurrent --postgres-url "$DATABASE_URL"
 ```
+
+`.env` を読み込む前に実行すると、`$DATABASE_URL` が空文字のまま渡ってしまう。
+システムの `python3` には `psycopg2` が無いので、venv の有効化も必ず先に行う。
 
 `--no-concurrent` を必ず付ける。
 省略すると CONCURRENTLY を選び、メモリの小さいサーバでは postgres が OOM で落ちる。

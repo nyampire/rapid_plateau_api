@@ -5,7 +5,7 @@ CityGML を自前で変換して都市を取り込み直すときに使う道具
 
 ## zip 全体は落とさない
 
-147 都市の CityGML zip は合計 **1,356 GB** ある。1 都市で 269 GB のものもある。
+148 都市の CityGML zip は合計 **1,356 GB** ある。1 都市で 269 GB のものもある。
 必要なのは `udx/bldg/*.gml` だけで、そこは全国合わせて **8.84 GB**（展開 168 GB、18,352 メッシュ）しかない。
 
 配信元は `Accept-Ranges: bytes` を返す。
@@ -18,7 +18,7 @@ Range で読む薄い層を 1 つ用意すれば足りる（`httpzip.py`）。
 
 ## 使い方
 
-`ckan_download_plan.csv` は 147 都市ぶんをコミットしてあるので、
+`ckan_download_plan.csv` は 148 都市ぶんをコミットしてあるので、
 既に載っている都市を取り出すだけなら手順 1 は要らない。
 
 ```bash
@@ -30,7 +30,7 @@ python3 build_download_plan.py 30406
 python3 build_download_plan.py
 
 # 2. 取得量とメッシュ数を見積もる (中身は落とさない)
-#    zip の大きさを問い合わせずに済ませるなら --no-size
+#    出力先を省略すると ./bldg_scan.json に書く
 python3 scan_bldg.py
 
 # 3. 建物データだけ取り出す
@@ -45,6 +45,67 @@ python3 extract_city.py 30406 ./work/30406
 既存データを自分で消す。
 purge を挟むと対応エリアの再計算まで走り、メモリの小さいサーバでは OOM する。
 
+## 第 1 段 (手元) の流し方
+
+`ship_city.sh` は 1 都市の取り出し、変換、転送を 1 本でまとめて行う。
+`ship_all.sh` はその都市を計画の一覧に沿って順に回す。
+第 1 段はこの 2 本を使うので、`extract_city.py` を直接叩く上の手順は普段は要らない。
+
+設定は `ship.env` から読む。
+
+```bash
+cp ship.env.example ship.env
+```
+
+`ship.env` は `JAVA_BIN`、`CITYGML_OSM_JAR`、`SHIP_HOST`、`SHIP_PATH` など、
+手元の環境と転送先に合わせて書き換える値を持つ。
+各項目の意味は `ship.env.example` のコメントに書いてある。
+`ship.env` 自体は `.gitignore` に入っているので、書き換えてもコミットされない。
+
+全都市を送るには `ship_all.sh` を起動する。
+
+```bash
+bash ship_all.sh
+```
+
+`shipped.txt` にある都市は飛ばすので、途中で止めても同じコマンドを再実行すれば続きから進む。
+1 都市の失敗では全体を止めない。
+ディスクが `DISK_MIN_KB` を割ったときだけ全体を止める。
+
+失敗した都市だけをやり直すときも、同じ `ship_all.sh` を再実行する。
+成功済みの都市は `shipped.txt` にあるので飛ばされ、失敗した都市だけが対象になる。
+
+`ship_all.sh` は最後に `reimport_targets_<日時>.txt` を作り、`SHIP_PATH` の親へ送る。
+ここまでが第 1 段で、この先はサーバ側の `deploy/README.md` に従う。
+
+## 終了コード
+
+`ship_all.sh` はどの都市が失敗したかを最後にまとめて出すが、個別の理由は終了コードで区別する。
+2 本で終了コードの意味が違うので、スクリプトごとに分けて示す。
+
+### `ship_city.sh`
+
+| コード | 意味 |
+|---|---|
+| 0 | 成功 |
+| 1 | `ship.env` が無い |
+| 2 | ディスク不足、または空き容量を読めない |
+| 10 | 取り出し (`extract_city.py`) の失敗。`.gml` が 1 つも無い場合を含む |
+| 11 | 変換 (`java`) の失敗、`.osm` の枚数不一致、空ファイル、閉じタグの欠落 |
+| 12 | 転送 (`rsync` / `ssh`) の失敗、または転送先の枚数を数えられないか一致しない |
+
+### `ship_all.sh`
+
+| コード | 意味 |
+|---|---|
+| 0 | 全都市成功 |
+| 1 | `ship.env` が無い、または失敗した都市が 1 つ以上ある (最終結果) |
+| 2 | ディスク不足、または空き容量を読めない |
+| 3 | 設定検査の失敗 (`DISK_MIN_KB` / `EXPECTED_CITIES` が数字でない)、`WORK_ROOT` を作れない、計画の件数が `EXPECTED_CITIES` と合わない |
+| 4 | 一覧 (`reimport_targets_<日時>.txt`) のサーバへの転送に失敗 |
+
+`ship_city.sh` の exit 2 (ディスク不足) は `ship_all.sh` にそのまま伝わり、全体を止める。
+
 ## ファイル
 
 | ファイル | 用途 |
@@ -53,12 +114,10 @@ purge を挟むと対応エリアの再計算まで走り、メモリの小さ�
 | `build_download_plan.py` | CKAN から都市ごとの CityGML zip の URL を集めて CSV に書く |
 | `scan_bldg.py` | 各 zip の中央ディレクトリを読み、建物データの量を数える |
 | `extract_city.py` | `udx/bldg/*.gml` だけを Range で取り出す |
-| `ckan_download_plan.csv` | 147 都市の URL 一覧。`build_download_plan.py` が作る |
+| `ckan_download_plan.csv` | 148 都市の URL 一覧。`build_download_plan.py` が作る |
 
-**対象は本来 148 都市で、この CSV には 1 つ足りない。**
-宇城市 43213 が、作成時点で再取り込み済みだったため除いてある。
-空のデータベースへ一から入れる場合は対象なので、`python3 build_download_plan.py 43213`
-で足してから使う。既存の 147 行は残る。
+CSV は 148 都市 (宇城市 43213 を含む) を全部カバーしている。
+都市を新しく足す、または URL を取り直すときは上の手順 1 を使う。
 
 ## CKAN の読み方で引っかかるところ
 

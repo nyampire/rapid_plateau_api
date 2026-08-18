@@ -1,6 +1,7 @@
 """reimport_batch.sh の一覧の受け取りと done.txt の照合を固定する。"""
 
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -29,6 +30,11 @@ def batch_env(tmp_path):
         'HOME': str(tmp_path),
         'REIMPORT_LOG_DIR': str(logs),
         'REIMPORT_ONE': str(one),
+        # 既定の plateau_importer2postgis.py のままだと、機械上の無関係な
+        # プロセスに引きずられて exit 5 になる。
+        # tmp_path 配下の存在しない名前にして pgrep が一致しないようにする。
+        # pgrep -f はこの値を拡張正規表現として扱うが、tmp_path にメタ文字は出ない。
+        'STRAY_IMPORT_PATTERN': str(tmp_path / 'no_stray_import_marker'),
     })
 
     class Env:
@@ -48,7 +54,7 @@ def test_batch_reads_the_list_given_as_an_argument(batch_env):
     targets.write_text('13402\n30406\n')
 
     r = subprocess.run(['bash', str(BATCH), str(targets)],
-                       env=batch_env.run_env, capture_output=True, text=True)
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert batch_env.called.read_text().split() == ['13402', '30406']
@@ -61,7 +67,7 @@ def test_batch_skips_cities_listed_in_done(batch_env):
     (batch_env.logs / 'done.txt').write_text('13402\n')
 
     r = subprocess.run(['bash', str(BATCH), str(targets)],
-                       env=batch_env.run_env, capture_output=True, text=True)
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert batch_env.called.read_text().split() == ['30406']
@@ -77,7 +83,7 @@ def test_missing_list_exits_6_with_no_list_status(batch_env):
     missing = batch_env.tmp / 'does_not_exist.txt'
 
     r = subprocess.run(['bash', str(BATCH), str(missing)],
-                       env=batch_env.run_env, capture_output=True, text=True)
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
     assert r.returncode == 6, r.stdout + r.stderr
     assert (batch_env.logs / 'batch_status').read_text().strip() == 'NO_LIST'
@@ -95,7 +101,7 @@ def test_empty_list_exits_6_with_empty_list_status(batch_env):
     targets.write_text('')
 
     r = subprocess.run(['bash', str(BATCH), str(targets)],
-                       env=batch_env.run_env, capture_output=True, text=True)
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
     assert r.returncode == 6, r.stdout + r.stderr
     assert (batch_env.logs / 'batch_status').read_text().strip() == 'EMPTY_LIST'
@@ -123,7 +129,7 @@ def test_batch_does_not_leak_stdin_to_the_child(batch_env):
     one.chmod(0o755)
 
     r = subprocess.run(['bash', str(BATCH), str(targets)],
-                       env=batch_env.run_env, capture_output=True, text=True)
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert batch_env.called.read_text().split() == ['13402', '30406', '43213']
@@ -150,7 +156,7 @@ def test_wrapper_exit_2_aborts_the_whole_batch(batch_env):
     one.chmod(0o755)
 
     r = subprocess.run(['bash', str(BATCH), str(targets)],
-                       env=batch_env.run_env, capture_output=True, text=True)
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
     assert r.returncode == 2, r.stdout + r.stderr
     assert (batch_env.logs / 'batch_status').read_text().strip() == 'DISK_ABORT'
@@ -169,7 +175,7 @@ def test_pause_file_stops_the_batch_with_paused_status(batch_env):
     (batch_env.tmp / 'reimport_pause').write_text('')
 
     r = subprocess.run(['bash', str(BATCH), str(targets)],
-                       env=batch_env.run_env, capture_output=True, text=True)
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert (batch_env.logs / 'batch_status').read_text().strip() == 'PAUSED'
@@ -186,7 +192,7 @@ def test_successful_city_is_appended_to_done_txt(batch_env):
     targets.write_text('13402\n')
 
     r = subprocess.run(['bash', str(BATCH), str(targets)],
-                       env=batch_env.run_env, capture_output=True, text=True)
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert (batch_env.logs / 'done.txt').read_text().splitlines() == ['13402']
@@ -205,7 +211,7 @@ def test_failed_city_is_appended_to_failed_txt_with_its_exit_code(batch_env):
     one.chmod(0o755)
 
     r = subprocess.run(['bash', str(BATCH), str(targets)],
-                       env=batch_env.run_env, capture_output=True, text=True)
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert (batch_env.logs / 'failed.txt').read_text().splitlines() == ['13402 9']
@@ -226,7 +232,10 @@ def test_stray_import_process_aborts_before_any_city_runs(batch_env):
     marker_script.chmod(0o755)
     batch_env.run_env['STRAY_IMPORT_PATTERN'] = str(marker_script)
 
-    proc = subprocess.Popen(['bash', str(marker_script)])
+    # start_new_session=True で bash を新しいプロセスグループの
+    # リーダーにする。sleep 30 はその子として同じグループに入るので、
+    # 後始末は bash 単体ではなくグループごと殺す。
+    proc = subprocess.Popen(['bash', str(marker_script)], start_new_session=True)
     try:
         deadline = time.time() + 10
         found = False
@@ -240,13 +249,18 @@ def test_stray_import_process_aborts_before_any_city_runs(batch_env):
         assert found, '見張り対象のプロセスが起動しなかった'
 
         r = subprocess.run(['bash', str(BATCH), str(targets)],
-                           env=batch_env.run_env, capture_output=True, text=True)
+                           env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
         assert r.returncode == 5, r.stdout + r.stderr
         assert (batch_env.logs / 'batch_status').read_text().strip() == 'STRAY_IMPORT'
         assert not batch_env.called.exists()
     finally:
-        proc.kill()
+        # bash だけを kill すると、その下の sleep 30 が孫として残る。
+        # プロセスグループごと SIGKILL して sleep まで確実に片付ける。
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         proc.wait(timeout=10)
 
 
@@ -262,7 +276,7 @@ def test_done_txt_match_is_the_whole_line_not_a_substring(batch_env):
     (batch_env.logs / 'done.txt').write_text('113402\n')
 
     r = subprocess.run(['bash', str(BATCH), str(targets)],
-                       env=batch_env.run_env, capture_output=True, text=True)
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert batch_env.called.exists(), '13402 が誤って skip された'

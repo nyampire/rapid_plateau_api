@@ -13,6 +13,7 @@ macOS に /proc は無いので、読み先のパスだけ差し替える。
 import os
 import platform
 import re
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -336,6 +337,11 @@ def test_disk_halt_kb_breach_pauses_and_exits_2(tmp_path):
     テストを動かす機械の実際の空き容量が、この極端な閾値を必ず下回ることを利用する。
     ディスク HALT の分岐そのものを消した実装や、
     閾値を無視して回し続ける実装はタイムアウトで検出する。
+
+    returncode と pause ファイルだけでは、AVAIL_KB が読めないときの門
+    (test_unreadable_avail_kb_pauses_and_exits_2) と区別できない。
+    どちらも trigger_pause 経由で同じ exit 2 になるため、
+    watchdog.log に残る理由の文字列まで見て門を取り違えていないか確かめる。
     """
     wrapper = _existing_wrapper(tmp_path)
     run_env = _config_env(tmp_path, INTERVAL='1', WRAPPER_PATH=str(wrapper),
@@ -346,6 +352,8 @@ def test_disk_halt_kb_breach_pauses_and_exits_2(tmp_path):
 
     assert r.returncode == 2, r.stdout + r.stderr
     assert (tmp_path / 'reimport_pause').exists()
+    log = (tmp_path / 'logs' / 'watchdog.log').read_text()
+    assert 'disk HALT' in log, log
 
 
 @pytest.mark.skipif(
@@ -362,7 +370,10 @@ def test_max_city_min_zero_kills_a_real_stuck_wrapper(tmp_path):
     wrapper.write_text('#!/usr/bin/env bash\nsleep 30\n')
     wrapper.chmod(0o755)
 
-    child = subprocess.Popen(['bash', str(wrapper), 'stuckcity'])
+    # start_new_session=True で bash を新しいプロセスグループの
+    # リーダーにする。sleep 30 はその子として同じグループに入るので、
+    # 後始末は bash 単体ではなくグループごと殺す。
+    child = subprocess.Popen(['bash', str(wrapper), 'stuckcity'], start_new_session=True)
     try:
         run_env = _config_env(tmp_path, INTERVAL='1', WRAPPER_PATH=str(wrapper),
                               MAX_CITY_MIN='0')
@@ -382,6 +393,10 @@ def test_max_city_min_zero_kills_a_real_stuck_wrapper(tmp_path):
             time.sleep(0.2)
         assert not alive, '打ち切りの kill -TERM が実物の子プロセスに届かなかった'
     finally:
-        if child.poll() is None:
-            child.kill()
+        # bash 自体は watchdog の kill -TERM で落ちても、その下の sleep 30 は
+        # 別プロセスとして残り得る。プロセスグループごと SIGKILL して片付ける。
+        try:
+            os.killpg(os.getpgid(child.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         child.wait(timeout=10)

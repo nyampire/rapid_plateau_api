@@ -70,7 +70,7 @@ def env(tmp_path):
 def _run(e, city='30406'):
     return subprocess.run(
         ['bash', str(SHIP_CITY), city],
-        env=e.run_env, capture_output=True, text=True)
+        env=e.run_env, capture_output=True, text=True, timeout=60)
 
 
 def test_extract_gate_fails_when_file_count_differs(env):
@@ -247,6 +247,81 @@ def test_convert_gate_fails_when_java_exits_nonzero(env):
     assert r.returncode == 11, r.stdout + r.stderr
 
 
+def test_convert_gate_fails_when_osm_count_is_less_than_gml_count(env):
+    """.osm の数が .gml より少なければ、変換の門で落ちる。
+
+    java が exit 0 で終わりつつ一部の .gml だけ変換して残りを書き出さない
+    失敗を模す。終了コードだけを見る実装ではこの不一致に気づけない。
+    """
+    _good_extract(env, n=3)
+    _stub(env.bin, 'java',
+          'printf "<osm><node/></osm>" > 53394500_bldg_6697_op.osm\n'
+          'printf "<osm><node/></osm>" > 53394501_bldg_6697_op.osm\n'
+          'exit 0')
+    _good_transfer(env)
+
+    r = _run(env)
+
+    assert r.returncode == 11, r.stdout + r.stderr
+
+
+def test_convert_gate_fails_on_empty_osm(env):
+    """空の .osm ファイルがあれば、専用のメッセージで変換の門に落ちる。
+
+    JVM が書き出しの途中で落ちると、0 バイトの .osm が 1 個として
+    数えられてしまう。件数の一致だけでは切り詰めも空ファイルも検出できない。
+    空ファイルの検査 (131-133 行) を削除しても、閉じタグの検査が
+    同じ exit 11 を返してしまい終了コードだけでは区別できない (brief 実測)。
+    メッセージまで確かめて、この検査自体が生きていることを固定する。
+    """
+    _good_extract(env, n=2)
+    _stub(env.bin, 'java',
+          'printf "<osm><node/></osm>" > 53394500_bldg_6697_op.osm\n'
+          'printf "" > 53394501_bldg_6697_op.osm\n'
+          'exit 0')
+    _good_transfer(env)
+
+    r = _run(env)
+
+    assert r.returncode == 11, r.stdout + r.stderr
+    assert '空のファイル' in r.stdout, r.stdout
+
+
+def test_disk_gate_fails_when_free_space_is_below_the_minimum(env):
+    """空き容量が DISK_MIN_KB を下回れば、ディスクの門で exit 2 になる。
+
+    fixture の ship.env は常に DISK_MIN_KB=0 なので、この門はこれまで
+    一度も実際の df の値と比べられていなかった。現実的にあり得ない
+    下限を設定して、比較そのものが生きていることを固定する。
+    """
+    ship_tight = env.tmp / 'ship_tight.env'
+    ship_tight.write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'DISK_MIN_KB=0\n', 'DISK_MIN_KB=999999999999\n'))
+    env.run_env['SHIP_ENV'] = str(ship_tight)
+
+    r = _run(env)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+
+
+def test_bail_moves_the_failed_work_dir_aside(env):
+    """落ちたとき、作業ディレクトリを消さずに <citycode>.failed.* へ退避する。
+
+    残したままだと、次の実行が前回の .gml や .osm を数えて誤って通ってしまう。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'echo \'{"city_code":"30406","meshes":0,"raw_bytes":0}\'')
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert not (env.work_root / '30406').exists()
+    failed_dirs = list(env.work_root.glob('30406.failed.*'))
+    assert len(failed_dirs) == 1, failed_dirs
+
+
 def test_transfer_gate_fails_when_remote_count_differs(env):
     """転送先の枚数が手元と違えば、転送の門で落ちる。"""
     _good_extract(env, n=2)
@@ -322,6 +397,104 @@ def test_gates_use_computed_counts_not_constants(env):
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert env.shipped.read_text().strip() == '30406 3'
+
+
+def test_transfer_invokes_rsync_and_ssh_with_expected_host_and_flags(env):
+    """rsync と ssh に渡る引数を実測する。
+
+    これまでの偽 rsync/ssh は何を渡されても exit 0 しか返さなかったので、
+    宛先を wronghost:/wrong/path/ に変えても、--include/--exclude を
+    全部消しても、ssh の問い合わせ先を別ホストにしても素通りしていた
+    (brief 実測)。ここでは受け取った引数をファイルへ記録させて、
+    宛先の形と主要なフラグ、ssh の問い合わせ先を直接確かめる。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    rsync_args = env.tmp / 'rsync_args.txt'
+    ssh_args = env.tmp / 'ssh_args.txt'
+    _stub(env.bin, 'rsync',
+          'printf \'%%s\\n\' "$@" > "%s"\n'
+          'exit 0' % rsync_args)
+    _stub(env.bin, 'ssh',
+          'printf \'%%s\\n\' "$@" > "%s"\n'
+          'echo 2' % ssh_args)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    rsync_argv = rsync_args.read_text().splitlines()
+    assert "--include=*.osm" in rsync_argv, rsync_argv
+    assert "--include=manifest.txt" in rsync_argv, rsync_argv
+    assert "--exclude=*" in rsync_argv, rsync_argv
+    assert rsync_argv[-1] == 'stubhost:/stub/import/30406/', rsync_argv
+    ssh_argv = ssh_args.read_text().splitlines()
+    assert ssh_argv[0] == 'stubhost', ssh_argv
+
+
+def test_transfer_actually_copies_files_and_manifest_matches_the_osm_count(env):
+    """偽 rsync に実際にコピーさせ、manifest.txt の中身を確かめる。
+
+    宛先を wronghost:/wrong/path/ に変える変異も、manifest.txt に
+    99 のような誤った数を書く変異も、コピー先で実際に検査しないと
+    気づけない (brief 実測)。SHIP_PATH を書き込める tmp のディレクトリに
+    差し替え、偽 rsync に $WORK から実際にコピーさせたうえで、
+    コピー先の manifest.txt が .osm の実枚数と一致することを確かめる。
+    """
+    _transfer_copies_for_real(env, remote_root=env.tmp / 'remote')
+    _good_extract(env, n=2)
+    _good_java(env)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    dst = env.tmp / 'remote' / '30406'
+    assert sorted(p.name for p in dst.glob('*.osm')) == [
+        '53394500_bldg_6697_op.osm', '53394501_bldg_6697_op.osm']
+    assert (dst / 'manifest.txt').read_text().strip() == '2'
+
+
+def test_transfer_manifest_matches_a_different_osm_count(env):
+    """manifest.txt の数値が .osm の実枚数から来ている。定数ではない。
+
+    上の 1 件だけだと、manifest.txt へ常に '2' を書く実装でも通ってしまう。
+    5 メッシュで一通り流して区別する。
+    """
+    _transfer_copies_for_real(env, remote_root=env.tmp / 'remote')
+    _good_extract(env, n=5)
+    _good_java(env)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    dst = env.tmp / 'remote' / '30406'
+    assert len(list(dst.glob('*.osm'))) == 5
+    assert (dst / 'manifest.txt').read_text().strip() == '5'
+
+
+def _transfer_copies_for_real(e, remote_root):
+    """SHIP_PATH を書き込める tmp のディレクトリに差し替え、
+    偽 rsync に $WORK から実際にコピーさせ、偽 ssh にその場所を
+    find させる。ssh の宛先ホストは stubhost のまま変えない。
+    """
+    remote_root.mkdir()
+    ship_env2 = e.tmp / 'ship_copy.env'
+    ship_env2.write_text(
+        (e.tmp / 'ship.env').read_text().replace(
+            'SHIP_PATH="/stub/import"', 'SHIP_PATH="%s"' % remote_root))
+    e.run_env['SHIP_ENV'] = str(ship_env2)
+    _stub(e.bin, 'rsync',
+          'argv=("$@")\n'
+          'n=${#argv[@]}\n'
+          'src="${argv[$((n-2))]}"\n'
+          'dst="${argv[$((n-1))]}"\n'
+          'dstpath="${dst#*:}"\n'
+          'mkdir -p "$dstpath"\n'
+          'cp "$src"*.osm "$dstpath"/ 2>/dev/null\n'
+          'cp "$src"manifest.txt "$dstpath"/\n'
+          'exit 0')
+    _stub(e.bin, 'ssh',
+          'cmd="$2"\n'
+          'bash -c "$cmd"')
 
 
 def test_ship_env_example_ship_path_does_not_expand_the_local_home():

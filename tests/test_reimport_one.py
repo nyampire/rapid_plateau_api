@@ -66,7 +66,8 @@ def _city(e, code='30406', osm=2, manifest=None):
 
 def _run(e, city='30406'):
     return subprocess.run(['bash', str(ONE), city],
-                          env=e.run_env, capture_output=True, text=True)
+                          env=e.run_env, capture_output=True, text=True,
+                          timeout=60)
 
 
 def test_missing_input_exits_with_dedicated_code(env):
@@ -116,6 +117,59 @@ def test_passes_citycode_and_no_zip_explicitly(env):
     args = env.called.read_text()
     assert '--citycode 30406' in args
     assert '--no-zip' in args
+
+
+def test_missing_manifest_exits_with_dedicated_code(env):
+    """manifest.txt が無ければ、専用の終了コードで落ちる。
+
+    manifest.txt の存在検査そのものを削除しても、後段の
+    `tr -d '[:space:]' < "$SRC/manifest.txt"` が need_int で結局
+    弾かれるので終了コードは変わらず、10 件すべてが緑のままだった
+    (brief 実測)。存在検査だけが出す「manifest.txt が無い」という
+    メッセージを確かめて、この検査自体が生きていることを固定する。
+    """
+    d = _city(env, osm=2)
+    (d / 'manifest.txt').unlink()
+
+    r = _run(env)
+
+    assert r.returncode == 13, r.stdout + r.stderr
+    assert 'manifest.txt が無い' in r.stdout, r.stdout
+
+
+def test_passes_data_dir_and_postgres_url(env):
+    """--data-dir と --postgres-url を取り込み器に渡す。
+
+    このテストは --citycode と --no-zip しか見ていなかったので、
+    --postgres-url "$DATABASE_URL" を丸ごと削除しても気づけなかった
+    (brief 実測)。DATABASE_URL は設定ファイル (PLATEAU_ENV_FILE) から
+    読むので、この行は設定の読み込みが効いていることを示す唯一の観測点になる。
+    """
+    d = _city(env, osm=2)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    args = env.called.read_text()
+    assert '--data-dir %s' % d in args, args
+    assert '--postgres-url postgresql://stub/stub' in args, args
+
+
+def test_postgres_url_comes_from_the_env_file_not_a_constant(env):
+    """--postgres-url の値が設定ファイルから来ている。定数ではない。
+
+    上の 1 件だけだと、同じ文字列を決め打ちで渡す実装でも通ってしまう。
+    別の DATABASE_URL を持つ設定ファイルに差し替えて区別する。
+    """
+    _city(env, osm=2)
+    other_env_file = env.tmp / 'env2'
+    other_env_file.write_text('DATABASE_URL=postgresql://stub/another\n')
+    env.run_env['PLATEAU_ENV_FILE'] = str(other_env_file)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert '--postgres-url postgresql://stub/another' in env.called.read_text()
 
 
 def test_input_survives_a_failed_import(env):

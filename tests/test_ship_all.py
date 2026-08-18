@@ -1,6 +1,7 @@
 """ship_all.sh の件数確認と再開を固定する。"""
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -71,7 +72,8 @@ def _write_plan(e, codes):
 
 def _run(e):
     return subprocess.run(['bash', str(SHIP_ALL)],
-                          env=e.run_env, capture_output=True, text=True)
+                          env=e.run_env, capture_output=True, text=True,
+                          timeout=60)
 
 
 def test_stops_when_plan_has_wrong_city_count(env):
@@ -86,6 +88,27 @@ def test_stops_when_plan_has_wrong_city_count(env):
 
     assert r.returncode == 3, r.stdout + r.stderr
     assert not env.called.exists()
+
+
+def test_expected_cities_reads_from_config_not_hardcoded(env):
+    """EXPECTED_CITIES は ship.env の値を読む。fixture の 3 に固定されていない。
+
+    fixture が常に EXPECTED_CITIES=3 なので、比較を
+    `[ "$CODES" -ne 3 ]` とリテラルに置き換えても他のテストは全部通って
+    しまう (brief 実測)。ship.env で 2 に変えた計画が 2 都市でも
+    通ることを確かめて、設定ファイルを実際に読んでいることを固定する。
+    """
+    _write_plan(env, ['13402', '30406'])  # 2 都市
+    ship_two = env.tmp / 'ship_two.env'
+    ship_two.write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'EXPECTED_CITIES=3\n', 'EXPECTED_CITIES=2\n'))
+    env.run_env['SHIP_ENV'] = str(ship_two)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.called.read_text().split() == ['13402', '30406']
 
 
 def test_processes_every_city_in_the_plan(env):
@@ -240,3 +263,53 @@ def test_mkdir_failure_aborts_with_exit_3_not_disk_exit_2(env):
 
     assert r.returncode == 3, r.stdout + r.stderr
     assert not env.called.exists()
+
+
+def test_target_list_transfer_uses_the_expected_destination(env):
+    """一覧の転送先が SHIP_HOST の SHIP_PATH の親であることを実測する。
+
+    fixture の偽 rsync は何を渡されても exit 0 を返すだけだったので、
+    一覧の宛先を別ホストにする変異も、この行そのものを `true` に
+    置き換える変異も素通りしていた (brief 実測)。引数を記録させて、
+    実際に渡った宛先を確かめる。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    rsync_args = env.tmp / 'rsync_args.txt'
+    _stub(env.bin, 'rsync',
+          'printf \'%%s\\n\' "$@" >> "%s"\n'
+          'exit 0' % rsync_args)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert rsync_args.exists(), '一覧の転送で rsync が呼ばれていない'
+    argv = rsync_args.read_text().splitlines()
+    assert argv, '一覧の転送で rsync に引数が渡っていない'
+    assert re.match(
+        r'^stubhost:/stub/import/\.\./reimport_targets_\d{8}-\d{6}\.txt$',
+        argv[-1]), argv
+
+
+def test_target_list_transfer_failure_aborts_with_exit_4(env):
+    """一覧の転送が失敗したら exit 4 で止まる。
+
+    fixture の偽 rsync は常に exit 0 を返すだけなので、失敗検出 (exit 4) を
+    丸ごと削除しても他のテストは全部通っていた (brief 実測)。
+    偽 rsync を呼び出し回数で数え、この 1 回きりの呼び出しを非 0 にして
+    確かめる。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    call_count = env.tmp / 'rsync_calls.txt'
+    _stub(env.bin, 'rsync',
+          'n=0\n'
+          '[ -f "%s" ] && n=$(cat "%s")\n'
+          'n=$((n + 1))\n'
+          'echo "$n" > "%s"\n'
+          'if [ "$n" -eq 1 ]; then exit 1; fi\n'
+          'exit 0' % (call_count, call_count, call_count))
+
+    r = _run(env)
+
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert env.called.read_text().split() == ['13402', '30406', '43213']
+    assert '一覧の転送が exit' in r.stdout

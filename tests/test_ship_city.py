@@ -4,6 +4,7 @@
 """
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 SHIP_CITY = REPO / 'scripts' / 'reimport' / 'ship_city.sh'
+SHIP_ENV_EXAMPLE = REPO / 'scripts' / 'reimport' / 'ship.env.example'
 
 
 def _stub(bin_dir: Path, name: str, body: str):
@@ -157,6 +159,41 @@ def test_extract_gate_uses_the_number_from_the_report(env):
     assert '報告 3 メッシュ、実ファイル 3' in r.stdout
 
 
+def test_extract_gate_fails_when_meshes_is_zero(env):
+    """meshes が 0 なら、.gml の数と一致していても取り出しの門で落ちる。
+
+    件数の一致だけを見る門は 0 == 0 を素通りさせる。extract_city.py は
+    udx/bldg/ で始まる .gml だけを拾うので、zip の内部配置が想定と違う版
+    では members が空になり、meshes: 0 で正常終了してしまう。shipped.txt に
+    成功として記録されると、ship_all.sh がその都市を以後永久に飛ばす。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'echo \'{"city_code":"30406","meshes":0,"raw_bytes":0}\'')
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert not env.shipped.exists()
+    assert '.gml が 1 つも無い' in r.stdout
+
+
+def test_extract_gate_passes_when_meshes_is_exactly_one(env):
+    """meshes が 1 なら、下限の門はここでは落ちない。
+
+    下限を 2 以上と書き違えた実装が紛れ込んでいないか、境界値で確かめる。
+    上のテストの 0 と対にして、下限がちょうど 1 であることを固定する。
+    """
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'echo \'{"city_code":"30406","meshes":1,"raw_bytes":5}\'')
+
+    r = _run(env)
+
+    assert r.returncode != 10, r.stdout + r.stderr
+
+
 def _good_extract(e, n=2):
     """n 個の .gml を書き出し、meshes=n を報告する偽 extract。"""
     body = 'mkdir -p "$2"\n'
@@ -285,3 +322,30 @@ def test_gates_use_computed_counts_not_constants(env):
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert env.shipped.read_text().strip() == '30406 3'
+
+
+def test_ship_env_example_ship_path_does_not_expand_the_local_home():
+    """ship.env.example の SHIP_PATH は手元の $HOME に展開されない形にする。
+
+    SHIP_PATH は転送先 (サーバ) のパスとして使われる。ship.env は手元の
+    bash が source するので $HOME を使うと手元のホームに展開されてしまい、
+    「SHIP_PATH はサーバの PLATEAU_IMPORT_DIR と同じ絶対パスにする」という
+    同じファイルの説明と矛盾する。
+    """
+    body = SHIP_ENV_EXAMPLE.read_text()
+    m = re.search(r'^SHIP_PATH="([^"]*)"$', body, re.M)
+    assert m, 'SHIP_PATH の既定値が見つからない'
+    assert 'HOME' not in m.group(1), m.group(1)
+
+
+def test_ship_env_example_ship_path_matches_the_other_placeholders():
+    """SHIP_PATH の既定値が、他の項目と同じ /path/to/... の形になっている。
+
+    JAVA_BIN や WORK_ROOT など、このファイルの他の絶対パスは全て
+    /path/to/... のプレースホルダで揃っている。SHIP_PATH だけ実行時に
+    展開される値のままだと、この形式に一致しない。
+    """
+    body = SHIP_ENV_EXAMPLE.read_text()
+    m = re.search(r'^SHIP_PATH="([^"]*)"$', body, re.M)
+    assert m, 'SHIP_PATH の既定値が見つからない'
+    assert m.group(1).startswith('/path/to/'), m.group(1)

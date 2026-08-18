@@ -12,6 +12,11 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 ONE = REPO / 'deploy' / 'reimport_one.sh'
 
+# manifest.txt 存在検査 (reimport_one.sh:100) が出す文言。
+# この文言を変えるとテストは赤くなる。
+# 赤くなったら、まずここと reimport_one.sh:100 を見比べて門が消えていないか確かめる。
+MISSING_MANIFEST_MESSAGE = 'manifest.txt が無い'
+
 
 @pytest.fixture
 def env(tmp_path):
@@ -134,7 +139,7 @@ def test_missing_manifest_exits_with_dedicated_code(env):
     r = _run(env)
 
     assert r.returncode == 13, r.stdout + r.stderr
-    assert 'manifest.txt が無い' in r.stdout, r.stdout
+    assert MISSING_MANIFEST_MESSAGE in r.stdout, r.stdout
 
 
 def test_passes_data_dir_and_postgres_url(env):

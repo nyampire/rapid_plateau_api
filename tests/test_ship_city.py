@@ -15,6 +15,11 @@ REPO = Path(__file__).resolve().parent.parent
 SHIP_CITY = REPO / 'scripts' / 'reimport' / 'ship_city.sh'
 SHIP_ENV_EXAMPLE = REPO / 'scripts' / 'reimport' / 'ship.env.example'
 
+# 空の .osm 検査 (ship_city.sh:139) が出す文言。
+# この文言を変えるとテストは赤くなる。
+# 赤くなったら、まずここと ship_city.sh:139 を見比べて門が消えていないか確かめる。
+EMPTY_OSM_MESSAGE = '空のファイル'
+
 
 def _stub(bin_dir: Path, name: str, body: str):
     """PATH に置く偽コマンドを作る。"""
@@ -219,6 +224,32 @@ def _good_transfer(e, remote_count=None):
     _stub(e.bin, 'ssh', n)
 
 
+def _transfer_copies_for_real(e, remote_root):
+    """SHIP_PATH を書き込める tmp のディレクトリに差し替え、
+    偽 rsync に $WORK から実際にコピーさせ、偽 ssh にその場所を
+    find させる。ssh の宛先ホストは stubhost のまま変えない。
+    """
+    remote_root.mkdir()
+    ship_env2 = e.tmp / 'ship_copy.env'
+    ship_env2.write_text(
+        (e.tmp / 'ship.env').read_text().replace(
+            'SHIP_PATH="/stub/import"', 'SHIP_PATH="%s"' % remote_root))
+    e.run_env['SHIP_ENV'] = str(ship_env2)
+    _stub(e.bin, 'rsync',
+          'argv=("$@")\n'
+          'n=${#argv[@]}\n'
+          'src="${argv[$((n-2))]}"\n'
+          'dst="${argv[$((n-1))]}"\n'
+          'dstpath="${dst#*:}"\n'
+          'mkdir -p "$dstpath"\n'
+          'cp "$src"*.osm "$dstpath"/ 2>/dev/null\n'
+          'cp "$src"manifest.txt "$dstpath"/\n'
+          'exit 0')
+    _stub(e.bin, 'ssh',
+          'cmd="$2"\n'
+          'bash -c "$cmd"')
+
+
 def test_convert_gate_fails_on_truncated_osm(env):
     """閉じタグの無い .osm があれば、変換の門で落ちる。"""
     _good_extract(env, n=2)
@@ -270,7 +301,7 @@ def test_convert_gate_fails_on_empty_osm(env):
 
     JVM が書き出しの途中で落ちると、0 バイトの .osm が 1 個として
     数えられてしまう。件数の一致だけでは切り詰めも空ファイルも検出できない。
-    空ファイルの検査 (131-133 行) を削除しても、閉じタグの検査が
+    空ファイルの検査 (138-140 行) を削除しても、閉じタグの検査が
     同じ exit 11 を返してしまい終了コードだけでは区別できない (brief 実測)。
     メッセージまで確かめて、この検査自体が生きていることを固定する。
     """
@@ -284,7 +315,7 @@ def test_convert_gate_fails_on_empty_osm(env):
     r = _run(env)
 
     assert r.returncode == 11, r.stdout + r.stderr
-    assert '空のファイル' in r.stdout, r.stdout
+    assert EMPTY_OSM_MESSAGE in r.stdout, r.stdout
 
 
 def test_disk_gate_fails_when_free_space_is_below_the_minimum(env):
@@ -303,6 +334,9 @@ def test_disk_gate_fails_when_free_space_is_below_the_minimum(env):
     r = _run(env)
 
     assert r.returncode == 2, r.stdout + r.stderr
+    # 「空き容量を読めない」ときも exit 2 なので、終了コードだけでは
+    # 下限との比較そのものを固定できない。メッセージまで確かめる。
+    assert 'ディスクが足りない' in r.stdout, r.stdout
 
 
 def test_bail_moves_the_failed_work_dir_aside(env):
@@ -405,8 +439,13 @@ def test_transfer_invokes_rsync_and_ssh_with_expected_host_and_flags(env):
     これまでの偽 rsync/ssh は何を渡されても exit 0 しか返さなかったので、
     宛先を wronghost:/wrong/path/ に変えても、--include/--exclude を
     全部消しても、ssh の問い合わせ先を別ホストにしても素通りしていた
-    (brief 実測)。ここでは受け取った引数をファイルへ記録させて、
-    宛先の形と主要なフラグ、ssh の問い合わせ先を直接確かめる。
+    (brief 実測)。--delete を外す変異も同様に素通りしていた。
+    --exclude='*' があっても --delete は転送先の余分な .osm や
+    manifest.txt を消す役目を持ち、メッシュ数が前回より減った都市を
+    送り直したときに古い .osm が残るのを防ぐ。偽 rsync は実コピーを
+    しないのでコピー側のテストでも捕まらない。ここでは受け取った
+    引数をファイルへ記録させて、宛先の形と主要なフラグ、ssh の
+    問い合わせ先を直接確かめる。
     """
     _good_extract(env, n=2)
     _good_java(env)
@@ -423,6 +462,7 @@ def test_transfer_invokes_rsync_and_ssh_with_expected_host_and_flags(env):
 
     assert r.returncode == 0, r.stdout + r.stderr
     rsync_argv = rsync_args.read_text().splitlines()
+    assert '--delete' in rsync_argv, rsync_argv
     assert "--include=*.osm" in rsync_argv, rsync_argv
     assert "--include=manifest.txt" in rsync_argv, rsync_argv
     assert "--exclude=*" in rsync_argv, rsync_argv
@@ -469,32 +509,6 @@ def test_transfer_manifest_matches_a_different_osm_count(env):
     dst = env.tmp / 'remote' / '30406'
     assert len(list(dst.glob('*.osm'))) == 5
     assert (dst / 'manifest.txt').read_text().strip() == '5'
-
-
-def _transfer_copies_for_real(e, remote_root):
-    """SHIP_PATH を書き込める tmp のディレクトリに差し替え、
-    偽 rsync に $WORK から実際にコピーさせ、偽 ssh にその場所を
-    find させる。ssh の宛先ホストは stubhost のまま変えない。
-    """
-    remote_root.mkdir()
-    ship_env2 = e.tmp / 'ship_copy.env'
-    ship_env2.write_text(
-        (e.tmp / 'ship.env').read_text().replace(
-            'SHIP_PATH="/stub/import"', 'SHIP_PATH="%s"' % remote_root))
-    e.run_env['SHIP_ENV'] = str(ship_env2)
-    _stub(e.bin, 'rsync',
-          'argv=("$@")\n'
-          'n=${#argv[@]}\n'
-          'src="${argv[$((n-2))]}"\n'
-          'dst="${argv[$((n-1))]}"\n'
-          'dstpath="${dst#*:}"\n'
-          'mkdir -p "$dstpath"\n'
-          'cp "$src"*.osm "$dstpath"/ 2>/dev/null\n'
-          'cp "$src"manifest.txt "$dstpath"/\n'
-          'exit 0')
-    _stub(e.bin, 'ssh',
-          'cmd="$2"\n'
-          'bash -c "$cmd"')
 
 
 def test_ship_env_example_ship_path_does_not_expand_the_local_home():

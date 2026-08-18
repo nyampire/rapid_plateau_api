@@ -19,12 +19,22 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 |---|---|
 | `PLATEAU_APP_DIR` | リポジトリの置き場所 |
 | `PLATEAU_VENV` | Python の仮想環境。省略すると `PYTHON_BIN` をそのまま使う |
-| `PLATEAU_ENV_FILE` | `DATABASE_URL` を含む設定 |
+| `PYTHON_BIN` | `reimport_one.sh` が呼ぶ Python の実行ファイル。既定 `python3` |
+| `PLATEAU_ENV_FILE` | `DATABASE_URL` を含む設定。実体が無いと `reimport_one.sh` は exit 15 で止まる |
 | `PLATEAU_IMPORT_DIR` | 手元から送られた `.osm` の置き場所。手元の `SHIP_PATH` と同じ絶対パスを指す |
-| `PLATEAU_LOG_DIR` | ログの置き場所。既定は `$HOME/reimport_logs` |
-| `THRESHOLD_KB` | 取り込み前に要求する空き。既定 5GB |
+| `PLATEAU_LOG_DIR` | `reimport_one.sh` が都市ごとのログを書く場所。既定は `$HOME/reimport_logs` |
+| `REIMPORT_LOG_DIR` | `reimport_batch.sh` と `reimport_watchdog.sh` が読み書きする場所 (`done.txt`、`failed.txt`、`summary.log`、`batch_status` など)。既定は `$HOME/reimport_logs` |
+| `THRESHOLD_KB` | `reimport_one.sh` が取り込み前に要求する空き (1K ブロック)。既定 5GB |
+| `DISK_WARN_KB` | watchdog がログに警告を出す空きの下限 (1K ブロック)。既定 5GB |
+| `DISK_HALT_KB` | watchdog が pause を立てて止める空きの下限 (1K ブロック)。既定 3GB |
+| `INTERVAL` | watchdog の監視間隔 (秒)。既定 60 |
+| `MAX_CITY_MIN` | 1 都市の取り込みがこれを超えて続いたら watchdog が打ち切る時間 (分)。既定 90 |
 | `WRAPPER_PATH` | watchdog が wrapper を見分けるために使う `reimport_one.sh` の絶対パス |
 | `REIMPORT_ONE` | バッチが呼ぶ `reimport_one.sh` の場所 |
+| `STRAY_IMPORT_PATTERN` | バッチが二重取り込み検出に使う `pgrep -f` の対象文字列。既定 `plateau_importer2postgis.py` |
+
+`PLATEAU_LOG_DIR` と `REIMPORT_LOG_DIR` は既定値が同じなので黙って一致しているように見えるが、別の変数である。
+表にある方だけを設定すると、都市ごとのログとバッチのログが別の場所へ散る。
 
 ## 手元との対応
 
@@ -44,6 +54,46 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 判定はコマンドラインの前方一致なので、ずれていると 90 分の打ち切りも `kill` も
 黙って効かなくなる。ログだけは正常に出続けるので気づけない。
 
+## 終了コード
+
+`summary.log` には `FAIL exit=13` のような形で終了コードだけが残る。
+3 本で終了コードの意味が違うので、スクリプトごとに分けて示す。
+同じ番号でも別のスクリプトでは別の意味を持つことがある。
+
+### `reimport_one.sh`
+
+| コード | 意味 |
+|---|---|
+| 0 | 成功 |
+| 2 | ディスク不足、または空き容量を読めない |
+| 13 | 入力が無い、`manifest.txt` が無いか数字でない、`.osm` の枚数が manifest と違う |
+| 14 | 取り込み器が exit 2 を返した写し (引数の不整合の可能性) |
+| 15 | `PLATEAU_ENV_FILE` の実体が無い |
+| それ以外 | 取り込み器 (`plateau_importer2postgis.py`) の終了コードをそのまま返す |
+
+### `reimport_batch.sh`
+
+| コード | 意味 |
+|---|---|
+| 0 | 全都市を回し終えた、または `PAUSE` を検出して止まった |
+| 2 | いずれかの都市で `reimport_one.sh` が exit 2 (ディスク不足) を返し、全体を止めた |
+| 5 | 二重取り込み検出 (`STRAY_IMPORT`)。都市の切れ目で `STRAY_IMPORT_PATTERN` に一致するプロセスが既に走っている |
+| 6 | 一覧が無い (`NO_LIST`)、または一覧が空か件数を数えられない (`EMPTY_LIST`) |
+
+`STRAY_IMPORT_PATTERN` の既定は `plateau_importer2postgis.py` で、環境変数で変えられる。
+
+### `reimport_watchdog.sh`
+
+| コード | 意味 |
+|---|---|
+| 0 | `batch_status` の出現を見て正常終了 |
+| 2 | ディスクが `DISK_HALT_KB` を割った、または空き容量を読めない |
+| 3 | 起動時の設定検査 (`INTERVAL` / `DISK_WARN_KB` / `DISK_HALT_KB` / `MAX_CITY_MIN` が数字でない)、または `WRAPPER_PATH` の実体が無い |
+| 4 | 1 都市の所要が `MAX_CITY_MIN` を超えて打ち切った |
+| 7 | 直近の失敗が 3 件以上連続した |
+
+設定検査の失敗 (3) と連続失敗による pause (7) は、どちらも pause を立てるが終了コードで区別できる。
+
 ## 148 都市を流す
 
 第 1 段 (手元) が終わってから始める。並行させない。
@@ -55,6 +105,10 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 3. `plateau_building_nodes.building_id` の外部キーが `ON DELETE CASCADE` である
 
 2 と 3 はどちらも、取り込み時にしか効かず後から掛け直せない。
+
+2 はダッシュボードを併設する構成では必須である。
+併設しない構成では、行政界フィルタが効かず隣接市との重複が残ることを承知のうえでスキップしてよい
+(`DEPLOY.md` の `dash_city_master` の説明も参照する)。
 
 **確かめる相手はこれから流す都市であって、いま入っている都市ではない。**
 新規構築のサーバは `plateau_buildings` が空なので、そこを起点にした問い合わせは
@@ -101,6 +155,9 @@ nohup bash ~/reimport_watchdog.sh > /dev/null 2>&1 &
 
 ## 1 都市目で止めて確かめる
 
+バッチを起動したらすぐ `touch ~/reimport_pause` する。
+バッチは都市の切れ目でこのファイルを見るので、1 都市目が終わったところで次へ進まずに止まる。
+
 1 都市目が終わったところで、いったん見る。
 ここで見つかる不具合は全都市に及ぶので、148 都市を流し切ってからでは遅い。
 
@@ -115,10 +172,18 @@ pause が立つと、watchdog 自身も終わる。
 
 ```bash
 rm ~/reimport_pause
-rm -f ~/reimport_logs/batch_status   # 消さないと watchdog が即座に終わる
 # 取り込みが残っていないことを確かめてから
 pgrep -f plateau_importer2postgis.py
-# バッチ、5 秒待って watchdog の順で起動し直す
+```
+
+起動し直す順序は最初と同じで、バッチを先に上げる。
+バッチが起動時に `batch_status` を消すので、手で消す必要は無い。
+
+```bash
+export REIMPORT_ONE=$HOME/reimport_one.sh
+nohup bash ~/reimport_batch.sh ~/reimport_targets_<日時>.txt > /dev/null 2>&1 &
+sleep 5   # バッチが batch_status を消すのを待つ
+nohup bash ~/reimport_watchdog.sh > /dev/null 2>&1 &
 ```
 
 `failed.txt` に載った都市は `done.txt` に入らないので、再実行で必ずやり直される。
@@ -129,8 +194,15 @@ pgrep -f plateau_importer2postgis.py
 都市ごとには走らせない。メモリの小さいサーバでは OOM する。
 
 ```bash
+cd "$PLATEAU_APP_DIR"
+[ -n "$PLATEAU_VENV" ] && . "$PLATEAU_VENV/bin/activate"
+set -a; . "$PLATEAU_ENV_FILE"; set +a
 python3 plateau_coverage.py --init --postgres-url "$DATABASE_URL"
 ```
+
+`.env` 相当の `PLATEAU_ENV_FILE` を読み込む前に実行すると、`$DATABASE_URL` が
+空文字のまま渡ってしまう。
+システムの `python3` には `psycopg2` が無いので、venv の有効化も先に行う。
 
 `--init` はビューを作ったあとリフレッシュまで済ませる。
 **続けて `--refresh` を叩かない。**ビューが populated になっているので、

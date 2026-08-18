@@ -56,6 +56,16 @@ need_int() {
   esac
 }
 
+# THRESHOLD_KB は ~/.profile から来るので、書き損じ (例: "5G") は
+# 148 都市すべてに等しく効く。[ "$AVAIL" -lt "$THRESHOLD_KB" ] は
+# integer expression expected でエラー終了し、if がそれを偽として扱うので
+# ディスクの門が消えたまま取り込みが走ってしまう。ship_all.sh /
+# reimport_watchdog.sh と同じ検査をここにも足す。
+if ! need_int "$THRESHOLD_KB"; then
+  echo "THRESHOLD_KB が数字でない (値: ${THRESHOLD_KB})" >&2
+  exit "$EXIT_CONFIG"
+fi
+
 # ログはプロセス置換で複製する。`{ ... } | tee` にすると本体がサブシェルで
 # 走り、そこでの IMPORT_PID=$! が親に伝わらない。watchdog が SIGTERM を
 # 送るのは親なので、親の cleanup は常に空の IMPORT_PID を見て空振りする。

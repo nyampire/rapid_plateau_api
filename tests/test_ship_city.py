@@ -511,6 +511,166 @@ def test_transfer_manifest_matches_a_different_osm_count(env):
     assert (dst / 'manifest.txt').read_text().strip() == '5'
 
 
+def test_missing_conversion_json_exits_1_before_running_anything(env):
+    """CONVERSION_JSON の実体が無ければ、何も走らせずに exit 1 で止まる。
+
+    ship.env.example の既定は /path/to/citygml-osm/conversion.json という
+    プレースホルダなので、書き換え漏れが起きる。: "${CONVERSION_JSON:?...}"
+    が保証するのは変数が設定されていることだけで実体の有無ではないので、
+    未検査だと変換の cp まで気づけない。
+    """
+    missing = env.tmp / 'does_not_exist.json'
+    ship_bad = env.tmp / 'ship_missing_conversion.env'
+    ship_bad.write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'CONVERSION_JSON="%s"' % (env.tmp / 'conversion.json'),
+            'CONVERSION_JSON="%s"' % missing))
+    env.run_env['SHIP_ENV'] = str(ship_bad)
+
+    r = _run(env)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
+def test_missing_citygml_osm_jar_exits_1_before_running_anything(env):
+    """CITYGML_OSM_JAR の実体が無ければ、何も走らせずに exit 1 で止まる。
+
+    CONVERSION_JSON と同じ理由で、未設定かどうかしか見ていないと
+    書き換え漏れに java の実行まで気づけない。
+    """
+    missing = env.tmp / 'does_not_exist.jar'
+    ship_bad = env.tmp / 'ship_missing_jar.env'
+    ship_bad.write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'CITYGML_OSM_JAR="%s"' % (env.tmp / 'fake.jar'),
+            'CITYGML_OSM_JAR="%s"' % missing))
+    env.run_env['SHIP_ENV'] = str(ship_bad)
+
+    r = _run(env)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
+def test_disk_min_kb_not_a_number_exits_1_before_the_disk_gate(env):
+    """DISK_MIN_KB が数字でなければ、比較へ進まず exit 1 で止まる。
+
+    [ "$AVAIL" -lt "$DISK_MIN_KB" ] は DISK_MIN_KB が数字でないと
+    integer expression expected でエラー終了し、if がそれを偽として扱う。
+    ディスクの門が「設定を書き損じたときに限って」消えるので、起動時に
+    need_int で検査して落とす。ship.env に DISK_MIN_KB="5GB" と書く
+    書き損じを模す。
+    """
+    ship_bad = env.tmp / 'ship_bad_disk.env'
+    ship_bad.write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'DISK_MIN_KB=0\n', 'DISK_MIN_KB=5GB\n'))
+    env.run_env['SHIP_ENV'] = str(ship_bad)
+
+    r = _run(env)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
+def test_work_root_mkdir_failure_exits_3_not_extract_failure(env):
+    """WORK_ROOT を作れないときは exit 3 で止まり、取り出しの失敗 (10) に化けない。
+
+    WORK_ROOT と同名の通常ファイルがあると mkdir -p は失敗する。結果を
+    見ずに進むと、この先の disk_kb や extract_stub がその場所へ書けずに
+    失敗し、「取り出しの失敗」に見せかけてしまう。ship_all.sh が同じ
+    mkdir の失敗に付けた exit 3 と揃える。
+    """
+    blocked_root = env.tmp / 'blocked_work_root'
+    blocked_root.write_text('mkdir -p を邪魔する通常ファイル\n')
+    ship_blocked = env.tmp / 'ship_blocked_root.env'
+    ship_blocked.write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'WORK_ROOT="%s"' % env.work_root, 'WORK_ROOT="%s"' % blocked_root))
+    env.run_env['SHIP_ENV'] = str(ship_blocked)
+
+    r = _run(env)
+
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
+def test_work_dir_creation_failure_exits_3(env):
+    """作業ディレクトリを作れない (退避も含む) ときは exit 3 で止まる。
+
+    WORK_ROOT を書き込み不可にすると、再試行のための mv や新規の mkdir が
+    失敗する。結果を見ずに進むと、前回の .gml や .osm を抱えたまま先へ
+    進む形に戻ってしまう。bail が退避で使う mv とは別物なので、ここでは
+    WORK_ROOT 自体の権限で再現する。
+    """
+    os.chmod(env.work_root, 0o555)
+    try:
+        r = _run(env)
+    finally:
+        os.chmod(env.work_root, 0o755)
+
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
+def test_convert_gate_fails_when_conversion_json_cannot_be_copied(env):
+    """conversion.json の複製に失敗すれば、変換の門で落ちる。
+
+    これまでの cp "$CONVERSION_JSON" "$WORK/conversion.json" は結果を
+    見ていなかったので、複製に失敗しても変換から記録まで全部通り、
+    既定の設定のまま走った変換器の出力が shipped.txt に成功として
+    記録されていた (brief 実測)。cp を失敗する偽物に差し替えて確かめる。
+    """
+    _good_extract(env, n=2)
+    _stub(env.bin, 'cp', 'exit 1')
+    _good_java(env)  # 呼ばれない想定。もし呼ばれたら bail が抜けている
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env)
+
+    assert r.returncode == 11, r.stdout + r.stderr
+    assert 'conversion.json を複製できない' in r.stdout, r.stdout
+    assert not env.shipped.exists()
+
+
+def test_convert_invokes_java_with_the_jar_and_records_conversion_json(env):
+    """java に渡る引数と、実行時の cwd に conversion.json があることを実測する。
+
+    これまでの偽 java は引数を一切見ずに *.gml から *.osm を書くだけ
+    だったので、-jar を消しても、1st を落としても、conversion.json の
+    複製を消しても緑のままだった (brief 実測)。既にある「偽 rsync に
+    引数を記録させる」テストと同じ形で、偽 java に argv と cwd の
+    conversion.json の有無を記録させる。
+    """
+    _good_extract(env, n=2)
+    java_args = env.tmp / 'java_args.txt'
+    conversion_seen = env.tmp / 'conversion_seen.txt'
+    body = (
+        "printf '%s\\n' \"$@\" > '" + str(java_args) + "'\n"
+        "if [ -f conversion.json ]; then\n"
+        "  echo yes > '" + str(conversion_seen) + "'\n"
+        "else\n"
+        "  echo no > '" + str(conversion_seen) + "'\n"
+        "fi\n"
+        "for f in *.gml; do\n"
+        "  printf \"<osm><node/></osm>\" > \"${f%.gml}.osm\"\n"
+        "done\n"
+        "exit 0"
+    )
+    _stub(env.bin, 'java', body)
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    java_argv = java_args.read_text().splitlines()
+    assert '-jar' in java_argv, java_argv
+    assert str(env.tmp / 'fake.jar') in java_argv, java_argv
+    assert java_argv[-1] == '1st', java_argv
+    assert conversion_seen.read_text().strip() == 'yes'
+
+
 def test_ship_env_example_ship_path_does_not_expand_the_local_home():
     """ship.env.example の SHIP_PATH は手元の $HOME に展開されない形にする。
 

@@ -24,17 +24,21 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 | `PLATEAU_IMPORT_DIR` | 手元から送られた `.osm` の置き場所。必須 (既定なし)。手元の `SHIP_PATH` と同じ絶対パスを指す |
 | `PLATEAU_LOG_DIR` | `reimport_one.sh` が都市ごとのログを書く場所。既定は `$HOME/reimport_logs` |
 | `REIMPORT_LOG_DIR` | `reimport_batch.sh` と `reimport_watchdog.sh` が読み書きする場所 (`done.txt`、`failed.txt`、`summary.log`、`batch_status` など)。既定は `$HOME/reimport_logs` |
-| `THRESHOLD_KB` | `reimport_one.sh` が取り込み前に要求する空き (1K ブロック)。既定 5GB |
+| `THRESHOLD_KB` | `reimport_one.sh` が取り込み前に要求する空き (1K ブロック)。既定 5GB。数字でないと exit 15 で止まる |
 | `DISK_WARN_KB` | watchdog がログに警告を出す空きの下限 (1K ブロック)。既定 5GB |
 | `DISK_HALT_KB` | watchdog が pause を立てて止める空きの下限 (1K ブロック)。既定 3GB |
 | `INTERVAL` | watchdog の監視間隔 (秒)。既定 60 |
 | `MAX_CITY_MIN` | 1 都市の取り込みがこれを超えて続いたら watchdog が打ち切る時間 (分)。既定 90 |
 | `WRAPPER_PATH` | watchdog が wrapper を見分けるために使う `reimport_one.sh` の絶対パス |
-| `REIMPORT_ONE` | バッチが呼ぶ `reimport_one.sh` の場所。既定 `$HOME/reimport_one.sh` |
+| `REIMPORT_ONE` | バッチが呼ぶ `reimport_one.sh` の場所。既定 `$HOME/reimport_one.sh`。実体が無いと exit 6 で止まる |
 | `STRAY_IMPORT_PATTERN` | バッチが二重取り込み検出に使う `pgrep -f` の対象文字列。既定 `plateau_importer2postgis.py` |
+| `EARLY_ABORT_FAILS` | バッチが連続失敗を早期に打ち切る閾値。既定 3、0 で無効。成功が 1 件も無いまま連続失敗が閾値に達すると exit 8 で止まる |
 
 `PLATEAU_LOG_DIR` と `REIMPORT_LOG_DIR` は既定値が同じなので黙って一致しているように見えるが、別の変数である。
 表にある方だけを設定すると、都市ごとのログとバッチのログが別の場所へ散る。
+
+`THRESHOLD_KB` は `PLATEAU_APP_DIR` の在る区画を測る。
+DB と入力が別ボリュームの構成では、ディスクの門がその区画しか見ていないことになるので別途見張ること。
 
 ## 手元との対応
 
@@ -69,8 +73,13 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 | 2 | ディスク不足、または空き容量を読めない |
 | 13 | 入力が無い、`manifest.txt` が無いか数字でない、`.osm` の枚数が manifest と違う |
 | 14 | 取り込み器が exit 2 を返した写し (引数の不整合の可能性) |
-| 15 | `PLATEAU_ENV_FILE` の実体が無い |
+| 15 | `PLATEAU_ENV_FILE` の実体が無い、または `THRESHOLD_KB` が数字でない |
+| 127 | `reimport_one.sh` 自体が見つからない。bash がコマンドを実行できないときの標準の終了コード |
+| 143 | watchdog による `SIGTERM` 打ち切り (128+15)。取り込み器ではなく watchdog が原因 |
 | それ以外 | 取り込み器 (`plateau_importer2postgis.py`) の終了コードをそのまま返す |
+
+127 と 143 は取り込み器の終了コードではない。
+`summary.log` に `FAIL exit=143` と出ても取り込み器を疑わないこと。
 
 ### `reimport_batch.sh`
 
@@ -79,7 +88,8 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 | 0 | 全都市を回し終えた、または `PAUSE` を検出して止まった |
 | 2 | いずれかの都市で `reimport_one.sh` が exit 2 (ディスク不足) を返し、全体を止めた |
 | 5 | 二重取り込み検出 (`STRAY_IMPORT`)。都市の切れ目で `STRAY_IMPORT_PATTERN` に一致するプロセスが既に走っている |
-| 6 | 一覧が無い (`NO_LIST`)、または一覧が空か件数を数えられない (`EMPTY_LIST`) |
+| 6 | 一覧が無い (`NO_LIST`)、一覧が空か件数を数えられない (`EMPTY_LIST`)、`REIMPORT_ONE` の実体が無い (`NO_WRAPPER`)、または `EARLY_ABORT_FAILS` が数字でない (`BAD_CONFIG`) |
+| 8 | 早期打ち切り (`EARLY_ABORT`)。成功が 1 件も無いまま連続失敗が `EARLY_ABORT_FAILS` に達した |
 
 `STRAY_IMPORT_PATTERN` の既定は `plateau_importer2postgis.py` で、環境変数で変えられる。
 
@@ -106,6 +116,7 @@ pause を立てる経路はディスク (2)、打ち切り (4)、連続失敗 (7
 1. `done.txt` と `failed.txt` が空である。過去の実行のぶんが残ると都市が飛ばされる
 2. 148 都市すべてが `dash_city_master` に行を持ち、`boundary_geom` が NULL でない
 3. `plateau_building_nodes.building_id` の外部キーが `ON DELETE CASCADE` である
+4. 一覧に載った都市の入力が `PLATEAU_IMPORT_DIR` に届いている
 
 2 と 3 はどちらも、取り込み時にしか効かず後から掛け直せない。
 
@@ -135,6 +146,15 @@ SQL
 -- ノードの外部キーが CASCADE か ('c' なら合格)
 SELECT confdeltype FROM pg_constraint
 WHERE conname = 'plateau_building_nodes_building_id_fkey';
+```
+
+4 を確かめずに始めると、一覧だけ届いて入力が届いていない状態のまま流してしまう。
+`REIMPORT_ONE` の実体はバッチが起動時に検査するが、入力の有無は検査しないので、
+1 都市目から「入力が無い」で数秒のうちに全都市が失敗し、`DONE` になる。
+
+```bash
+# 開始前: 一覧にあって入力が届いていない都市 (何も出なければ合格)
+comm -23 <(sort ~/reimport_targets_<日時>.txt) <(ls "$PLATEAU_IMPORT_DIR" | sort)
 ```
 
 流す。
@@ -197,6 +217,17 @@ nohup bash ~/reimport_watchdog.sh > /dev/null 2>&1 &
 ```
 
 `failed.txt` に載った都市は `done.txt` に入らないので、再実行で必ずやり直される。
+
+## 終わったことを確かめる
+
+`failed.txt` に載った都市は目に付くが、バッチが途中で落ちて一覧の後半に
+一度も到達しなかった都市は `failed.txt` にも `done.txt` にも現れないまま消える。
+一覧の件数と `done.txt` の行数が一致したかを、`DONE` を見たあとに必ず確かめる。
+
+```bash
+# 終端: 一覧にあって done.txt に無い都市 (何も出なければ合格)
+comm -23 <(sort ~/reimport_targets_<日時>.txt) <(sort "$REIMPORT_LOG_DIR/done.txt")
+```
 
 ## 全部終わったあと
 

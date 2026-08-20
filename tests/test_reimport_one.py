@@ -17,6 +17,11 @@ ONE = REPO / 'deploy' / 'reimport_one.sh'
 # 赤くなったら、まずここと reimport_one.sh:100 を見比べて門が消えていないか確かめる。
 MISSING_MANIFEST_MESSAGE = 'manifest.txt が無い'
 
+# 退避が起きたことを運用者が知る唯一の signal (reimport_one.sh の rm -rf の前)。
+# 「退避できない」(異常系) の行にも「前回の入力を」までは共通するので、
+# 正常系の行だけを一意に拾える末尾側の文言を使う。
+STALE_RETENTION_MESSAGE = 'へ退避する'
+
 
 @pytest.fixture
 def env(tmp_path):
@@ -401,14 +406,25 @@ def test_incoming_wins_and_old_src_is_retained(env):
     """両方あるとき、新しい .incoming を採り、古い <都市> を .stale へ退避する。
 
     枚数を 2 種類 (2 と 5) 使い、どちらが取り込まれたかを manifest で見分ける。
+
+    取り込みを成功させると、I-3 により ${SRC}.stale ごと消えて事後に
+    確かめられなくなる。ここでは退避そのものの検証に集中したいので、
+    取り込み器を失敗させて退避直後の状態を残す。成功時にも退避が消える
+    ことは test_stale_removed_after_a_successful_reimport で別途確かめる。
     """
     _city(env, osm=5)
     _incoming(env, osm=2)
+    # called.txt には引数を残しつつ失敗させる (呼ばれた引数の検証のため)
+    env.stub.write_text(
+        'import sys, pathlib\n'
+        'pathlib.Path(%r).write_text(" ".join(sys.argv[1:]))\n'
+        'sys.exit(7)\n' % str(env.called)
+    )
 
     r = _run(env)
 
-    assert r.returncode == 0, r.stdout + r.stderr
-    # 古い方 (5 枚) が退避され、新しい方 (2 枚) が取り込まれた
+    assert r.returncode == 7, r.stdout + r.stderr
+    # 古い方 (5 枚) が退避され、新しい方 (2 枚) が確定した
     stale = env.import_dir / '30406.stale'
     assert stale.is_dir()
     assert stale.joinpath('manifest.txt').read_text().strip() == '5'
@@ -416,6 +432,8 @@ def test_incoming_wins_and_old_src_is_retained(env):
     # 取り込み器には確定後のパスが渡る
     assert env.called.read_text().split()[0:2] == ['--data-dir',
                                                    str(env.import_dir / '30406')]
+    # 退避が起きたことがログから分かる (I-4)
+    assert STALE_RETENTION_MESSAGE in r.stdout, r.stdout
 
 
 def test_stale_is_replaced_not_accumulated(env):
@@ -423,19 +441,110 @@ def test_stale_is_replaced_not_accumulated(env):
 
     サーバの空き容量の門は 5GB が既定で、1 都市の入力は最大 4.4GB ある。
     退避を積むとこの門に当たる。
+
+    取り込みを成功させると、I-3 により ${SRC}.stale ごと消えて事後に
+    確かめられなくなるので、取り込み器を失敗させて退避直後の状態を残す。
     """
     old = env.import_dir / '30406.stale'
     old.mkdir()
     (old / 'ancient.osm').write_text('<osm/>')
     _city(env, osm=5)
     _incoming(env, osm=2)
+    env.stub.write_text('import sys\nsys.exit(7)\n')
+
+    r = _run(env)
+
+    assert r.returncode == 7, r.stdout + r.stderr
+    stale_dirs = sorted(p.name for p in env.import_dir.glob('30406.stale*'))
+    assert stale_dirs == ['30406.stale'], stale_dirs
+    assert not (env.import_dir / '30406.stale' / 'ancient.osm').exists()
+
+
+def test_aborts_when_the_old_input_cannot_be_retained(env):
+    """前回の入力を退避できないなら、確定を諦めて中断する。
+
+    ${SRC}.stale を「中身のあるディレクトリ + chmod 555」にすると、
+    rm -rf も (それに続く) mv も同じ理由 (書き込み不可) で失敗する。
+    ここで検査を外すと、mv "$INCOMING" "$SRC" が $SRC (まだ古いまま) の
+    中へ入れ子で成功し、枚数の門は古い .osm と古い manifest.txt を
+    突き合わせて一致するので、古いデータを取り込んだまま exit 0 になる。
+    """
+    stale = env.import_dir / '30406.stale'
+    stale.mkdir()
+    (stale / 'locked.osm').write_text('<osm/>')
+    os.chmod(stale, 0o555)
+    _city(env, osm=5)
+    _incoming(env, osm=2)
+    try:
+        r = _run(env)
+        assert r.returncode == 13, r.stdout + r.stderr
+        assert not env.called.exists(), '確定できていないのに取り込みが走った'
+    finally:
+        os.chmod(stale, 0o755)
+
+
+def test_aborts_when_the_stale_rename_itself_fails(env):
+    """退避の rm -rf 自体は素通りしても、mv "$SRC" "${SRC}.stale" が
+    失敗すれば中断する。
+
+    上の test_aborts_when_the_old_input_cannot_be_retained は
+    ${SRC}.stale を丸ごと書き込み不可にするので、rm -rf が失敗した時点の
+    検査 (I-2) が先に引っかかり、この mv 自体の検査 (I-1) を通らずに
+    中断してしまう。mv だけの失敗を切り分けるため、${SRC}.stale は
+    作らず (rm -rf は無を消すだけで何もせず成功する)、PLATEAU_IMPORT_DIR
+    自体を書き込み不可にして rename 操作そのものを失敗させる。
+    """
+    _city(env, osm=5)
+    _incoming(env, osm=2)
+    os.chmod(env.import_dir, 0o555)
+    try:
+        r = _run(env)
+        assert r.returncode == 13, r.stdout + r.stderr
+        assert not env.called.exists(), '確定できていないのに取り込みが走った'
+    finally:
+        os.chmod(env.import_dir, 0o755)
+
+
+def test_aborts_when_the_old_retention_cannot_be_fully_cleared(env):
+    """rm -rf "${SRC}.stale" が消しきれなければ、退避せず中断する。
+
+    ${SRC}.stale の中に chmod 000 のサブディレクトリを仕込むと、
+    rm -rf はそこだけ消せず exit 1 になるが、${SRC}.stale 自体は
+    書き込み可能なままなので、続く mv "$SRC" "${SRC}.stale" は
+    ${SRC}.stale/30406/ へ入れ子で成功してしまう (レビュアが mv exit=0 と
+    実測した状態)。中身は壊れないが、「日時を付けず 1 件だけ持つ」という
+    退避の前提が入れ子で破れ、ディスクを積み続ける。
+    rm -rf の結果を確かめて落とす (I-2)。
+    """
+    stale = env.import_dir / '30406.stale'
+    locked = stale / 'locked'
+    locked.mkdir(parents=True)
+    (locked / 'x.osm').write_text('<osm/>')
+    os.chmod(locked, 0o000)
+    _city(env, osm=5)
+    _incoming(env, osm=2)
+    try:
+        r = _run(env)
+        assert r.returncode == 13, r.stdout + r.stderr
+        assert not env.called.exists(), '退避を消しきれないのに取り込みが走った'
+    finally:
+        os.chmod(locked, 0o755)
+
+
+def test_stale_removed_after_a_successful_reimport(env):
+    """やり直し経路を通って取り込みが成功したら、<都市>.stale も消す。
+
+    退避が意味を持つのは落ちてから取り込み直すまでの間だけで、
+    取り込みが通った時点で証拠としての値打ちが無くなり、
+    ディスクだけを占め続ける (I-3)。
+    """
+    _city(env, osm=5)
+    _incoming(env, osm=2)
 
     r = _run(env)
 
     assert r.returncode == 0, r.stdout + r.stderr
-    stale_dirs = sorted(p.name for p in env.import_dir.glob('30406.stale*'))
-    assert stale_dirs == ['30406.stale'], stale_dirs
-    assert not (env.import_dir / '30406.stale' / 'ancient.osm').exists()
+    assert not (env.import_dir / '30406.stale').exists()
 
 
 def test_aborts_when_neither_exists(env):
@@ -451,20 +560,33 @@ def test_resend_during_import_does_not_touch_the_claimed_input(env):
 
     取り込み器の偽物を、走っている最中に .incoming へ書き込む形にする。
     確定済みの <都市> の中身が変わらないことを、取り込み器自身に数えさせる。
+
+    以前は $SRC の前後比較 (before == after) しか見ていなかったので、
+    確定を rename ではなく cp -R (.incoming を残す複製) に置き換えても
+    通ってしまった (brief 実測)。$SRC が別ディレクトリな以上、.incoming
+    へ書き足しても $SRC には影響しないため、この比較だけでは
+    「rename で確定した」ことを示せない。確定が rename であることの
+    直接の証拠は「取り込みが始まった時点で .incoming/<都市> が
+    もう存在しない」ことなので、それも取り込み器自身に確かめさせる。
     """
     _incoming(env, osm=2)
     env.stub.write_text(
         'import pathlib, sys, os\n'
         'src = pathlib.Path(sys.argv[sys.argv.index("--data-dir") + 1])\n'
+        'inc = src.parent / ".incoming" / "30406"\n'
+        # rename で確定していれば、取り込みが始まった時点で .incoming/30406 は
+        # 消えているはず。cp -R (複製) だと元のまま残る。
+        'claimed_by_rename = not inc.exists()\n'
         'before = sorted(p.name for p in src.glob("*.osm"))\n'
         # 取り込み中に送り直しが起きたことにする
-        'inc = src.parent / ".incoming" / "30406"\n'
         'inc.mkdir(parents=True, exist_ok=True)\n'
         '(inc / "99999999_bldg_6697_op.osm").write_text("<osm/>")\n'
         'after = sorted(p.name for p in src.glob("*.osm"))\n'
-        'pathlib.Path(%r).write_text(repr((before, after)))\n'
-        'sys.exit(0 if before == after else 1)\n' % str(env.called))
+        'pathlib.Path(%r).write_text(repr((claimed_by_rename, before, after)))\n'
+        'sys.exit(0 if (claimed_by_rename and before == after) else 1)\n'
+        % str(env.called))
 
     r = _run(env)
 
-    assert r.returncode == 0, r.stdout + r.stderr + env.called.read_text()
+    assert r.returncode == 0, r.stdout + r.stderr + (
+        env.called.read_text() if env.called.exists() else '(called.txt 無し)')

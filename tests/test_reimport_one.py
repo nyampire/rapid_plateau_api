@@ -547,6 +547,59 @@ def test_stale_removed_after_a_successful_reimport(env):
     assert not (env.import_dir / '30406.stale').exists()
 
 
+def test_rejects_a_non_5_digit_citycode(env):
+    """citycode が 5 桁の数字でなければ、専用の終了コードで落ちる。
+
+    $CITY から組み立てる rm -rf や mv がこのブランチで 1 本から 2 本に
+    増えたので、".." のような値が渡ると被害はサーバ側で最大になる。
+
+    検査対象の入力は 6 桁 (304060) にする。".." だと検査を外しても
+    manifest.txt が見つからず別の理由で同じ exit 13 になり、この検査
+    自体が効いているかを固定できない (brief 実測)。6 桁の入力は
+    ディレクトリを実在させれば検査なしでは普通に成功してしまうので、
+    落ちること自体がこの検査の効果だと言える。
+    """
+    _city(env, code='304060', osm=2)
+
+    r = _run(env, city='304060')
+
+    assert r.returncode == 13, r.stdout + r.stderr
+
+
+def test_accepts_a_5_digit_citycode(env):
+    """5 桁の数字はそのまま通る。"""
+    _city(env, code='30406', osm=2)
+
+    r = _run(env, city='30406')
+
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_stale_left_after_success_warns_but_does_not_abort(env):
+    """取り込みが成功したあとに ${SRC}.stale を消せなくても、中断しない。
+
+    取り込みは既に成功しているので、ここで exit させると成功した取り込みを
+    失敗として記録してしまう。警告を出すだけで進む。
+    """
+    d = _city(env, osm=5)
+    _incoming(env, osm=2)
+    # やり直し経路 (古い <都市> を .stale へ退避) を通す。退避のもとになる
+    # 旧 SRC の中に権限で消せないサブディレクトリを仕込んでおくと、
+    # rename 後の ${SRC}.stale でも同じ場所が消せないまま残る。
+    locked = d / 'locked'
+    locked.mkdir()
+    (locked / 'x.osm').write_text('<osm/>')
+    os.chmod(locked, 0o000)
+    try:
+        r = _run(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert (env.import_dir / '30406.stale').exists()
+        assert '消せずに残った' in r.stdout, r.stdout
+    finally:
+        # 退避 (rename) で locked は import_dir/30406.stale/locked へ移っている。
+        os.chmod(env.import_dir / '30406.stale' / 'locked', 0o755)
+
+
 def test_aborts_when_neither_exists(env):
     """どちらも無ければ従来どおり exit 13。"""
     r = _run(env)

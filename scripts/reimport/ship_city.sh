@@ -8,6 +8,18 @@
 set -uo pipefail
 
 CITY="${1:?citycode required}"
+
+# $CITY はこのあと WORK_ROOT/$CITY の rm -rf や mv、リモートの mkdir -p の
+# 組み立てに使う。現実の経路はすべて 5 桁の数字だが、検査しないまま組み立てると
+# ".." のような値が渡ったときの被害が (特にリモート側で) 最大になる。
+case "$CITY" in
+  [0-9][0-9][0-9][0-9][0-9]) ;;
+  *)
+    echo "citycode の形式が違う (5 桁の数字である必要がある): $CITY" >&2
+    exit 1
+    ;;
+esac
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${SHIP_ENV:=$HERE/ship.env}"
@@ -70,7 +82,7 @@ prune_retained() {
   if [ "$KEEP_RETAINED_DIRS" -eq 0 ]; then
     return 0
   fi
-  local d ts line
+  local d stamp line
   local -a entries=()
   local skipped=0
   shopt -s nullglob
@@ -79,12 +91,12 @@ prune_retained() {
     # nullglob そのものではなく、このガードである
     # (nullglob が無いと未展開のリテラルがそのまま渡る)。
     [ -d "$d" ] || continue
-    ts="${d##*.}"
-    case "$ts" in
+    stamp="${d##*.}"
+    case "$stamp" in
       [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
       *) skipped=$((skipped + 1)); continue ;;
     esac
-    entries+=("$ts"$'\t'"$d")
+    entries+=("$stamp"$'\t'"$d")
   done
   shopt -u nullglob
   # 形式外の名前は消さない判断自体は正しいが、黙って残ると運用者に伝わらない。

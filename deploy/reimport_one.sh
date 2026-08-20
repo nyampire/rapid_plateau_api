@@ -17,16 +17,27 @@ set -uo pipefail
 
 CITY="${1:?citycode required}"
 
+EXIT_DISK=2
+EXIT_INPUT=13
+EXIT_CONFIG=15
+
+# $CITY はこのあと rm -rf / mv / リモートの mkdir -p の組み立てに使う。
+# 現実の経路はすべて 5 桁の数字だが、検査しないまま "$PLATEAU_IMPORT_DIR/$CITY" を
+# 作ると、".." のような値が渡ったときの被害がサーバ側で最大になる。
+case "$CITY" in
+  [0-9][0-9][0-9][0-9][0-9]) ;;
+  *)
+    echo "citycode の形式が違う (5 桁の数字である必要がある): $CITY" >&2
+    exit "$EXIT_INPUT"
+    ;;
+esac
+
 : "${PLATEAU_APP_DIR:?PLATEAU_APP_DIR が未設定}"
 : "${PLATEAU_ENV_FILE:?PLATEAU_ENV_FILE が未設定}"
 : "${PLATEAU_IMPORT_DIR:?PLATEAU_IMPORT_DIR が未設定}"
 : "${PLATEAU_LOG_DIR:=$HOME/reimport_logs}"
 : "${PYTHON_BIN:=python3}"
 : "${THRESHOLD_KB:=5242880}"
-
-EXIT_DISK=2
-EXIT_INPUT=13
-EXIT_CONFIG=15
 
 # : "${PLATEAU_ENV_FILE:?...}" が保証するのは変数が設定されていることだけで、
 # ファイルの実在ではない。無いまま進むと後段の `. "$PLATEAU_ENV_FILE"` が
@@ -204,6 +215,12 @@ trap cleanup EXIT
   # 取り込みが通った時点で証拠としての役目は終わり、消さずに残すと
   # ディスクだけを (5GB の門と同じ土俵で) 占め続ける。
   rm -rf "${SRC}.stale"
+  # rm -rf の結果は見ない。取り込みは既に成功しているので、ここで中断すると
+  # 成功した取り込みを失敗として記録してしまう。消し切れなかったときは
+  # 警告だけ出して、次回以降の空き容量で気づけるようにする。
+  if [ -e "${SRC}.stale" ]; then
+    echo "[$(ts)] [$CITY] 警告: ${SRC}.stale を消せずに残った (取り込みは成功済みなので続行する)"
+  fi
   echo "[$(ts)] [$CITY] 空き $(disk_kb "$PLATEAU_APP_DIR") KB"
   echo "[$(ts)] [$CITY] === DONE ==="
 }

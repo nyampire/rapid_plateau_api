@@ -358,3 +358,113 @@ def test_existing_env_file_does_not_use_the_config_code(env):
 
     assert r.returncode != 15, r.stdout + r.stderr
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def _incoming(e, code='30406', osm=2, manifest=None):
+    """送る側が置く受け口 .incoming/<都市>/ を作る。"""
+    d = e.import_dir / '.incoming' / code
+    d.mkdir(parents=True)
+    for i in range(osm):
+        (d / ('5339450%d_bldg_6697_op.osm' % i)).write_text('<osm/>')
+    (d / 'manifest.txt').write_text(str(osm if manifest is None else manifest) + '\n')
+    return d
+
+
+def test_claims_incoming_when_only_incoming_exists(env):
+    """.incoming だけあるとき、rename して取り込む。"""
+    inc = _incoming(env, osm=2)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not inc.exists()
+    assert env.called.read_text().split()[0:2] == ['--data-dir',
+                                                   str(env.import_dir / '30406')]
+
+
+def test_uses_src_directly_when_only_src_exists(env):
+    """<都市> だけあるとき、rename せずそのまま取り込む。
+
+    確定したあとに落ちた回の再実行がこの経路になる。
+    ここで止めると、その都市は手で片付けるまで何度でも失敗し続ける。
+    """
+    _city(env, osm=3)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.called.read_text().split()[0:2] == ['--data-dir',
+                                                   str(env.import_dir / '30406')]
+
+
+def test_incoming_wins_and_old_src_is_retained(env):
+    """両方あるとき、新しい .incoming を採り、古い <都市> を .stale へ退避する。
+
+    枚数を 2 種類 (2 と 5) 使い、どちらが取り込まれたかを manifest で見分ける。
+    """
+    _city(env, osm=5)
+    _incoming(env, osm=2)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    # 古い方 (5 枚) が退避され、新しい方 (2 枚) が取り込まれた
+    stale = env.import_dir / '30406.stale'
+    assert stale.is_dir()
+    assert stale.joinpath('manifest.txt').read_text().strip() == '5'
+    assert not (env.import_dir / '.incoming' / '30406').exists()
+    # 取り込み器には確定後のパスが渡る
+    assert env.called.read_text().split()[0:2] == ['--data-dir',
+                                                   str(env.import_dir / '30406')]
+
+
+def test_stale_is_replaced_not_accumulated(env):
+    """<都市>.stale が既にあっても、日時を増やさず置き換える。
+
+    サーバの空き容量の門は 5GB が既定で、1 都市の入力は最大 4.4GB ある。
+    退避を積むとこの門に当たる。
+    """
+    old = env.import_dir / '30406.stale'
+    old.mkdir()
+    (old / 'ancient.osm').write_text('<osm/>')
+    _city(env, osm=5)
+    _incoming(env, osm=2)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    stale_dirs = sorted(p.name for p in env.import_dir.glob('30406.stale*'))
+    assert stale_dirs == ['30406.stale'], stale_dirs
+    assert not (env.import_dir / '30406.stale' / 'ancient.osm').exists()
+
+
+def test_aborts_when_neither_exists(env):
+    """どちらも無ければ従来どおり exit 13。"""
+    r = _run(env)
+
+    assert r.returncode == 13, r.stdout + r.stderr
+    assert '入力が無い' in r.stdout
+
+
+def test_resend_during_import_does_not_touch_the_claimed_input(env):
+    """確定後に .incoming へ送り直しても、取り込み中の入力は変わらない。
+
+    取り込み器の偽物を、走っている最中に .incoming へ書き込む形にする。
+    確定済みの <都市> の中身が変わらないことを、取り込み器自身に数えさせる。
+    """
+    _incoming(env, osm=2)
+    env.stub.write_text(
+        'import pathlib, sys, os\n'
+        'src = pathlib.Path(sys.argv[sys.argv.index("--data-dir") + 1])\n'
+        'before = sorted(p.name for p in src.glob("*.osm"))\n'
+        # 取り込み中に送り直しが起きたことにする
+        'inc = src.parent / ".incoming" / "30406"\n'
+        'inc.mkdir(parents=True, exist_ok=True)\n'
+        '(inc / "99999999_bldg_6697_op.osm").write_text("<osm/>")\n'
+        'after = sorted(p.name for p in src.glob("*.osm"))\n'
+        'pathlib.Path(%r).write_text(repr((before, after)))\n'
+        'sys.exit(0 if before == after else 1)\n' % str(env.called))
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr + env.called.read_text()

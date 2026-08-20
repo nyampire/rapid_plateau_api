@@ -100,6 +100,34 @@ trap cleanup EXIT
     exit $EXIT_DISK
   fi
 
+  # 取り込む入力を rename で自分のものにする。
+  #
+  # 送る側は .incoming/<都市>/ にだけ書く。確定したあとの $SRC を触らないので、
+  # 取り込みの走行中に同じ都市を送り直されても入力が入れ替わらない。
+  # rename は同じファイルシステム内で不可分に起きる。
+  #
+  # これが無いと、開始時の枚数の門を通ったあとに rsync --delete が
+  # ファイルを消せてしまう。取り込みは成功として記録され、送り直した .osm は
+  # 一度も取り込まれないまま消えるので、どちらの記録からも気づけない。
+  INCOMING="$PLATEAU_IMPORT_DIR/.incoming/$CITY"
+  if [ -d "$INCOMING" ]; then
+    if [ -e "$SRC" ]; then
+      # 確定後に落ちた前回の残骸。日時は付けず 1 件だけ持つ。
+      # サーバの空き容量の門は 5GB が既定で、1 都市の入力は最大 4.4GB ある。
+      echo "[$(ts)] [$CITY] 前回の入力を ${SRC}.stale へ退避する"
+      rm -rf "${SRC}.stale"
+      if ! mv "$SRC" "${SRC}.stale"; then
+        echo "[$(ts)] [$CITY] ABORT: 前回の入力を退避できない: $SRC"
+        exit $EXIT_INPUT
+      fi
+    fi
+    if ! mv "$INCOMING" "$SRC"; then
+      echo "[$(ts)] [$CITY] ABORT: 入力を確定できない: $INCOMING"
+      exit $EXIT_INPUT
+    fi
+    echo "[$(ts)] [$CITY] 入力を確定した: $SRC"
+  fi
+
   if [ ! -d "$SRC" ]; then
     echo "[$(ts)] [$CITY] ABORT: 入力が無い: $SRC"
     exit $EXIT_INPUT

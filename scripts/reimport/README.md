@@ -46,7 +46,8 @@ python3 extract_city.py 30406 ./work/30406
 ```
 
 出力した `.gml` は citygml-osm にそのまま渡せる。
-変換したあと `.osm` をサーバへ送り、`--no-zip` を付けて取り込む。
+変換したあと `.osm` をサーバの `<SHIP_PATH>/.incoming/<都市>/` へ送り、`--no-zip` を付けて取り込む。
+取り込み側は開始時にこれを `<SHIP_PATH>/<都市>` へ rename してから読む。
 
 **取り込みの前に `plateau_purge.py` を呼ぶ必要はない。**
 `plateau_importer2postgis.py` は `--citycode` が渡っていれば、開始前にその都市の
@@ -67,8 +68,14 @@ cp ship.env.example ship.env
 
 `ship.env` は `JAVA_BIN`、`CITYGML_OSM_JAR`、`SHIP_HOST`、`SHIP_PATH` など、
 手元の環境と転送先に合わせて書き換える値を持つ。
+`KEEP_RETAINED_DIRS` は退避した作業ディレクトリを何件残すかで、既定は 3、`0` で掃除しない。
 各項目の意味は `ship.env.example` のコメントに書いてある。
 `ship.env` 自体は `.gitignore` に入っているので、書き換えてもコミットされない。
+
+失敗した都市の作業ディレクトリは `<都市>.failed.<日時>` として残る。
+再実行のときに前回の残骸を退かしたものは `<都市>.stale.<日時>` になる。
+どちらも `WORK_ROOT` 全体で新しい順に `KEEP_RETAINED_DIRS` 件だけ残り、古いものから消える。
+`ship_all.sh` は起動時に残っている件数と合計サイズを 1 行出す。
 
 全都市を送るには `ship_all.sh` を起動する。
 

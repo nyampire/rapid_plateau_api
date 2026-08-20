@@ -466,7 +466,7 @@ def test_transfer_invokes_rsync_and_ssh_with_expected_host_and_flags(env):
     assert "--include=*.osm" in rsync_argv, rsync_argv
     assert "--include=manifest.txt" in rsync_argv, rsync_argv
     assert "--exclude=*" in rsync_argv, rsync_argv
-    assert rsync_argv[-1] == 'stubhost:/stub/import/30406/', rsync_argv
+    assert rsync_argv[-1] == 'stubhost:/stub/import/.incoming/30406/', rsync_argv
     ssh_argv = ssh_args.read_text().splitlines()
     assert ssh_argv[0] == 'stubhost', ssh_argv
 
@@ -487,7 +487,7 @@ def test_transfer_actually_copies_files_and_manifest_matches_the_osm_count(env):
     r = _run(env)
 
     assert r.returncode == 0, r.stdout + r.stderr
-    dst = env.tmp / 'remote' / '30406'
+    dst = env.tmp / 'remote' / '.incoming' / '30406'
     assert sorted(p.name for p in dst.glob('*.osm')) == [
         '53394500_bldg_6697_op.osm', '53394501_bldg_6697_op.osm']
     assert (dst / 'manifest.txt').read_text().strip() == '2'
@@ -506,7 +506,7 @@ def test_transfer_manifest_matches_a_different_osm_count(env):
     r = _run(env)
 
     assert r.returncode == 0, r.stdout + r.stderr
-    dst = env.tmp / 'remote' / '30406'
+    dst = env.tmp / 'remote' / '.incoming' / '30406'
     assert len(list(dst.glob('*.osm'))) == 5
     assert (dst / 'manifest.txt').read_text().strip() == '5'
 
@@ -949,3 +949,90 @@ def test_bail_does_not_prune_when_the_evacuation_mv_fails(env):
     assert r.returncode == 10, r.stdout + r.stderr
     assert len(list(env.work_root.glob('11111.stale.*'))) == 3
     assert '退避できない' in r.stdout + r.stderr, r.stdout + r.stderr
+
+
+def test_transfer_targets_the_incoming_directory(env):
+    """rsync の宛先が .incoming/<都市>/ を指す。"""
+    _good_extract(env, n=2)
+    _good_java(env)
+    seen = env.tmp / 'rsync_args.txt'
+    _stub(env.bin, 'rsync', 'echo "$@" >> %s\nexit 0' % seen)
+    _stub(env.bin, 'ssh', 'echo "$@" >> %s.ssh\necho 2' % seen)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert 'stubhost:/stub/import/.incoming/30406/' in seen.read_text()
+
+
+def test_transfer_creates_the_incoming_directory_first(env):
+    """rsync の前に mkdir -p が走る。
+
+    rsync は宛先の最後の 1 段しか作らない。.incoming と <都市> の
+    2 段を作る必要があるので、先に作っておかないと転送が落ちる。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    order = env.tmp / 'order.txt'
+    _stub(env.bin, 'ssh', 'echo "ssh $2" >> %s\ncase "$2" in *mkdir*) ;; *) echo 2 ;; esac' % order)
+    _stub(env.bin, 'rsync', 'echo rsync >> %s\nexit 0' % order)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    lines = order.read_text().splitlines()
+    mkdir_at = next(i for i, l in enumerate(lines) if 'mkdir' in l)
+    rsync_at = next(i for i, l in enumerate(lines) if l == 'rsync')
+    assert mkdir_at < rsync_at, lines
+    assert '/stub/import/.incoming/30406' in lines[mkdir_at]
+
+
+def test_transfer_fails_when_the_destination_cannot_be_created(env):
+    """転送先を作れなければ、転送の門で落ちる。"""
+    _good_extract(env, n=2)
+    _good_java(env)
+    _stub(env.bin, 'rsync', 'exit 0')
+    _stub(env.bin, 'ssh',
+          'case "$2" in *mkdir*) echo "mkdir: 権限がない" >&2; exit 1 ;; esac\necho 2')
+
+    r = _run(env)
+
+    assert r.returncode == 12, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
+def test_remote_count_is_read_from_incoming(env):
+    """枚数を数える先も .incoming/<都市> になる。
+
+    宛先だけ変えて数える先を元のままにすると、常に 0 件を数えて
+    転送の門が落ち続ける。逆に数える先だけ変えても素通りする。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    seen = env.tmp / 'ssh_args.txt'
+    _stub(env.bin, 'rsync', 'exit 0')
+    _stub(env.bin, 'ssh',
+          'echo "$2" >> %s\ncase "$2" in *mkdir*) ;; *) echo 2 ;; esac' % seen)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    find_lines = [l for l in seen.read_text().splitlines() if 'find' in l]
+    assert find_lines, seen.read_text()
+    assert '/stub/import/.incoming/30406' in find_lines[0]
+
+
+def test_end_to_end_transfer_lands_in_incoming(env):
+    """偽 rsync に実際にコピーさせ、.incoming/<都市>/ に届くことを見る。"""
+    _good_extract(env, n=2)
+    _good_java(env)
+    remote = env.tmp / 'remote'
+    _transfer_copies_for_real(env, remote)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    landed = remote / '.incoming' / '30406'
+    assert landed.is_dir(), sorted(p.name for p in remote.rglob('*'))
+    assert len(list(landed.glob('*.osm'))) == 2
+    assert (landed / 'manifest.txt').read_text().strip() == '2'

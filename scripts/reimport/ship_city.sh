@@ -258,15 +258,26 @@ say "3/5 manifest"
 echo "$OSM_N" > "$WORK/manifest.txt"
 
 say "4/5 転送"
+# 送る先を .incoming に分ける。取り込み側は開始時にこれを <都市> へ
+# rename して自分のものにするので、確定後の入力を送る側が触らない。
+# 走行中に送り直しても取り込み中の入力が入れ替わらない。
+DEST="$SHIP_PATH/.incoming/$CITY"
+# rsync は宛先の最後の 1 段しか作らない。.incoming と <都市> の 2 段を
+# 作る必要があるので、先に作る。転送先の根が無いこともある。
+if ! ssh "$SHIP_HOST" "mkdir -p '$DEST'"; then
+  bail "$EXIT_TRANSFER" "転送先を作れない ($DEST)"
+fi
+# --delete は残す。このディレクトリを読むのは送る側だけになったので、
+# 取り込み中のファイルを消す心配が無い。
 rsync -az --delete \
   --include='*.osm' --include='manifest.txt' --exclude='*' \
-  "$WORK/" "$SHIP_HOST:$SHIP_PATH/$CITY/"
+  "$WORK/" "$SHIP_HOST:$DEST/"
 RSYNC_EXIT=$?
 if [ "$RSYNC_EXIT" -ne 0 ]; then
   bail "$EXIT_TRANSFER" "rsync が exit $RSYNC_EXIT"
 fi
 
-REMOTE_N=$(ssh "$SHIP_HOST" "find '$SHIP_PATH/$CITY' -maxdepth 1 -name '*.osm' | wc -l" | tr -d ' ')
+REMOTE_N=$(ssh "$SHIP_HOST" "find '$DEST' -maxdepth 1 -name '*.osm' | wc -l" | tr -d ' ')
 SSH_EXIT=$?
 # ssh が失敗すると REMOTE_N が空になる。そのまま比較すると門が消え、
 # 転送を確かめないまま shipped.txt に記録して作業ディレクトリを消す。

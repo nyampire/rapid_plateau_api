@@ -25,6 +25,7 @@ fi
 : "${WORK_ROOT:?WORK_ROOT が未設定}"
 : "${DISK_MIN_KB:=5242880}"
 : "${EXPECTED_CITIES:=148}"
+: "${KEEP_RETAINED_DIRS:=3}"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 say() { echo "[$(ts)] $*"; }
@@ -50,6 +51,9 @@ report_retained() {
   local -a dirs=()
   shopt -s nullglob
   for d in "$WORK_ROOT"/*.failed.* "$WORK_ROOT"/*.stale.*; do
+    # 展開されなかった glob はこのガードが弾く。守っているのは
+    # nullglob そのものではなく、このガードである
+    # (nullglob が無いと未展開のリテラルがそのまま渡る)。
     [ -d "$d" ] && dirs+=("$d")
   done
   shopt -u nullglob
@@ -64,7 +68,11 @@ report_retained() {
 # ship.env はファイルなので、そこから来る数値も検査する。
 # DISK_MIN_KB が壊れているとディスク不足の判定が黙って消える。
 # 安全装置そのものが、設定を書き損じたときに限って効かなくなる。
-for v in DISK_MIN_KB EXPECTED_CITIES; do
+# KEEP_RETAINED_DIRS が壊れていると、ここで気づかない限り 1 都市目の
+# ship_city.sh がそこで exit 1 して落ちる。ship_all.sh はそれを
+# 「1 都市の失敗」として積んで次へ進むので、148 都市すべてが同じ理由で
+# 落ちてから気づくことになる。ここで先に止める。
+for v in DISK_MIN_KB EXPECTED_CITIES KEEP_RETAINED_DIRS; do
   eval "val=\$$v"
   if ! need_int "$val"; then
     say "ABORT: ${v} が数字でない (値: ${val})"
@@ -134,6 +142,10 @@ for CITY in $(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | tr -d '\r'); do
   fi
   if [ "$AVAIL" -lt "$DISK_MIN_KB" ]; then
     say "ABORT: 空きが $AVAIL KB で下限 $DISK_MIN_KB を割った"
+    # 起動時の report_retained (この時点では何時間も前) だけだと、原因が
+    # 退避の堆積だと運用者が気づけない。実際に走行を止めるのはここなので、
+    # 止まる直前にもう一度出す。
+    report_retained
     exit 2
   fi
 

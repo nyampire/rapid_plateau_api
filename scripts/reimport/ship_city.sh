@@ -59,6 +59,11 @@ say() { echo "[$(ts)] [$CITY] $*"; }
 # 退避した時刻に更新せず、中身を最後に変えた時刻のまま残すので、
 # 実際の退避の順と食い違う。
 #
+# 末尾が日時の形 (%Y%m%d-%H%M%S) でない名前は並べ替えの対象から外す。
+# 手で作った foo.stale.backup のような名前は無検査だと sort -r で数字より
+# 前に来て「最新」扱いされ、永久に残ったうえで上限の枠を占有してしまう。
+# 対象から外したものは消さずにそのまま残す。
+#
 # 数えた結果を後で使うので while read はパイプの右側に置かない。
 # パイプの左側はサブシェルになり、そこでの代入が親に伝わらない。
 prune_retained() {
@@ -69,8 +74,15 @@ prune_retained() {
   local -a entries=()
   shopt -s nullglob
   for d in "$WORK_ROOT"/*.failed.* "$WORK_ROOT"/*.stale.*; do
+    # 展開されなかった glob はこのガードが弾く。守っているのは
+    # nullglob そのものではなく、このガードである
+    # (nullglob が無いと未展開のリテラルがそのまま渡る)。
     [ -d "$d" ] || continue
     ts="${d##*.}"
+    case "$ts" in
+      [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+      *) continue ;;
+    esac
     entries+=("$ts"$'\t'"$d")
   done
   shopt -u nullglob
@@ -91,9 +103,15 @@ bail() {
   say "FAIL: $msg"
   if [ -d "$WORK" ]; then
     local kept="$WORK.failed.$(date '+%Y%m%d-%H%M%S')"
-    mv "$WORK" "$kept"
-    say "作業ディレクトリを退避した: $kept"
-    prune_retained
+    # mv の結果を見ずに進むと、退避に失敗したときも「退避した」と
+    # 言って prune_retained を呼んでしまい、古い退避が消える。
+    # 退避できていないのだから、掃除も呼ばない。
+    if mv "$WORK" "$kept"; then
+      say "作業ディレクトリを退避した: $kept"
+      prune_retained
+    else
+      say "作業ディレクトリを退避できない: $WORK -> $kept"
+    fi
   fi
   exit "$code"
 }
@@ -127,6 +145,11 @@ if ! need_int "$KEEP_RETAINED_DIRS"; then
   say "ABORT: KEEP_RETAINED_DIRS が数字でない (値: $KEEP_RETAINED_DIRS)"
   exit 1
 fi
+
+# need_int は 08 や 010 を通すが、$(( )) は先頭 0 を 8 進として読む。
+# 08 は算術エラーで掃除が 1 件も走らず、010 は上限が黙ってずれる。
+# 比較と算術で解釈が食い違わないよう、ここで 10 進に正規化する。
+KEEP_RETAINED_DIRS=$((10#$KEEP_RETAINED_DIRS))
 
 say "=== START ==="
 

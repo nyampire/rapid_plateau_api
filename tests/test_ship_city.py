@@ -78,6 +78,41 @@ def _run(e, city='30406'):
         env=e.run_env, capture_output=True, text=True, timeout=60)
 
 
+def test_rejects_a_non_5_digit_citycode(env):
+    """citycode が 5 桁の数字でなければ exit 1 で落ちる。
+
+    このブランチで $CITY から組み立てる rm -rf が 1 本から 2 本に増え、
+    mv 2 本とリモートの mkdir -p も増えたので、".." のような値が渡ると
+    被害はサーバ側で最大になる。
+
+    検査対象の入力は 6 桁 (304060) にする。".." だと WORK が
+    WORK_ROOT の外側 (tmp_path 自体) を指してしまい、検査を外したときの
+    振る舞いがテスト環境そのものを壊しかねないうえ、既存の入れ子検査
+    (再試行時の退避など) が別の理由で先に exit 3 を返してしまい、
+    この検査自体が効いているかを切り分けられない (実測)。6 桁の入力は
+    正常系の一式を揃えれば検査なしでは普通に成功してしまうので、
+    落ちること自体がこの検査の効果だと言える。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env, city='304060')
+
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_accepts_a_5_digit_citycode(env):
+    """5 桁の数字はそのまま通る。"""
+    _good_extract(env, n=2)
+    _good_java(env)
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env, city='30406')
+
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_extract_gate_fails_when_file_count_differs(env):
     """報告された meshes より少ない .gml しか出なければ、取り出しの門で落ちる。"""
     # meshes は 2 と報告するが、書き出すのは 1 個だけ

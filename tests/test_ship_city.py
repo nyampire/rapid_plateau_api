@@ -879,9 +879,12 @@ def test_prune_is_quiet_when_there_is_nothing_else_to_remove(env):
     """他に退避が無くてもエラーにならない。
 
     グロブが展開されないと "$WORK_ROOT"/*.failed.* のようなリテラルの
-    文字列が for に渡るが、直後の [ -d "$d" ] ガードがそれを弾く。
-    ここを実際に守っているのは nullglob ではなく、この [ -d ] ガードである
-    (このガードを消すと存在しないパスをそのまま見に行くことになる)。
+    文字列が for に渡る。ここは nullglob と直後の [ -d "$d" ] ガードの
+    二重防御になっていて、どちらか一方だけを外しても崩れない
+    (実測: [ -d ] だけ外す/nullglob だけ外す、どちらも 60 passed)。
+    両方を同時に外したときだけ赤くなる (実測: 2 failed)。
+    このテストが固定できるのは、両方が同時には失われないことだけであり、
+    どちらか一方が守っている、という切り分けはできない。
     """
     _fails_at_extract(env)
 
@@ -918,6 +921,7 @@ def test_non_timestamp_named_retained_dir_is_never_pruned_and_never_counted(env)
     assert '11111.stale.20260811-000000' not in kept, kept
     # 手作りの名前 1 件 + 日時形式の中で最新 (今回の失敗退避) 1 件
     assert len(kept) == 2, kept
+    assert '日時の形でない退避が 1 件ある' in r.stdout, r.stdout
 
 
 def test_bail_does_not_prune_when_the_evacuation_mv_fails(env):
@@ -925,23 +929,22 @@ def test_bail_does_not_prune_when_the_evacuation_mv_fails(env):
 
     これまでの bail() は mv の結果を見ずに「退避した」と言って
     prune_retained を呼んでいた。掃除を足したことで「退避に失敗したのに
-    古い退避が消える」経路が新しくできた。WORK_ROOT を書き込み不可にして
-    mv を失敗させ、既存の退避 3 件が (上限 1 でも) 減らないことを確かめる。
+    古い退避が消える」経路が新しくできた。
+
+    以前は WORK_ROOT を chmod 555 にして mv を失敗させていたが、同じ
+    chmod が prune_retained 内の rm -rf も失敗させてしまい、「3 件残る」の
+    表明が修正の有無によらず常に真になっていた (prune_retained を if の外に
+    出す変異でも 41 passed で全緑になることを実測)。ここでは PATH に mv の
+    偽物を置いて mv だけを失敗させ、rm -rf は生きたままにする。
     """
     ship_env = env.tmp / 'ship.env'
     ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=1\n')
     for ts in ['20260810-000000', '20260811-000000', '20260812-000000']:
         _retained(env, '11111.stale.' + ts)
-    _stub(env.bin, 'extract_stub',
-          'mkdir -p "$2"\n'
-          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
-          'chmod 555 "$(dirname "$2")"\n'
-          'echo \'{"city_code":"30406","meshes":2,"raw_bytes":5}\'')
+    _fails_at_extract(env)
+    _stub(env.bin, 'mv', 'exit 1')
 
-    try:
-        r = _run(env)
-    finally:
-        os.chmod(env.work_root, 0o755)
+    r = _run(env)
 
     assert r.returncode == 10, r.stdout + r.stderr
     assert len(list(env.work_root.glob('11111.stale.*'))) == 3

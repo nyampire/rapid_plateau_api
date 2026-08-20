@@ -27,6 +27,7 @@ fi
 : "${SHIP_PATH:?SHIP_PATH が未設定}"
 : "${SHIPPED_TXT:?SHIPPED_TXT が未設定}"
 : "${DISK_MIN_KB:=5242880}"
+: "${KEEP_RETAINED_DIRS:=3}"
 
 # 未設定かどうかだけでなく、実体があるかも確かめる。ship.env.example の
 # 既定はどちらもプレースホルダのパスなので、書き換え漏れがあると
@@ -51,6 +52,38 @@ WORK="$WORK_ROOT/$CITY"
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 say() { echo "[$(ts)] [$CITY] $*"; }
 
+# 退避した作業ディレクトリを、新しい順に KEEP_RETAINED_DIRS 件だけ残す。
+#
+# 並べ替えは名前の末尾の日時で行う。日時は %Y%m%d-%H%M%S なので辞書順が
+# 時刻順に一致する。mtime 順にはしない。mv はディレクトリの mtime を
+# 退避した時刻に更新せず、中身を最後に変えた時刻のまま残すので、
+# 実際の退避の順と食い違う。
+#
+# 数えた結果を後で使うので while read はパイプの右側に置かない。
+# パイプの左側はサブシェルになり、そこでの代入が親に伝わらない。
+prune_retained() {
+  if [ "$KEEP_RETAINED_DIRS" -eq 0 ]; then
+    return 0
+  fi
+  local d ts line
+  local -a entries=()
+  shopt -s nullglob
+  for d in "$WORK_ROOT"/*.failed.* "$WORK_ROOT"/*.stale.*; do
+    [ -d "$d" ] || continue
+    ts="${d##*.}"
+    entries+=("$ts"$'\t'"$d")
+  done
+  shopt -u nullglob
+  if [ "${#entries[@]}" -le "$KEEP_RETAINED_DIRS" ]; then
+    return 0
+  fi
+  while IFS= read -r line; do
+    d="${line#*$'\t'}"
+    rm -rf "$d"
+    say "古い退避を消した: $(basename "$d")"
+  done < <(printf '%s\n' "${entries[@]}" | sort -r | tail -n +$((KEEP_RETAINED_DIRS + 1)))
+}
+
 # 失敗した作業ディレクトリは検査用に退避する。
 # 消さずに残すだけだと、次の実行が前回の .gml と .osm を数えてしまう。
 bail() {
@@ -60,6 +93,7 @@ bail() {
     local kept="$WORK.failed.$(date '+%Y%m%d-%H%M%S')"
     mv "$WORK" "$kept"
     say "作業ディレクトリを退避した: $kept"
+    prune_retained
   fi
   exit "$code"
 }
@@ -83,6 +117,14 @@ need_int() {
 # 「設定を書き損じたときに限って」消える。ship_all.sh と同じ検査を足す。
 if ! need_int "$DISK_MIN_KB"; then
   say "ABORT: DISK_MIN_KB が数字でない (値: $DISK_MIN_KB)"
+  exit 1
+fi
+
+# KEEP_RETAINED_DIRS も ship.env から来る。書き損じると
+# [ "$n" -gt "$KEEP_RETAINED_DIRS" ] が integer expression expected で
+# エラー終了し、if がそれを偽として扱う。掃除が黙って消えるので、ここで止める。
+if ! need_int "$KEEP_RETAINED_DIRS"; then
+  say "ABORT: KEEP_RETAINED_DIRS が数字でない (値: $KEEP_RETAINED_DIRS)"
   exit 1
 fi
 
@@ -114,6 +156,7 @@ if [ -e "$WORK" ]; then
     say "ABORT: 前回の作業ディレクトリを退避できない (値: $WORK)"
     exit 3
   fi
+  prune_retained
 fi
 if ! mkdir -p "$WORK"; then
   say "ABORT: 作業ディレクトリを作れない (値: $WORK)"

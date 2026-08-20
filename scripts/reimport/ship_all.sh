@@ -41,6 +41,26 @@ need_int() {
   esac
 }
 
+# 退避した作業ディレクトリの残量を見せる。ship_city.sh の
+# KEEP_RETAINED_DIRS で自動的に減るが、残っている量は目に入れておく。
+# 148 都市を流している最中に空き容量の門で止まったとき、原因が
+# 退避の堆積だと気づけるようにするための 1 行である。
+report_retained() {
+  local d kb
+  local -a dirs=()
+  shopt -s nullglob
+  for d in "$WORK_ROOT"/*.failed.* "$WORK_ROOT"/*.stale.*; do
+    [ -d "$d" ] && dirs+=("$d")
+  done
+  shopt -u nullglob
+  if [ "${#dirs[@]}" -eq 0 ]; then
+    say "退避 0 件"
+    return 0
+  fi
+  kb=$(du -sk "${dirs[@]}" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+  say "退避 ${#dirs[@]} 件 (合計 ${kb} KB)"
+}
+
 # ship.env はファイルなので、そこから来る数値も検査する。
 # DISK_MIN_KB が壊れているとディスク不足の判定が黙って消える。
 # 安全装置そのものが、設定を書き損じたときに限って効かなくなる。
@@ -73,6 +93,7 @@ if ! mkdir -p "$WORK_ROOT"; then
   say "ABORT: WORK_ROOT を作れない (値: ${WORK_ROOT})"
   exit 3
 fi
+report_retained
 
 # PLAN_CSV が無いと tail が失敗するが、その出力を受ける grep -c . は
 # 入力 0 行でも exit 0 で 0 を返す。件数の門にそのまま落ちて

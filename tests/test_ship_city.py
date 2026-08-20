@@ -696,3 +696,155 @@ def test_ship_env_example_ship_path_matches_the_other_placeholders():
     m = re.search(r'^SHIP_PATH="([^"]*)"$', body, re.M)
     assert m, 'SHIP_PATH の既定値が見つからない'
     assert m.group(1).startswith('/path/to/'), m.group(1)
+
+
+def _retained(e, name):
+    """退避ディレクトリを 1 件作る。中身も置いて du が 0 にならないようにする。"""
+    d = e.work_root / name
+    d.mkdir()
+    (d / 'dummy.osm').write_text('<osm/>')
+    return d
+
+
+def _fails_at_extract(e):
+    """取り出しで落ちる偽 extract。作業ディレクトリは作るので退避が起きる。"""
+    _stub(e.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'echo \'{"city_code":"30406","meshes":2,"raw_bytes":5}\'')
+
+
+def test_retained_dirs_are_pruned_to_the_cap(env):
+    """上限 3、退避 5 件のところへ 1 件増えると、古い 3 件が消えて 3 件残る。
+
+    掃除が走るのは退避を作った瞬間だけなので、失敗経路を通す。
+    """
+    for ts in ['20260810-000000', '20260811-000000', '20260812-000000',
+               '20260813-000000', '20260814-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 3, kept
+    # 新しい 2 件と、いま作られた 30406 の退避が残る
+    assert '11111.stale.20260813-000000' in kept, kept
+    assert '11111.stale.20260814-000000' in kept, kept
+    assert any(n.startswith('30406.failed.') for n in kept), kept
+    assert '11111.stale.20260810-000000' not in kept, kept
+
+
+def test_prune_cap_of_one_keeps_only_the_newest(env):
+    """上限 1 のとき、いま作った 1 件だけが残る。
+
+    件数を 2 種類 (3 と 1) 使う。上限 3 に固定した実装を通さないため。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=1\n')
+    for ts in ['20260810-000000', '20260811-000000', '20260812-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 1, kept
+    assert kept[0].startswith('30406.failed.'), kept
+
+
+def test_prune_disabled_by_zero(env):
+    """上限 0 では 1 件も消さない。3 件 + 新しい 1 件で 4 件残る。"""
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=0\n')
+    for ts in ['20260810-000000', '20260811-000000', '20260812-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 4, kept
+
+
+def test_success_does_not_prune(env):
+    """成功した回は退避を作らないので、掃除も走らない。
+
+    上限 1 で退避 3 件のまま成功させても消えない。
+    「起動時に無条件で掃除する」実装をここで落とす。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=1\n')
+    for ts in ['20260810-000000', '20260811-000000', '20260812-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _good_extract(env, n=2)
+    _good_java(env)
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert len(list(env.work_root.glob('*.stale.*'))) == 3
+
+
+def test_prune_refuses_when_the_cap_is_not_a_number(env):
+    """上限が数字でなければ、掃除を飛ばさずに止める。
+
+    数値でないまま [ "$n" -le "$KEEP_RETAINED_DIRS" ] を評価すると
+    integer expression expected でエラー終了し、if がそれを偽として扱う。
+    掃除が黙って消えるので、ここは止める側でなければならない。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=three\n')
+
+    r = _run(env)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert 'KEEP_RETAINED_DIRS' in r.stdout + r.stderr
+
+
+def test_prune_orders_by_name_not_mtime(env):
+    """並べ替えは名前の末尾の日時で行う。
+
+    mv はディレクトリの mtime を退避した時刻に更新しないので、
+    mtime 順に消すと実際の退避の順と食い違う。
+    名前と mtime の順を逆にしておき、名前順で消えることを見る。
+
+    上限 2、退避 2 件 + 新しい 1 件 = 3 件なので、消えるのは 1 件だけ。
+    名前順なら 20260810 が、mtime 順なら 20260812 が消える。
+    """
+    import os
+    import time
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=2\n')
+    old_name = _retained(env, '11111.stale.20260810-000000')
+    new_name = _retained(env, '11111.stale.20260812-000000')
+    now = time.time()
+    os.utime(new_name, (now - 100000, now - 100000))  # 名前は新しいが mtime は古い
+    os.utime(old_name, (now, now))                    # 名前は古いが mtime は新しい
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert '11111.stale.20260812-000000' in kept, kept
+    assert '11111.stale.20260810-000000' not in kept, kept
+
+
+def test_prune_is_quiet_when_there_is_nothing_else_to_remove(env):
+    """他に退避が無くてもエラーにならない。
+
+    グロブが展開されないとリテラルの文字列が for に渡る。
+    nullglob が無いと存在しないパスを見に行くことになる。
+    """
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 1, kept

@@ -386,3 +386,29 @@ def test_empty_target_list_after_all_cities_fail_exits_3(env):
 
     assert r.returncode == 3, r.stdout + r.stderr
     assert 'ABORT: 一覧が 0 都市' in r.stdout, r.stdout
+
+
+def test_reports_retained_dirs_at_start(env):
+    """起動時に退避の件数と合計サイズを出す。"""
+    _write_plan(env, ['11111', '22222', '33333'])
+    for ts in ['20260810-000000', '20260811-000000']:
+        d = env.tmp / ('11111.failed.' + ts)
+        d.mkdir()
+        (d / 'dummy.osm').write_text('<osm/>' * 100)
+
+    r = _run(env)
+
+    assert '退避 2 件' in r.stdout, r.stdout
+    assert '合計' in r.stdout, r.stdout
+
+
+def test_reports_zero_retained_dirs_without_failing(env):
+    """退避が 0 件でも落ちない。
+
+    グロブが展開されないとリテラルが for に渡り、du が存在しないパスを見る。
+    """
+    _write_plan(env, ['11111', '22222', '33333'])
+
+    r = _run(env)
+
+    assert '退避 0 件' in r.stdout, r.stdout

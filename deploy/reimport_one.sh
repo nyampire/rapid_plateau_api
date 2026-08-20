@@ -109,6 +109,11 @@ trap cleanup EXIT
   # これが無いと、開始時の枚数の門を通ったあとに rsync --delete が
   # ファイルを消せてしまう。取り込みは成功として記録され、送り直した .osm は
   # 一度も取り込まれないまま消えるので、どちらの記録からも気づけない。
+  # .incoming の実在は -d で見る。中身をそのまま取り込むディレクトリとして
+  # 扱うので、同名の非ディレクトリが紛れ込んでいれば確定せず素通りし、
+  # 後段の「入力が無い」門にそのまま委ねる。$SRC 側は -e で見る。取り込み後に
+  # $SRC が非ディレクトリとして残る事態は想定していないが、そうであっても
+  # 退避で必ず道を空けたいので、種別を問わず「そこに何かあるか」だけを見る。
   INCOMING="$PLATEAU_IMPORT_DIR/.incoming/$CITY"
   if [ -d "$INCOMING" ]; then
     if [ -e "$SRC" ]; then
@@ -116,6 +121,14 @@ trap cleanup EXIT
       # サーバの空き容量の門は 5GB が既定で、1 都市の入力は最大 4.4GB ある。
       echo "[$(ts)] [$CITY] 前回の入力を ${SRC}.stale へ退避する"
       rm -rf "${SRC}.stale"
+      # rm -rf は exit 状態を見ても、権限などで一部だけ消せなかったのか
+      # 判別しにくい。消え切ったかどうかを直接確かめる。ここを素通りすると、
+      # 消せずに残った ${SRC}.stale へ次の mv が入れ子で (exit 0 のまま)
+      # 成功してしまい、退避が積み重なってディスクを圧迫する。
+      if [ -e "${SRC}.stale" ]; then
+        echo "[$(ts)] [$CITY] ABORT: 前回の退避を消せない: ${SRC}.stale"
+        exit $EXIT_INPUT
+      fi
       if ! mv "$SRC" "${SRC}.stale"; then
         echo "[$(ts)] [$CITY] ABORT: 前回の入力を退避できない: $SRC"
         exit $EXIT_INPUT
@@ -187,6 +200,10 @@ trap cleanup EXIT
   # 成功したときだけ消す。取り込みは --no-zip でも <data-dir>/extracted を
   # 作るので、.osm だけを消すと空のディレクトリが残る。
   rm -rf "$SRC"
+  # 退避 (${SRC}.stale) が値打ちを持つのは、落ちてから取り込み直すまでの間だけ。
+  # 取り込みが通った時点で証拠としての役目は終わり、消さずに残すと
+  # ディスクだけを (5GB の門と同じ土俵で) 占め続ける。
+  rm -rf "${SRC}.stale"
   echo "[$(ts)] [$CITY] 空き $(disk_kb "$PLATEAU_APP_DIR") KB"
   echo "[$(ts)] [$CITY] === DONE ==="
 }

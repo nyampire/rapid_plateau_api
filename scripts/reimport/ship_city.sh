@@ -72,6 +72,7 @@ prune_retained() {
   fi
   local d ts line
   local -a entries=()
+  local skipped=0
   shopt -s nullglob
   for d in "$WORK_ROOT"/*.failed.* "$WORK_ROOT"/*.stale.*; do
     # 展開されなかった glob はこのガードが弾く。守っているのは
@@ -81,11 +82,15 @@ prune_retained() {
     ts="${d##*.}"
     case "$ts" in
       [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
-      *) continue ;;
+      *) skipped=$((skipped + 1)); continue ;;
     esac
     entries+=("$ts"$'\t'"$d")
   done
   shopt -u nullglob
+  # 形式外の名前は消さない判断自体は正しいが、黙って残ると運用者に伝わらない。
+  if [ "$skipped" -gt 0 ]; then
+    say "日時の形でない退避が ${skipped} 件ある。自動では消さない"
+  fi
   if [ "${#entries[@]}" -le "$KEEP_RETAINED_DIRS" ]; then
     return 0
   fi

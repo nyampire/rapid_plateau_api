@@ -392,8 +392,12 @@ def test_reports_retained_dirs_at_start(env):
     """起動時に退避の件数と合計サイズを出す。
 
     グロブが展開されないと "$WORK_ROOT"/*.failed.* のようなリテラルの
-    文字列が for に渡るが、直後の [ -d "$d" ] ガードがそれを弾く。
-    ここを実際に守っているのは nullglob ではなく、この [ -d ] ガードである。
+    文字列が for に渡る。ここは nullglob と直後の [ -d "$d" ] ガードの
+    二重防御になっていて、どちらか一方だけを外しても崩れない
+    (実測: [ -d ] だけ外す/nullglob だけ外す、どちらも 60 passed)。
+    両方を同時に外したときだけ赤くなる (実測: 2 failed)。
+    このテストが固定できるのは、両方が同時には失われないことだけであり、
+    どちらか一方が守っている、という切り分けはできない。
     """
     _write_plan(env, ['11111', '22222', '33333'])
     for ts in ['20260810-000000', '20260811-000000']:
@@ -411,18 +415,22 @@ def test_reports_zero_retained_dirs_without_failing(env):
     """退避が 0 件でも落ちない。
 
     グロブが展開されないと "$WORK_ROOT"/*.failed.* のようなリテラルの
-    文字列が for に渡るが、直後の [ -d "$d" ] ガードがそれを弾く。
-    ここを実際に守っているのは nullglob ではなく、この [ -d ] ガードである
-    (このガードが無いと du が存在しないパスを見に行く)。
-    ガードが外れると未展開のリテラルが件数や表示に混じるので、
-    出力に '*' が現れないことも確かめる。
+    文字列が for に渡る。ここは nullglob と直後の [ -d "$d" ] ガードの
+    二重防御になっていて、どちらか一方だけを外しても崩れない
+    (実測: [ -d ] だけ外す/nullglob だけ外す、どちらも 60 passed)。
+    両方を同時に外したときだけ赤くなる (実測: 2 failed)。
+    このテストが固定できるのは、両方が同時には失われないことだけであり、
+    どちらか一方が守っている、という切り分けはできない。
+
+    以前ここに足していた `assert '*' not in r.stdout` は、report_retained
+    がパスを一切印字しないため構造上絶対に落ちず (両方外したときに実際に
+    赤くなったのは '退避 0 件' の方だった)、空振りする表明だったので消した。
     """
     _write_plan(env, ['11111', '22222', '33333'])
 
     r = _run(env)
 
     assert '退避 0 件' in r.stdout, r.stdout
-    assert '*' not in r.stdout, r.stdout
 
 
 def test_keep_retained_dirs_not_a_number_exits_3_before_any_city(env):
@@ -442,3 +450,81 @@ def test_keep_retained_dirs_not_a_number_exits_3_before_any_city(env):
     assert r.returncode == 3, r.stdout + r.stderr
     assert 'KEEP_RETAINED_DIRS' in r.stdout, r.stdout
     assert not env.called.exists()
+
+
+def test_disk_shortage_report_shows_retained_dirs_before_aborting(env):
+    """ループ先頭の門でディスク不足を検知して止まる直前にも、退避の件数を出す。
+
+    起動時の report_retained (この時点では何時間も前) 1 回だけでは、原因が
+    退避の堆積だと運用者が気づけない。実際に走行を止める直前にも同じ情報を
+    出すことを、出現回数で確かめる (起動時の 1 回 + 止まる直前の 1 回 = 2 回)。
+    この行を revert すると 1 回に減って赤くなる。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    for ts in ['20260810-000000', '20260811-000000']:
+        d = env.tmp / ('11111.failed.' + ts)
+        d.mkdir()
+        (d / 'dummy.osm').write_text('<osm/>' * 100)
+    env.run_env['SHIP_ENV'] = str(env.tmp / 'ship_tight.env')
+    (env.tmp / 'ship_tight.env').write_text(
+        (env.tmp / 'ship.env').read_text().replace(
+            'DISK_MIN_KB=0', 'DISK_MIN_KB=999999999999'))
+
+    r = _run(env)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert not env.called.exists()
+    assert r.stdout.count('退避 2 件') == 2, r.stdout
+
+
+def test_ship_city_disk_exit_reports_retained_dirs_before_aborting(env):
+    """ship_city.sh がディスク不足 (exit 2) を返して止まる経路でも、退避の件数を出す。
+
+    走行を止める exit 2 は 2 箇所ある。ループ先頭の門 (ship_all.sh 自身の
+    disk_kb 判定) だけでなく、1 都市の処理中に ship_city.sh がディスク不足を
+    検知して返す経路も止める門であり、1 都市で数 GB 使うためこちらが先に
+    踏まれることもある。起動時の 1 回 + この経路で止まる直前の 1 回 = 2 回
+    出ることを確かめる。この行を revert すると 1 回に減って赤くなる。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    for ts in ['20260810-000000', '20260811-000000']:
+        d = env.tmp / ('11111.failed.' + ts)
+        d.mkdir()
+        (d / 'dummy.osm').write_text('<osm/>' * 100)
+    _stub(env.bin, 'ship_city_stub',
+          'echo "$1" >> "%s"\n'
+          'if [ "$1" = "30406" ]; then exit 2; fi\n'
+          'echo "$1 3" >> "%s"\n'
+          'exit 0' % (env.called, env.shipped))
+
+    r = _run(env)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert env.called.read_text().split() == ['13402', '30406']
+    assert r.stdout.count('退避 2 件') == 2, r.stdout
+
+
+def test_expected_cities_with_leading_zero_0148_matches_148_cities(env):
+    """EXPECTED_CITIES=0148 は 8 進ではなく 10 進の 148 として扱う。
+
+    ship.env の値は test コマンド (`[ "$CODES" -ne "$EXPECTED_CITIES" ]`) の
+    比較にしか使っていない。test の -eq/-ne は常に 10 進として読むため、
+    正規化が無くても 0148 は 148 と一致し、この比較自体は今も壊れない
+    (実測)。壊れているのは表示の方で、正規化前は起動ログに
+    「(期待 0148)」とそのまま出る。KEEP_RETAINED_DIRS (ship_city.sh) が
+    $(( )) の算術文脈で踏んだのと同じ 8 進の罠の下地は残っており、
+    後で $(( )) や [[ ]] を使う変更が入ると同じ罠を踏むため、10 進へ
+    正規化しておく。ここでは 148 都市の計画が件数不一致で止まらないことと、
+    ログの表示が正規化された「148」になることを確かめる。
+    """
+    _write_plan(env, ['%05d' % n for n in range(148)])
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(
+        ship_env.read_text().replace('EXPECTED_CITIES=3\n', 'EXPECTED_CITIES=0148\n'))
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert len(env.called.read_text().split()) == 148, r.stdout
+    assert '(期待 148)' in r.stdout, r.stdout
+    assert '(期待 0148)' not in r.stdout, r.stdout

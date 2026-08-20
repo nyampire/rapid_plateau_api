@@ -78,6 +78,14 @@ for v in DISK_MIN_KB EXPECTED_CITIES KEEP_RETAINED_DIRS; do
     say "ABORT: ${v} が数字でない (値: ${val})"
     exit 3
   fi
+  # need_int は 08 や 0148 のような先頭 0 を通す。この後の比較は [ ] の
+  # -eq/-ne で、これは常に 10 進として読むので今のところ実害は無い。
+  # ただし $(( )) や [[ ]] は先頭 0 を 8 進として読むため、この値を
+  # 後から算術文脈で使う変更が入ると KEEP_RETAINED_DIRS (ship_city.sh) と
+  # 同じ罠を踏む。ここで先に 10 進へ正規化しておく。ログの表示も
+  # 0148 ではなく 148 になる。
+  val=$((10#$val))
+  eval "$v=\$val"
 done
 
 # 失敗すると再開の飛ばしが無言で無効になり (grep が読む相手が無い)、
@@ -157,6 +165,9 @@ for CITY in $(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | tr -d '\r'); do
     say "[$i/$CODES] $CITY: OK"
   elif [ "$EXIT" -eq 2 ]; then
     say "ABORT: $CITY でディスク不足"
+    # 1 都市の処理中にディスク不足を検知するこの経路も走行を止める門で、
+    # 1 都市で数 GB 使うためループ先頭の門より先に踏まれることもある。
+    report_retained
     exit 2
   else
     failed="$failed $CITY"

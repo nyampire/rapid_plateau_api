@@ -806,6 +806,46 @@ def test_prune_refuses_when_the_cap_is_not_a_number(env):
     assert 'KEEP_RETAINED_DIRS' in r.stdout + r.stderr
 
 
+def test_prune_cap_with_leading_zero_08_keeps_eight(env):
+    """KEEP_RETAINED_DIRS=08 は 8 進ではなく 10 進の 8 として扱う。
+
+    need_int は 08 を通すが、正規化なしで $((08 + 1)) を評価すると
+    value too great for base で算術エラーになり、tail の引数が壊れて
+    掃除が 1 件も走らない (退避 11 件全部が残ってしまう)。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=08\n')
+    for d in range(10, 20):  # 10 件
+        _retained(env, '11111.stale.202608%02d-000000' % d)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 8, kept
+
+
+def test_prune_cap_with_leading_zero_010_keeps_ten(env):
+    """KEEP_RETAINED_DIRS=010 は 8 進ではなく 10 進の 10 として扱う。
+
+    正規化なしだと [ n -le 010 ] は 10 進の 10 と比べて掃除に入るのに、
+    tail の切り出しに使う $((010 + 1)) は 8 進で 9 になり、上限が黙って
+    2 件ずれて 8 件しか残らない (ちょうど 10 件残ることを見る)。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=010\n')
+    for d in range(10, 23):  # 13 件
+        _retained(env, '11111.stale.202608%02d-000000' % d)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 10, kept
+
+
 def test_prune_orders_by_name_not_mtime(env):
     """並べ替えは名前の末尾の日時で行う。
 
@@ -838,8 +878,10 @@ def test_prune_orders_by_name_not_mtime(env):
 def test_prune_is_quiet_when_there_is_nothing_else_to_remove(env):
     """他に退避が無くてもエラーにならない。
 
-    グロブが展開されないとリテラルの文字列が for に渡る。
-    nullglob が無いと存在しないパスを見に行くことになる。
+    グロブが展開されないと "$WORK_ROOT"/*.failed.* のようなリテラルの
+    文字列が for に渡るが、直後の [ -d "$d" ] ガードがそれを弾く。
+    ここを実際に守っているのは nullglob ではなく、この [ -d ] ガードである
+    (このガードを消すと存在しないパスをそのまま見に行くことになる)。
     """
     _fails_at_extract(env)
 
@@ -848,3 +890,59 @@ def test_prune_is_quiet_when_there_is_nothing_else_to_remove(env):
     assert r.returncode == 10, r.stdout + r.stderr
     kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
     assert len(kept) == 1, kept
+
+
+def test_non_timestamp_named_retained_dir_is_never_pruned_and_never_counted(env):
+    """日時でない名前の退避は掃除の対象から外れ、上限の枠も奪わない。
+
+    ts="${d##*.}" が末尾を無検査で取ると、11111.stale.backup のような
+    手作りの名前は sort -r で数字より前に来て「最新」扱いされ、
+    永久に残ったうえで上限の枠を占有してしまう。上限 1 のところに
+    手作りの名前を 1 件、日時形式を 2 件置く。手作りの名前は消えず、
+    かつ日時形式の枠 (今回の失敗退避 1 件) を奪わないことを確かめる。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=1\n')
+    _retained(env, '11111.stale.backup')
+    for ts in ['20260810-000000', '20260811-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert '11111.stale.backup' in kept, kept
+    assert any(n.startswith('30406.failed.') for n in kept), kept
+    assert '11111.stale.20260810-000000' not in kept, kept
+    assert '11111.stale.20260811-000000' not in kept, kept
+    # 手作りの名前 1 件 + 日時形式の中で最新 (今回の失敗退避) 1 件
+    assert len(kept) == 2, kept
+
+
+def test_bail_does_not_prune_when_the_evacuation_mv_fails(env):
+    """退避の mv 自体が失敗したときは、古い退避を消さない。
+
+    これまでの bail() は mv の結果を見ずに「退避した」と言って
+    prune_retained を呼んでいた。掃除を足したことで「退避に失敗したのに
+    古い退避が消える」経路が新しくできた。WORK_ROOT を書き込み不可にして
+    mv を失敗させ、既存の退避 3 件が (上限 1 でも) 減らないことを確かめる。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=1\n')
+    for ts in ['20260810-000000', '20260811-000000', '20260812-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _stub(env.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'chmod 555 "$(dirname "$2")"\n'
+          'echo \'{"city_code":"30406","meshes":2,"raw_bytes":5}\'')
+
+    try:
+        r = _run(env)
+    finally:
+        os.chmod(env.work_root, 0o755)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert len(list(env.work_root.glob('11111.stale.*'))) == 3
+    assert '退避できない' in r.stdout + r.stderr, r.stdout + r.stderr

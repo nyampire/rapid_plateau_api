@@ -389,7 +389,12 @@ def test_empty_target_list_after_all_cities_fail_exits_3(env):
 
 
 def test_reports_retained_dirs_at_start(env):
-    """起動時に退避の件数と合計サイズを出す。"""
+    """起動時に退避の件数と合計サイズを出す。
+
+    グロブが展開されないと "$WORK_ROOT"/*.failed.* のようなリテラルの
+    文字列が for に渡るが、直後の [ -d "$d" ] ガードがそれを弾く。
+    ここを実際に守っているのは nullglob ではなく、この [ -d ] ガードである。
+    """
     _write_plan(env, ['11111', '22222', '33333'])
     for ts in ['20260810-000000', '20260811-000000']:
         d = env.tmp / ('11111.failed.' + ts)
@@ -405,10 +410,35 @@ def test_reports_retained_dirs_at_start(env):
 def test_reports_zero_retained_dirs_without_failing(env):
     """退避が 0 件でも落ちない。
 
-    グロブが展開されないとリテラルが for に渡り、du が存在しないパスを見る。
+    グロブが展開されないと "$WORK_ROOT"/*.failed.* のようなリテラルの
+    文字列が for に渡るが、直後の [ -d "$d" ] ガードがそれを弾く。
+    ここを実際に守っているのは nullglob ではなく、この [ -d ] ガードである
+    (このガードが無いと du が存在しないパスを見に行く)。
+    ガードが外れると未展開のリテラルが件数や表示に混じるので、
+    出力に '*' が現れないことも確かめる。
     """
     _write_plan(env, ['11111', '22222', '33333'])
 
     r = _run(env)
 
     assert '退避 0 件' in r.stdout, r.stdout
+    assert '*' not in r.stdout, r.stdout
+
+
+def test_keep_retained_dirs_not_a_number_exits_3_before_any_city(env):
+    """KEEP_RETAINED_DIRS が数字でなければ、1 都市も処理せずに exit 3 で止まる。
+
+    ship_all.sh がこれを検査しないと、自分の門を素通りして走り始め、
+    1 都市目の ship_city.sh がそこで exit 1 して落ちる。ship_all.sh は
+    それを「1 都市の失敗」として積んで次の都市へ進むので、148 都市すべてが
+    同じ理由で落ちてから (brief 実測) ようやく設定の誤りに気づくことになる。
+    """
+    _write_plan(env, ['13402', '30406', '43213'])
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=three\n')
+
+    r = _run(env)
+
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert 'KEEP_RETAINED_DIRS' in r.stdout, r.stdout
+    assert not env.called.exists()

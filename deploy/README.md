@@ -21,7 +21,7 @@ ssh <サーバ> 'chmod +x ~/reimport_*.sh'
 | `PLATEAU_VENV` | Python の仮想環境。省略すると `PYTHON_BIN` をそのまま使う |
 | `PYTHON_BIN` | `reimport_one.sh` が呼ぶ Python の実行ファイル。既定 `python3` |
 | `PLATEAU_ENV_FILE` | `DATABASE_URL` を含む設定。必須 (既定なし)。未設定だと exit 1、設定されていても実体が無いと exit 15 で止まる |
-| `PLATEAU_IMPORT_DIR` | 手元から送られた `.osm` の置き場所。必須 (既定なし)。手元の `SHIP_PATH` と同じ絶対パスを指す |
+| `PLATEAU_IMPORT_DIR` | 手元から送られた `.osm` の置き場所。必須 (既定なし)。手元の `SHIP_PATH` と同じ絶対パスを指す。この下に受け口の `.incoming/` と、確定した `<都市>/` が並ぶ |
 | `PLATEAU_LOG_DIR` | `reimport_one.sh` が都市ごとのログを書く場所。既定は `$HOME/reimport_logs` |
 | `REIMPORT_LOG_DIR` | `reimport_batch.sh` と `reimport_watchdog.sh` が読み書きする場所 (`done.txt`、`failed.txt`、`summary.log`、`batch_status` など)。既定は `$HOME/reimport_logs` |
 | `THRESHOLD_KB` | `reimport_one.sh` が取り込み前に要求する空き (1K ブロック)。既定 5GB。数字でないと exit 15 で止まる |
@@ -58,6 +58,40 @@ DB と入力が別ボリュームの構成では、ディスクの門がその�
 判定はコマンドラインの前方一致なので、ずれていると 90 分の打ち切りも `kill` も
 黙って効かなくなる。ログだけは正常に出続けるので気づけない。
 
+## 入力の確定
+
+`PLATEAU_IMPORT_DIR` の下は 2 つに分かれる。
+
+```
+<PLATEAU_IMPORT_DIR>/
+  .incoming/<都市>/     手元が送る先
+  <都市>/               取り込み側が rename で確定した入力
+```
+
+`.incoming/<都市>` と `<都市>` は同じファイルシステム上に置く。
+下の rename の不可分性はこれが前提で、別ボリュームをまたぐと `mv` は
+copy と delete に分かれ、保証が黙って消える。
+
+`reimport_one.sh` は開始時に `.incoming/<都市>` を `<都市>` へ rename してから読む。
+rename は同じファイルシステム内で不可分に起きるので、取り込みの走行中に
+同じ都市を送り直されても、取り込み中の入力は変わらない。
+
+**この保証には条件が付く。効くのは rename より後に始まった転送に対してだけである。**
+rsync の受け側は開始時に宛先へ chdir し、以後は相対パスで書く。
+rename が起きても cwd の inode は追随するので、rename の瞬間に飛行中の rsync は、確定後の `<都市>/` にそのまま書き続ける。
+窓は「取り込み全体の数時間」から「rsync の所要時間」に縮むが、消えてはいない。
+**したがって、第 1 段と第 2 段を並行させない約束は変わらない。**
+「送り直しても安全」という意味には読まないこと。
+
+`.incoming/<都市>` が無く `<都市>` だけがある場合は、そのまま取り込む。
+確定したあとに落ちた回を、手で片付けずにやり直せるようにするためである。
+
+両方ある場合は新しい `.incoming/<都市>` を採り、古い `<都市>` を `<都市>.stale` へ移す。
+`<都市>.stale` は日時を付けず毎回置き換わるので、1 件までしか残らない。
+取り込みが成功すると、この `<都市>.stale` は入力 (`<都市>`) と一緒に消える。
+やり直し経路を一度でも通った都市であっても、次の取り込みが成功すれば `<都市>.stale` は残らない。
+残っているとすれば、確定はしたが取り込みがまだ成功していない都市だけである。
+
 ## 終了コード
 
 `summary.log` には `FAIL exit=13` のような形で終了コードだけが残る。
@@ -71,7 +105,7 @@ DB と入力が別ボリュームの構成では、ディスクの門がその�
 | 0 | 成功 |
 | 1 | 必須の環境変数 (`PLATEAU_APP_DIR` / `PLATEAU_ENV_FILE` / `PLATEAU_IMPORT_DIR`) が未設定。bash 自身が落ちる |
 | 2 | ディスク不足、または空き容量を読めない |
-| 13 | 入力が無い、`manifest.txt` が無いか数字でない、`.osm` の枚数が manifest と違う |
+| 13 | citycode が 5 桁の数字でない、入力が無い、`manifest.txt` が無いか数字でない、`.osm` の枚数が manifest と違う、入力を確定できない (`.incoming` からの rename、または前回の入力の退避に失敗) |
 | 14 | 取り込み器が exit 2 を返した写し (引数の不整合の可能性) |
 | 15 | `PLATEAU_ENV_FILE` の実体が無い、または `THRESHOLD_KB` が数字でない |
 | 127 | `reimport_one.sh` 自体が見つからない。bash がコマンドを実行できないときの標準の終了コード |
@@ -117,6 +151,9 @@ pause を立てる経路はディスク (2)、打ち切り (4)、連続失敗 (7
 2. 148 都市すべてが `dash_city_master` に行を持ち、`boundary_geom` が NULL でない
 3. `plateau_building_nodes.building_id` の外部キーが `ON DELETE CASCADE` である
 4. 一覧に載った都市の入力が `PLATEAU_IMPORT_DIR` に届いている
+5. `.incoming` と `<都市>` が同じファイルシステムにある。
+   またぐと `mv` は copy と delete に分かれ、rename の不可分性が黙って消える。
+   `df "$PLATEAU_IMPORT_DIR/.incoming"` と `df "$PLATEAU_IMPORT_DIR"` が同じ区画を指すことを見れば足りる
 
 2 と 3 はどちらも、取り込み時にしか効かず後から掛け直せない。
 
@@ -154,8 +191,13 @@ WHERE conname = 'plateau_building_nodes_building_id_fkey';
 
 ```bash
 # 開始前: 一覧にあって入力が届いていない都市 (何も出なければ合格)
-comm -23 <(sort ~/reimport_targets_<日時>.txt) <(ls "$PLATEAU_IMPORT_DIR" | sort)
+comm -23 <(sort ~/reimport_targets_<日時>.txt) \
+         <(ls "$PLATEAU_IMPORT_DIR/.incoming" | sort)
 ```
+
+前回の実行で確定まで進んだ都市は `.incoming` から消えて `<都市>/` に移っているので、
+やり直しのときはこの確認に出てくる。`<都市>/` があればそのまま取り込まれるため、
+出てきた都市がすべて `<都市>/` を持つなら送り直さなくてよい。
 
 流す。
 
@@ -228,6 +270,10 @@ nohup bash ~/reimport_watchdog.sh > /dev/null 2>&1 &
 # 終端: 一覧にあって done.txt に無い都市 (何も出なければ合格)
 comm -23 <(sort ~/reimport_targets_<日時>.txt) <(sort "$REIMPORT_LOG_DIR/done.txt")
 ```
+
+`.incoming` は隠しディレクトリなので、素の `ls "$PLATEAU_IMPORT_DIR"` には出てこない。
+既に `done.txt` にある都市を送り直すと、バッチがその都市を飛ばすため `.incoming/<都市>` が確定されないまま永久に残る。
+`ls -a "$PLATEAU_IMPORT_DIR/.incoming"` で置き去りが無いかも確かめる。
 
 ## 全部終わったあと
 

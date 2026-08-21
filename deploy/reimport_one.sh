@@ -17,16 +17,27 @@ set -uo pipefail
 
 CITY="${1:?citycode required}"
 
+EXIT_DISK=2
+EXIT_INPUT=13
+EXIT_CONFIG=15
+
+# $CITY はこのあと rm -rf / mv / リモートの mkdir -p の組み立てに使う。
+# 現実の経路はすべて 5 桁の数字だが、検査しないまま "$PLATEAU_IMPORT_DIR/$CITY" を
+# 作ると、".." のような値が渡ったときの被害がサーバ側で最大になる。
+case "$CITY" in
+  [0-9][0-9][0-9][0-9][0-9]) ;;
+  *)
+    echo "citycode の形式が違う (5 桁の数字である必要がある): $CITY" >&2
+    exit "$EXIT_INPUT"
+    ;;
+esac
+
 : "${PLATEAU_APP_DIR:?PLATEAU_APP_DIR が未設定}"
 : "${PLATEAU_ENV_FILE:?PLATEAU_ENV_FILE が未設定}"
 : "${PLATEAU_IMPORT_DIR:?PLATEAU_IMPORT_DIR が未設定}"
 : "${PLATEAU_LOG_DIR:=$HOME/reimport_logs}"
 : "${PYTHON_BIN:=python3}"
 : "${THRESHOLD_KB:=5242880}"
-
-EXIT_DISK=2
-EXIT_INPUT=13
-EXIT_CONFIG=15
 
 # : "${PLATEAU_ENV_FILE:?...}" が保証するのは変数が設定されていることだけで、
 # ファイルの実在ではない。無いまま進むと後段の `. "$PLATEAU_ENV_FILE"` が
@@ -100,6 +111,47 @@ trap cleanup EXIT
     exit $EXIT_DISK
   fi
 
+  # 取り込む入力を rename で自分のものにする。
+  #
+  # 送る側は .incoming/<都市>/ にだけ書く。確定したあとの $SRC を触らないので、
+  # 取り込みの走行中に同じ都市を送り直されても入力が入れ替わらない。
+  # rename は同じファイルシステム内で不可分に起きる。
+  #
+  # これが無いと、開始時の枚数の門を通ったあとに rsync --delete が
+  # ファイルを消せてしまう。取り込みは成功として記録され、送り直した .osm は
+  # 一度も取り込まれないまま消えるので、どちらの記録からも気づけない。
+  # .incoming の実在は -d で見る。中身をそのまま取り込むディレクトリとして
+  # 扱うので、同名の非ディレクトリが紛れ込んでいれば確定せず素通りし、
+  # 後段の「入力が無い」門にそのまま委ねる。$SRC 側は -e で見る。取り込み後に
+  # $SRC が非ディレクトリとして残る事態は想定していないが、そうであっても
+  # 退避で必ず道を空けたいので、種別を問わず「そこに何かあるか」だけを見る。
+  INCOMING="$PLATEAU_IMPORT_DIR/.incoming/$CITY"
+  if [ -d "$INCOMING" ]; then
+    if [ -e "$SRC" ]; then
+      # 確定後に落ちた前回の残骸。日時は付けず 1 件だけ持つ。
+      # サーバの空き容量の門は 5GB が既定で、1 都市の入力は最大 4.4GB ある。
+      echo "[$(ts)] [$CITY] 前回の入力を ${SRC}.stale へ退避する"
+      rm -rf "${SRC}.stale"
+      # rm -rf は exit 状態を見ても、権限などで一部だけ消せなかったのか
+      # 判別しにくい。消え切ったかどうかを直接確かめる。ここを素通りすると、
+      # 消せずに残った ${SRC}.stale へ次の mv が入れ子で (exit 0 のまま)
+      # 成功してしまい、退避が積み重なってディスクを圧迫する。
+      if [ -e "${SRC}.stale" ]; then
+        echo "[$(ts)] [$CITY] ABORT: 前回の退避を消せない: ${SRC}.stale"
+        exit $EXIT_INPUT
+      fi
+      if ! mv "$SRC" "${SRC}.stale"; then
+        echo "[$(ts)] [$CITY] ABORT: 前回の入力を退避できない: $SRC"
+        exit $EXIT_INPUT
+      fi
+    fi
+    if ! mv "$INCOMING" "$SRC"; then
+      echo "[$(ts)] [$CITY] ABORT: 入力を確定できない: $INCOMING"
+      exit $EXIT_INPUT
+    fi
+    echo "[$(ts)] [$CITY] 入力を確定した: $SRC"
+  fi
+
   if [ ! -d "$SRC" ]; then
     echo "[$(ts)] [$CITY] ABORT: 入力が無い: $SRC"
     exit $EXIT_INPUT
@@ -159,6 +211,16 @@ trap cleanup EXIT
   # 成功したときだけ消す。取り込みは --no-zip でも <data-dir>/extracted を
   # 作るので、.osm だけを消すと空のディレクトリが残る。
   rm -rf "$SRC"
+  # 退避 (${SRC}.stale) が値打ちを持つのは、落ちてから取り込み直すまでの間だけ。
+  # 取り込みが通った時点で証拠としての役目は終わり、消さずに残すと
+  # ディスクだけを (5GB の門と同じ土俵で) 占め続ける。
+  rm -rf "${SRC}.stale"
+  # rm -rf の結果は見ない。取り込みは既に成功しているので、ここで中断すると
+  # 成功した取り込みを失敗として記録してしまう。消し切れなかったときは
+  # 警告だけ出して、次回以降の空き容量で気づけるようにする。
+  if [ -e "${SRC}.stale" ]; then
+    echo "[$(ts)] [$CITY] 警告: ${SRC}.stale を消せずに残った (取り込みは成功済みなので続行する)"
+  fi
   echo "[$(ts)] [$CITY] 空き $(disk_kb "$PLATEAU_APP_DIR") KB"
   echo "[$(ts)] [$CITY] === DONE ==="
 }

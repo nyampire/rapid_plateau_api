@@ -25,6 +25,7 @@ fi
 : "${WORK_ROOT:?WORK_ROOT が未設定}"
 : "${DISK_MIN_KB:=5242880}"
 : "${EXPECTED_CITIES:=148}"
+: "${KEEP_RETAINED_DIRS:=3}"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 say() { echo "[$(ts)] $*"; }
@@ -41,15 +42,50 @@ need_int() {
   esac
 }
 
+# 退避した作業ディレクトリの残量を見せる。ship_city.sh の
+# KEEP_RETAINED_DIRS で自動的に減るが、残っている量は目に入れておく。
+# 148 都市を流している最中に空き容量の門で止まったとき、原因が
+# 退避の堆積だと気づけるようにするための 1 行である。
+report_retained() {
+  local d kb
+  local -a dirs=()
+  shopt -s nullglob
+  for d in "$WORK_ROOT"/*.failed.* "$WORK_ROOT"/*.stale.*; do
+    # 展開されなかった glob はこのガードが弾く。守っているのは
+    # nullglob そのものではなく、このガードである
+    # (nullglob が無いと未展開のリテラルがそのまま渡る)。
+    [ -d "$d" ] && dirs+=("$d")
+  done
+  shopt -u nullglob
+  if [ "${#dirs[@]}" -eq 0 ]; then
+    say "退避 0 件"
+    return 0
+  fi
+  kb=$(du -sk "${dirs[@]}" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+  say "退避 ${#dirs[@]} 件 (合計 ${kb} KB)"
+}
+
 # ship.env はファイルなので、そこから来る数値も検査する。
 # DISK_MIN_KB が壊れているとディスク不足の判定が黙って消える。
 # 安全装置そのものが、設定を書き損じたときに限って効かなくなる。
-for v in DISK_MIN_KB EXPECTED_CITIES; do
+# KEEP_RETAINED_DIRS が壊れていると、ここで気づかない限り 1 都市目の
+# ship_city.sh がそこで exit 1 して落ちる。ship_all.sh はそれを
+# 「1 都市の失敗」として積んで次へ進むので、148 都市すべてが同じ理由で
+# 落ちてから気づくことになる。ここで先に止める。
+for v in DISK_MIN_KB EXPECTED_CITIES KEEP_RETAINED_DIRS; do
   eval "val=\$$v"
   if ! need_int "$val"; then
     say "ABORT: ${v} が数字でない (値: ${val})"
     exit 3
   fi
+  # need_int は 08 や 0148 のような先頭 0 を通す。この後の比較は [ ] の
+  # -eq/-ne で、これは常に 10 進として読むので今のところ実害は無い。
+  # ただし $(( )) や [[ ]] は先頭 0 を 8 進として読むため、この値を
+  # 後から算術文脈で使う変更が入ると KEEP_RETAINED_DIRS (ship_city.sh) と
+  # 同じ罠を踏む。ここで先に 10 進へ正規化しておく。ログの表示も
+  # 0148 ではなく 148 になる。
+  val=$((10#$val))
+  eval "$v=\$val"
 done
 
 # 失敗すると再開の飛ばしが無言で無効になり (grep が読む相手が無い)、
@@ -73,6 +109,7 @@ if ! mkdir -p "$WORK_ROOT"; then
   say "ABORT: WORK_ROOT を作れない (値: ${WORK_ROOT})"
   exit 3
 fi
+report_retained
 
 # PLAN_CSV が無いと tail が失敗するが、その出力を受ける grep -c . は
 # 入力 0 行でも exit 0 で 0 を返す。件数の門にそのまま落ちて
@@ -113,6 +150,10 @@ for CITY in $(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | tr -d '\r'); do
   fi
   if [ "$AVAIL" -lt "$DISK_MIN_KB" ]; then
     say "ABORT: 空きが $AVAIL KB で下限 $DISK_MIN_KB を割った"
+    # 起動時の report_retained (この時点では何時間も前) だけだと、原因が
+    # 退避の堆積だと運用者が気づけない。実際に走行を止めるのはここなので、
+    # 止まる直前にもう一度出す。
+    report_retained
     exit 2
   fi
 
@@ -124,6 +165,9 @@ for CITY in $(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | tr -d '\r'); do
     say "[$i/$CODES] $CITY: OK"
   elif [ "$EXIT" -eq 2 ]; then
     say "ABORT: $CITY でディスク不足"
+    # 1 都市の処理中にディスク不足を検知するこの経路も走行を止める門で、
+    # 1 都市で数 GB 使うためループ先頭の門より先に踏まれることもある。
+    report_retained
     exit 2
   else
     failed="$failed $CITY"

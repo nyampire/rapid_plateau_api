@@ -8,6 +8,18 @@
 set -uo pipefail
 
 CITY="${1:?citycode required}"
+
+# $CITY はこのあと WORK_ROOT/$CITY の rm -rf や mv、リモートの mkdir -p の
+# 組み立てに使う。現実の経路はすべて 5 桁の数字だが、検査しないまま組み立てると
+# ".." のような値が渡ったときの被害が (特にリモート側で) 最大になる。
+case "$CITY" in
+  [0-9][0-9][0-9][0-9][0-9]) ;;
+  *)
+    echo "citycode の形式が違う (5 桁の数字である必要がある): $CITY" >&2
+    exit 1
+    ;;
+esac
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${SHIP_ENV:=$HERE/ship.env}"
@@ -27,6 +39,7 @@ fi
 : "${SHIP_PATH:?SHIP_PATH が未設定}"
 : "${SHIPPED_TXT:?SHIPPED_TXT が未設定}"
 : "${DISK_MIN_KB:=5242880}"
+: "${KEEP_RETAINED_DIRS:=3}"
 
 # 未設定かどうかだけでなく、実体があるかも確かめる。ship.env.example の
 # 既定はどちらもプレースホルダのパスなので、書き換え漏れがあると
@@ -51,6 +64,55 @@ WORK="$WORK_ROOT/$CITY"
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 say() { echo "[$(ts)] [$CITY] $*"; }
 
+# 退避した作業ディレクトリを、新しい順に KEEP_RETAINED_DIRS 件だけ残す。
+#
+# 並べ替えは名前の末尾の日時で行う。日時は %Y%m%d-%H%M%S なので辞書順が
+# 時刻順に一致する。mtime 順にはしない。mv はディレクトリの mtime を
+# 退避した時刻に更新せず、中身を最後に変えた時刻のまま残すので、
+# 実際の退避の順と食い違う。
+#
+# 末尾が日時の形 (%Y%m%d-%H%M%S) でない名前は並べ替えの対象から外す。
+# 手で作った foo.stale.backup のような名前は無検査だと sort -r で数字より
+# 前に来て「最新」扱いされ、永久に残ったうえで上限の枠を占有してしまう。
+# 対象から外したものは消さずにそのまま残す。
+#
+# 数えた結果を後で使うので while read はパイプの右側に置かない。
+# パイプの左側はサブシェルになり、そこでの代入が親に伝わらない。
+prune_retained() {
+  if [ "$KEEP_RETAINED_DIRS" -eq 0 ]; then
+    return 0
+  fi
+  local d stamp line
+  local -a entries=()
+  local skipped=0
+  shopt -s nullglob
+  for d in "$WORK_ROOT"/*.failed.* "$WORK_ROOT"/*.stale.*; do
+    # 展開されなかった glob はこのガードが弾く。守っているのは
+    # nullglob そのものではなく、このガードである
+    # (nullglob が無いと未展開のリテラルがそのまま渡る)。
+    [ -d "$d" ] || continue
+    stamp="${d##*.}"
+    case "$stamp" in
+      [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+      *) skipped=$((skipped + 1)); continue ;;
+    esac
+    entries+=("$stamp"$'\t'"$d")
+  done
+  shopt -u nullglob
+  # 形式外の名前は消さない判断自体は正しいが、黙って残ると運用者に伝わらない。
+  if [ "$skipped" -gt 0 ]; then
+    say "日時の形でない退避が ${skipped} 件ある。自動では消さない"
+  fi
+  if [ "${#entries[@]}" -le "$KEEP_RETAINED_DIRS" ]; then
+    return 0
+  fi
+  while IFS= read -r line; do
+    d="${line#*$'\t'}"
+    rm -rf "$d"
+    say "古い退避を消した: $(basename "$d")"
+  done < <(printf '%s\n' "${entries[@]}" | sort -r | tail -n +$((KEEP_RETAINED_DIRS + 1)))
+}
+
 # 失敗した作業ディレクトリは検査用に退避する。
 # 消さずに残すだけだと、次の実行が前回の .gml と .osm を数えてしまう。
 bail() {
@@ -58,8 +120,15 @@ bail() {
   say "FAIL: $msg"
   if [ -d "$WORK" ]; then
     local kept="$WORK.failed.$(date '+%Y%m%d-%H%M%S')"
-    mv "$WORK" "$kept"
-    say "作業ディレクトリを退避した: $kept"
+    # mv の結果を見ずに進むと、退避に失敗したときも「退避した」と
+    # 言って prune_retained を呼んでしまい、古い退避が消える。
+    # 退避できていないのだから、掃除も呼ばない。
+    if mv "$WORK" "$kept"; then
+      say "作業ディレクトリを退避した: $kept"
+      prune_retained
+    else
+      say "作業ディレクトリを退避できない: $WORK -> $kept"
+    fi
   fi
   exit "$code"
 }
@@ -85,6 +154,19 @@ if ! need_int "$DISK_MIN_KB"; then
   say "ABORT: DISK_MIN_KB が数字でない (値: $DISK_MIN_KB)"
   exit 1
 fi
+
+# KEEP_RETAINED_DIRS も ship.env から来る。書き損じると
+# [ "$n" -gt "$KEEP_RETAINED_DIRS" ] が integer expression expected で
+# エラー終了し、if がそれを偽として扱う。掃除が黙って消えるので、ここで止める。
+if ! need_int "$KEEP_RETAINED_DIRS"; then
+  say "ABORT: KEEP_RETAINED_DIRS が数字でない (値: $KEEP_RETAINED_DIRS)"
+  exit 1
+fi
+
+# need_int は 08 や 010 を通すが、$(( )) は先頭 0 を 8 進として読む。
+# 08 は算術エラーで掃除が 1 件も走らず、010 は上限が黙ってずれる。
+# 比較と算術で解釈が食い違わないよう、ここで 10 進に正規化する。
+KEEP_RETAINED_DIRS=$((10#$KEEP_RETAINED_DIRS))
 
 say "=== START ==="
 
@@ -114,6 +196,7 @@ if [ -e "$WORK" ]; then
     say "ABORT: 前回の作業ディレクトリを退避できない (値: $WORK)"
     exit 3
   fi
+  prune_retained
 fi
 if ! mkdir -p "$WORK"; then
   say "ABORT: 作業ディレクトリを作れない (値: $WORK)"
@@ -187,15 +270,26 @@ say "3/5 manifest"
 echo "$OSM_N" > "$WORK/manifest.txt"
 
 say "4/5 転送"
+# 送る先を .incoming に分ける。取り込み側は開始時にこれを <都市> へ
+# rename して自分のものにするので、確定後の入力を送る側が触らない。
+# 走行中に送り直しても取り込み中の入力が入れ替わらない。
+DEST="$SHIP_PATH/.incoming/$CITY"
+# rsync は宛先の最後の 1 段しか作らない。.incoming と <都市> の 2 段を
+# 作る必要があるので、先に作る。転送先の根が無いこともある。
+if ! ssh "$SHIP_HOST" "mkdir -p '$DEST'"; then
+  bail "$EXIT_TRANSFER" "転送先を作れない ($DEST)"
+fi
+# --delete は残す。このディレクトリを読むのは送る側だけになったので、
+# 取り込み中のファイルを消す心配が無い。
 rsync -az --delete \
   --include='*.osm' --include='manifest.txt' --exclude='*' \
-  "$WORK/" "$SHIP_HOST:$SHIP_PATH/$CITY/"
+  "$WORK/" "$SHIP_HOST:$DEST/"
 RSYNC_EXIT=$?
 if [ "$RSYNC_EXIT" -ne 0 ]; then
   bail "$EXIT_TRANSFER" "rsync が exit $RSYNC_EXIT"
 fi
 
-REMOTE_N=$(ssh "$SHIP_HOST" "find '$SHIP_PATH/$CITY' -maxdepth 1 -name '*.osm' | wc -l" | tr -d ' ')
+REMOTE_N=$(ssh "$SHIP_HOST" "find '$DEST' -maxdepth 1 -name '*.osm' | wc -l" | tr -d ' ')
 SSH_EXIT=$?
 # ssh が失敗すると REMOTE_N が空になる。そのまま比較すると門が消え、
 # 転送を確かめないまま shipped.txt に記録して作業ディレクトリを消す。

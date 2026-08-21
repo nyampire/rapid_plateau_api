@@ -78,6 +78,41 @@ def _run(e, city='30406'):
         env=e.run_env, capture_output=True, text=True, timeout=60)
 
 
+def test_rejects_a_non_5_digit_citycode(env):
+    """citycode が 5 桁の数字でなければ exit 1 で落ちる。
+
+    このブランチで $CITY から組み立てる rm -rf が 1 本から 2 本に増え、
+    mv 2 本とリモートの mkdir -p も増えたので、".." のような値が渡ると
+    被害はサーバ側で最大になる。
+
+    検査対象の入力は 6 桁 (304060) にする。".." だと WORK が
+    WORK_ROOT の外側 (tmp_path 自体) を指してしまい、検査を外したときの
+    振る舞いがテスト環境そのものを壊しかねないうえ、既存の入れ子検査
+    (再試行時の退避など) が別の理由で先に exit 3 を返してしまい、
+    この検査自体が効いているかを切り分けられない (実測)。6 桁の入力は
+    正常系の一式を揃えれば検査なしでは普通に成功してしまうので、
+    落ちること自体がこの検査の効果だと言える。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env, city='304060')
+
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_accepts_a_5_digit_citycode(env):
+    """5 桁の数字はそのまま通る。"""
+    _good_extract(env, n=2)
+    _good_java(env)
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env, city='30406')
+
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_extract_gate_fails_when_file_count_differs(env):
     """報告された meshes より少ない .gml しか出なければ、取り出しの門で落ちる。"""
     # meshes は 2 と報告するが、書き出すのは 1 個だけ
@@ -466,7 +501,7 @@ def test_transfer_invokes_rsync_and_ssh_with_expected_host_and_flags(env):
     assert "--include=*.osm" in rsync_argv, rsync_argv
     assert "--include=manifest.txt" in rsync_argv, rsync_argv
     assert "--exclude=*" in rsync_argv, rsync_argv
-    assert rsync_argv[-1] == 'stubhost:/stub/import/30406/', rsync_argv
+    assert rsync_argv[-1] == 'stubhost:/stub/import/.incoming/30406/', rsync_argv
     ssh_argv = ssh_args.read_text().splitlines()
     assert ssh_argv[0] == 'stubhost', ssh_argv
 
@@ -487,7 +522,7 @@ def test_transfer_actually_copies_files_and_manifest_matches_the_osm_count(env):
     r = _run(env)
 
     assert r.returncode == 0, r.stdout + r.stderr
-    dst = env.tmp / 'remote' / '30406'
+    dst = env.tmp / 'remote' / '.incoming' / '30406'
     assert sorted(p.name for p in dst.glob('*.osm')) == [
         '53394500_bldg_6697_op.osm', '53394501_bldg_6697_op.osm']
     assert (dst / 'manifest.txt').read_text().strip() == '2'
@@ -506,7 +541,7 @@ def test_transfer_manifest_matches_a_different_osm_count(env):
     r = _run(env)
 
     assert r.returncode == 0, r.stdout + r.stderr
-    dst = env.tmp / 'remote' / '30406'
+    dst = env.tmp / 'remote' / '.incoming' / '30406'
     assert len(list(dst.glob('*.osm'))) == 5
     assert (dst / 'manifest.txt').read_text().strip() == '5'
 
@@ -696,3 +731,343 @@ def test_ship_env_example_ship_path_matches_the_other_placeholders():
     m = re.search(r'^SHIP_PATH="([^"]*)"$', body, re.M)
     assert m, 'SHIP_PATH の既定値が見つからない'
     assert m.group(1).startswith('/path/to/'), m.group(1)
+
+
+def _retained(e, name):
+    """退避ディレクトリを 1 件作る。中身も置いて du が 0 にならないようにする。"""
+    d = e.work_root / name
+    d.mkdir()
+    (d / 'dummy.osm').write_text('<osm/>')
+    return d
+
+
+def _fails_at_extract(e):
+    """取り出しで落ちる偽 extract。作業ディレクトリは作るので退避が起きる。"""
+    _stub(e.bin, 'extract_stub',
+          'mkdir -p "$2"\n'
+          'printf "<x/>" > "$2/53394500_bldg_6697_op.gml"\n'
+          'echo \'{"city_code":"30406","meshes":2,"raw_bytes":5}\'')
+
+
+def test_retained_dirs_are_pruned_to_the_cap(env):
+    """上限 3、退避 5 件のところへ 1 件増えると、古い 3 件が消えて 3 件残る。
+
+    掃除が走るのは退避を作った瞬間だけなので、失敗経路を通す。
+    """
+    for ts in ['20260810-000000', '20260811-000000', '20260812-000000',
+               '20260813-000000', '20260814-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 3, kept
+    # 新しい 2 件と、いま作られた 30406 の退避が残る
+    assert '11111.stale.20260813-000000' in kept, kept
+    assert '11111.stale.20260814-000000' in kept, kept
+    assert any(n.startswith('30406.failed.') for n in kept), kept
+    assert '11111.stale.20260810-000000' not in kept, kept
+
+
+def test_prune_cap_of_one_keeps_only_the_newest(env):
+    """上限 1 のとき、いま作った 1 件だけが残る。
+
+    件数を 2 種類 (3 と 1) 使う。上限 3 に固定した実装を通さないため。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=1\n')
+    for ts in ['20260810-000000', '20260811-000000', '20260812-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 1, kept
+    assert kept[0].startswith('30406.failed.'), kept
+
+
+def test_prune_disabled_by_zero(env):
+    """上限 0 では 1 件も消さない。3 件 + 新しい 1 件で 4 件残る。"""
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=0\n')
+    for ts in ['20260810-000000', '20260811-000000', '20260812-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 4, kept
+
+
+def test_success_does_not_prune(env):
+    """成功した回は退避を作らないので、掃除も走らない。
+
+    上限 1 で退避 3 件のまま成功させても消えない。
+    「起動時に無条件で掃除する」実装をここで落とす。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=1\n')
+    for ts in ['20260810-000000', '20260811-000000', '20260812-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _good_extract(env, n=2)
+    _good_java(env)
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert len(list(env.work_root.glob('*.stale.*'))) == 3
+
+
+def test_prune_refuses_when_the_cap_is_not_a_number(env):
+    """上限が数字でなければ、掃除を飛ばさずに止める。
+
+    数値でないまま [ "$n" -le "$KEEP_RETAINED_DIRS" ] を評価すると
+    integer expression expected でエラー終了し、if がそれを偽として扱う。
+    掃除が黙って消えるので、ここは止める側でなければならない。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=three\n')
+
+    r = _run(env)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert 'KEEP_RETAINED_DIRS' in r.stdout + r.stderr
+
+
+def test_prune_cap_with_leading_zero_08_keeps_eight(env):
+    """KEEP_RETAINED_DIRS=08 は 8 進ではなく 10 進の 8 として扱う。
+
+    need_int は 08 を通すが、正規化なしで $((08 + 1)) を評価すると
+    value too great for base で算術エラーになり、tail の引数が壊れて
+    掃除が 1 件も走らない (退避 11 件全部が残ってしまう)。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=08\n')
+    for d in range(10, 20):  # 10 件
+        _retained(env, '11111.stale.202608%02d-000000' % d)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 8, kept
+
+
+def test_prune_cap_with_leading_zero_010_keeps_ten(env):
+    """KEEP_RETAINED_DIRS=010 は 8 進ではなく 10 進の 10 として扱う。
+
+    正規化なしだと [ n -le 010 ] は 10 進の 10 と比べて掃除に入るのに、
+    tail の切り出しに使う $((010 + 1)) は 8 進で 9 になり、上限が黙って
+    2 件ずれて 8 件しか残らない (ちょうど 10 件残ることを見る)。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=010\n')
+    for d in range(10, 23):  # 13 件
+        _retained(env, '11111.stale.202608%02d-000000' % d)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 10, kept
+
+
+def test_prune_orders_by_name_not_mtime(env):
+    """並べ替えは名前の末尾の日時で行う。
+
+    mv はディレクトリの mtime を退避した時刻に更新しないので、
+    mtime 順に消すと実際の退避の順と食い違う。
+    名前と mtime の順を逆にしておき、名前順で消えることを見る。
+
+    上限 2、退避 2 件 + 新しい 1 件 = 3 件なので、消えるのは 1 件だけ。
+    名前順なら 20260810 が、mtime 順なら 20260812 が消える。
+    """
+    import os
+    import time
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=2\n')
+    old_name = _retained(env, '11111.stale.20260810-000000')
+    new_name = _retained(env, '11111.stale.20260812-000000')
+    now = time.time()
+    os.utime(new_name, (now - 100000, now - 100000))  # 名前は新しいが mtime は古い
+    os.utime(old_name, (now, now))                    # 名前は古いが mtime は新しい
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert '11111.stale.20260812-000000' in kept, kept
+    assert '11111.stale.20260810-000000' not in kept, kept
+
+
+def test_prune_is_quiet_when_there_is_nothing_else_to_remove(env):
+    """他に退避が無くてもエラーにならない。
+
+    グロブが展開されないと "$WORK_ROOT"/*.failed.* のようなリテラルの
+    文字列が for に渡る。ここは nullglob と直後の [ -d "$d" ] ガードの
+    二重防御になっていて、どちらか一方だけを外しても崩れない
+    (実測: [ -d ] だけ外す/nullglob だけ外す、どちらも 60 passed)。
+    両方を同時に外したときだけ赤くなる (実測: 2 failed)。
+    このテストが固定できるのは、両方が同時には失われないことだけであり、
+    どちらか一方が守っている、という切り分けはできない。
+    """
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert len(kept) == 1, kept
+
+
+def test_non_timestamp_named_retained_dir_is_never_pruned_and_never_counted(env):
+    """日時でない名前の退避は掃除の対象から外れ、上限の枠も奪わない。
+
+    ts="${d##*.}" が末尾を無検査で取ると、11111.stale.backup のような
+    手作りの名前は sort -r で数字より前に来て「最新」扱いされ、
+    永久に残ったうえで上限の枠を占有してしまう。上限 1 のところに
+    手作りの名前を 1 件、日時形式を 2 件置く。手作りの名前は消えず、
+    かつ日時形式の枠 (今回の失敗退避 1 件) を奪わないことを確かめる。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=1\n')
+    _retained(env, '11111.stale.backup')
+    for ts in ['20260810-000000', '20260811-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _fails_at_extract(env)
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    kept = sorted(p.name for p in env.work_root.glob('*.*.*'))
+    assert '11111.stale.backup' in kept, kept
+    assert any(n.startswith('30406.failed.') for n in kept), kept
+    assert '11111.stale.20260810-000000' not in kept, kept
+    assert '11111.stale.20260811-000000' not in kept, kept
+    # 手作りの名前 1 件 + 日時形式の中で最新 (今回の失敗退避) 1 件
+    assert len(kept) == 2, kept
+    assert '日時の形でない退避が 1 件ある' in r.stdout, r.stdout
+
+
+def test_bail_does_not_prune_when_the_evacuation_mv_fails(env):
+    """退避の mv 自体が失敗したときは、古い退避を消さない。
+
+    これまでの bail() は mv の結果を見ずに「退避した」と言って
+    prune_retained を呼んでいた。掃除を足したことで「退避に失敗したのに
+    古い退避が消える」経路が新しくできた。
+
+    以前は WORK_ROOT を chmod 555 にして mv を失敗させていたが、同じ
+    chmod が prune_retained 内の rm -rf も失敗させてしまい、「3 件残る」の
+    表明が修正の有無によらず常に真になっていた (prune_retained を if の外に
+    出す変異でも 41 passed で全緑になることを実測)。ここでは PATH に mv の
+    偽物を置いて mv だけを失敗させ、rm -rf は生きたままにする。
+    """
+    ship_env = env.tmp / 'ship.env'
+    ship_env.write_text(ship_env.read_text() + '\nKEEP_RETAINED_DIRS=1\n')
+    for ts in ['20260810-000000', '20260811-000000', '20260812-000000']:
+        _retained(env, '11111.stale.' + ts)
+    _fails_at_extract(env)
+    _stub(env.bin, 'mv', 'exit 1')
+
+    r = _run(env)
+
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert len(list(env.work_root.glob('11111.stale.*'))) == 3
+    assert '退避できない' in r.stdout + r.stderr, r.stdout + r.stderr
+
+
+def test_transfer_targets_the_incoming_directory(env):
+    """rsync の宛先が .incoming/<都市>/ を指す。"""
+    _good_extract(env, n=2)
+    _good_java(env)
+    seen = env.tmp / 'rsync_args.txt'
+    _stub(env.bin, 'rsync', 'echo "$@" >> %s\nexit 0' % seen)
+    _stub(env.bin, 'ssh', 'echo "$@" >> %s.ssh\necho 2' % seen)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert 'stubhost:/stub/import/.incoming/30406/' in seen.read_text()
+
+
+def test_transfer_creates_the_incoming_directory_first(env):
+    """rsync の前に mkdir -p が走る。
+
+    rsync は宛先の最後の 1 段しか作らない。.incoming と <都市> の
+    2 段を作る必要があるので、先に作っておかないと転送が落ちる。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    order = env.tmp / 'order.txt'
+    _stub(env.bin, 'ssh', 'echo "ssh $2" >> %s\ncase "$2" in *mkdir*) ;; *) echo 2 ;; esac' % order)
+    _stub(env.bin, 'rsync', 'echo rsync >> %s\nexit 0' % order)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    lines = order.read_text().splitlines()
+    mkdir_at = next(i for i, l in enumerate(lines) if 'mkdir' in l)
+    rsync_at = next(i for i, l in enumerate(lines) if l == 'rsync')
+    assert mkdir_at < rsync_at, lines
+    assert '/stub/import/.incoming/30406' in lines[mkdir_at]
+
+
+def test_transfer_fails_when_the_destination_cannot_be_created(env):
+    """転送先を作れなければ、転送の門で落ちる。"""
+    _good_extract(env, n=2)
+    _good_java(env)
+    _stub(env.bin, 'rsync', 'exit 0')
+    _stub(env.bin, 'ssh',
+          'case "$2" in *mkdir*) echo "mkdir: 権限がない" >&2; exit 1 ;; esac\necho 2')
+
+    r = _run(env)
+
+    assert r.returncode == 12, r.stdout + r.stderr
+    assert not env.shipped.exists()
+
+
+def test_remote_count_is_read_from_incoming(env):
+    """枚数を数える先も .incoming/<都市> になる。
+
+    宛先だけ変えて数える先を元のままにすると、常に 0 件を数えて
+    転送の門が落ち続ける。逆に数える先だけ変えても素通りする。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    seen = env.tmp / 'ssh_args.txt'
+    _stub(env.bin, 'rsync', 'exit 0')
+    _stub(env.bin, 'ssh',
+          'echo "$2" >> %s\ncase "$2" in *mkdir*) ;; *) echo 2 ;; esac' % seen)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    find_lines = [l for l in seen.read_text().splitlines() if 'find' in l]
+    assert find_lines, seen.read_text()
+    assert '/stub/import/.incoming/30406' in find_lines[0]
+
+
+def test_end_to_end_transfer_lands_in_incoming(env):
+    """偽 rsync に実際にコピーさせ、.incoming/<都市>/ に届くことを見る。"""
+    _good_extract(env, n=2)
+    _good_java(env)
+    remote = env.tmp / 'remote'
+    _transfer_copies_for_real(env, remote)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    landed = remote / '.incoming' / '30406'
+    assert landed.is_dir(), sorted(p.name for p in remote.rglob('*'))
+    assert len(list(landed.glob('*.osm'))) == 2
+    assert (landed / 'manifest.txt').read_text().strip() == '2'

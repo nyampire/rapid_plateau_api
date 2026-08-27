@@ -137,6 +137,9 @@ Rapid editor の zoom 5-14 で対応エリアを表示するため、
 **変換器の出力に由来するものは [docs/converter-output.md](docs/converter-output.md) にまとめてある。**
 取り込みで対処済みのもの、取り込みでは直せないもの、実測値、再取り込み後の確認項目を扱う。
 
+変換から配信まで、どの段が建物の図形に何をするかは
+[docs/geometry-pipeline.md](docs/geometry-pipeline.md) にまとめてある。
+
 | 問題 | 回避策 |
 |---|---|
 | `outer` を持たない multipolygon はジオメトリを組めない | スキップして WARNING。[詳細](docs/converter-output.md) |

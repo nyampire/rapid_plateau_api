@@ -52,3 +52,52 @@ def parse_gml_classes(path):
             cur = None
             elem.clear()
     return classes, saw_class
+
+
+def _atomic_write(tree, path):
+    """書き終えてから名前を付ける。切り詰めた .osm を残さない。"""
+    part = path + '.part'
+    tree.write(part, encoding='utf-8', xml_declaration=True)
+    os.replace(part, path)
+
+
+def rewrite_osm(path, classes):
+    """無壁舎の way を `roof` にして書き戻す。要約を返す。
+
+    `building` と `building:part` の両方を見る。取り込み器は `building` を
+    優先し、無ければ `building:part` を採る。融合は取り込まれる側の way の
+    キーを `building:part` へ降格させるので、無壁舎の過半は降格側に載る。
+    """
+    stat = {'buildings': 0, 'joined': 0, 'rewritten': 0,
+            'unknown_code': 0, 'no_class': 0, 'unjoinable': 0}
+    tree = ET.parse(path)
+    root = tree.getroot()
+    changed = False
+    for way in root.findall('way'):
+        tags = {t.get('k'): t for t in way.findall('tag')}
+        if 'building' in tags:
+            key = 'building'
+        elif 'building:part' in tags:
+            key = 'building:part'
+        else:
+            continue
+        stat['buildings'] += 1
+        ref = tags.get('ref:MLIT_PLATEAU')
+        if ref is None:
+            # 融合が作る合成形状。取り込み器も取り込まないので扱わない。
+            stat['unjoinable'] += 1
+            continue
+        code = classes.get(ref.get('v'))
+        if code is None:
+            stat['no_class'] += 1
+            continue
+        stat['joined'] += 1
+        if code in WALLLESS:
+            tags[key].set('v', 'roof')
+            stat['rewritten'] += 1
+            changed = True
+        elif code not in KNOWN_CLASSES:
+            stat['unknown_code'] += 1
+    if changed:
+        _atomic_write(tree, path)
+    return stat

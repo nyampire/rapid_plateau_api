@@ -101,3 +101,32 @@ def rewrite_osm(path, classes):
     if changed:
         _atomic_write(tree, path)
     return stat
+
+
+def apply_dir(work_dir):
+    """作業ディレクトリの `.osm` を全部処理して合計を返す。"""
+    total = {'meshes': 0, 'meshes_without_class': 0, 'buildings': 0,
+             'joined': 0, 'rewritten': 0, 'unknown_code': 0,
+             'no_class': 0, 'unjoinable': 0}
+    names = sorted(n for n in os.listdir(work_dir) if n.endswith('.osm'))
+    for name in names:
+        osm = os.path.join(work_dir, name)
+        gml = osm[:-4] + '.gml'
+        # 対の .gml が無いと区分を引けない。黙って素通りさせると、
+        # 直っていないことに気づけないまま転送まで進む。
+        if not os.path.exists(gml):
+            raise SystemExit('対の .gml が無い: %s' % os.path.basename(gml))
+        classes, saw_class = parse_gml_classes(gml)
+        if not saw_class:
+            total['meshes_without_class'] += 1
+        stat = rewrite_osm(osm, classes)
+        total['meshes'] += 1
+        for k, v in stat.items():
+            total[k] += v
+    return total
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        raise SystemExit(__doc__)
+    print(json.dumps(apply_dir(sys.argv[1]), ensure_ascii=False))

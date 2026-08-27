@@ -217,3 +217,60 @@ def test_rewrite_osm_leaves_no_part_file(tmp_path):
                  encoding='utf-8')
     apply_walless_roof.rewrite_osm(str(p), {'c-bldg-1': '3003'})
     assert not (tmp_path / 'a.osm.part').exists()
+
+
+def test_apply_dir_reports_mesh_without_class(tmp_path):
+    """区分を持たない都市を黙って通さない。
+
+    茨木市 27209 は標本の 12 メッシュで bldg:class が 1 件も無かった。
+    建物 ID はあるので突き合わせは通り、1 件も直らないまま完走する。
+    """
+    (tmp_path / 'm1.gml').write_text(_gml([('c-bldg-1', None)]), encoding='utf-8')
+    (tmp_path / 'm1.osm').write_text(
+        _osm([('-1', {'building': 'yes', 'ref:MLIT_PLATEAU': 'c-bldg-1'})]),
+        encoding='utf-8')
+    out = apply_walless_roof.apply_dir(str(tmp_path))
+    assert out['meshes'] == 1
+    assert out['meshes_without_class'] == 1
+    assert out['rewritten'] == 0
+
+
+def test_apply_dir_sums_across_meshes(tmp_path):
+    for n, code in (('m1', '3003'), ('m2', '3001')):
+        (tmp_path / (n + '.gml')).write_text(
+            _gml([('c-bldg-' + n, code)]), encoding='utf-8')
+        (tmp_path / (n + '.osm')).write_text(
+            _osm([('-1', {'building': 'yes',
+                          'ref:MLIT_PLATEAU': 'c-bldg-' + n})]),
+            encoding='utf-8')
+    out = apply_walless_roof.apply_dir(str(tmp_path))
+    assert out['meshes'] == 2
+    assert out['meshes_without_class'] == 0
+    assert out['rewritten'] == 1
+    assert out['joined'] == 2
+
+
+def test_apply_dir_fails_when_gml_missing(tmp_path):
+    (tmp_path / 'm1.osm').write_text(_osm([]), encoding='utf-8')
+    with pytest.raises(SystemExit) as e:
+        apply_walless_roof.apply_dir(str(tmp_path))
+    assert 'm1.gml' in str(e.value)
+
+
+def test_cli_prints_json_summary(tmp_path):
+    (tmp_path / 'm1.gml').write_text(_gml([('c-bldg-1', '3003')]),
+                                     encoding='utf-8')
+    (tmp_path / 'm1.osm').write_text(
+        _osm([('-1', {'building': 'yes', 'ref:MLIT_PLATEAU': 'c-bldg-1'})]),
+        encoding='utf-8')
+    r = subprocess.run([sys.executable, str(TOOL), str(tmp_path)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out['rewritten'] == 1
+
+
+def test_cli_fails_without_argument():
+    r = subprocess.run([sys.executable, str(TOOL)],
+                       capture_output=True, text=True)
+    assert r.returncode != 0

@@ -58,6 +58,7 @@ fi
 EXIT_EXTRACT=10
 EXIT_CONVERT=11
 EXIT_TRANSFER=12
+EXIT_WALLESS=13
 
 WORK="$WORK_ROOT/$CITY"
 
@@ -203,7 +204,7 @@ if ! mkdir -p "$WORK"; then
   exit 3
 fi
 
-say "1/5 取り出し"
+say "1/6 取り出し"
 EXTRACT_JSON=$($EXTRACT_CMD "$CITY" "$WORK")
 EXTRACT_EXIT=$?
 if [ "$EXTRACT_EXIT" -ne 0 ]; then
@@ -232,7 +233,7 @@ if [ "$GML_N" -ne "$MESHES" ]; then
   bail "$EXIT_EXTRACT" ".gml の数が報告と違う ($GML_N != $MESHES)"
 fi
 
-say "2/5 変換"
+say "2/6 変換"
 if ! cp "$CONVERSION_JSON" "$WORK/conversion.json"; then
   bail "$EXIT_CONVERT" "conversion.json を複製できない"
 fi
@@ -266,10 +267,20 @@ for f in "$WORK"/*.osm; do
 done
 shopt -u nullglob
 
-say "3/5 manifest"
+say "3/6 無壁舎"
+# 区分は .gml にしかなく、変換器は出力しない。転送は .osm と manifest.txt
+# だけを送るので、.gml が並んでいるこの時点でしか当てられない。
+WALLESS_OUT=$(python3 "$(dirname "$0")/apply_walless_roof.py" "$WORK")
+WALLESS_EXIT=$?
+if [ "$WALLESS_EXIT" -ne 0 ]; then
+  bail "$EXIT_WALLESS" "無壁舎の書き換えが exit $WALLESS_EXIT"
+fi
+say "無壁舎 $WALLESS_OUT"
+
+say "4/6 manifest"
 echo "$OSM_N" > "$WORK/manifest.txt"
 
-say "4/5 転送"
+say "5/6 転送"
 # 送る先を .incoming に分ける。取り込み側は開始時にこれを <都市> へ
 # rename して自分のものにするので、確定後の入力を送る側が触らない。
 # 走行中に送り直しても取り込み中の入力が入れ替わらない。
@@ -302,7 +313,7 @@ if [ "$REMOTE_N" -ne "$OSM_N" ]; then
   bail "$EXIT_TRANSFER" "転送先の枚数が違う ($REMOTE_N != $OSM_N)"
 fi
 
-say "5/5 記録して掃除"
+say "6/6 記録して掃除"
 echo "$CITY $OSM_N" >> "$SHIPPED_TXT"
 rm -rf "$WORK"
 say "=== DONE ($OSM_N メッシュ) ==="

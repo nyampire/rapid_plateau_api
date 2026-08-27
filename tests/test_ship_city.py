@@ -1071,3 +1071,43 @@ def test_end_to_end_transfer_lands_in_incoming(env):
     assert landed.is_dir(), sorted(p.name for p in remote.rglob('*'))
     assert len(list(landed.glob('*.osm'))) == 2
     assert (landed / 'manifest.txt').read_text().strip() == '2'
+
+
+def test_walless_step_runs_before_manifest(env):
+    """無壁舎の書き換えは manifest より前に走る。
+
+    転送は .osm と manifest.txt だけを送るので、.gml が手元にある
+    この時点でしか区分を当てられない。
+    """
+    _good_extract(env, n=2)
+    _good_java(env)
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert '無壁舎' in r.stdout
+    assert r.stdout.index('無壁舎') < r.stdout.index('manifest')
+
+
+def test_walless_step_failure_stops_before_transfer(env):
+    """書き換えが落ちたら転送しない。直っていない .osm を送らない。
+
+    変換段の門 (枚数・非空・閉じタグ) を通り抜けるが、XML としては
+    壊れている .osm を作らせる。後処理は XML として読むのでそこで落ちる。
+
+    python3 を潰す手は使えない。取り出し段が extract の JSON を読むのに
+    python3 を使うので、そちらが先に exit 10 で落ちる。
+    """
+    _good_extract(env, n=2)
+    _stub(env.bin, 'java',
+          'for f in *.gml; do\n'
+          '  printf "<osm><node></osm>" > "${f%.gml}.osm"\n'
+          'done\n'
+          'exit 0')
+    _good_transfer(env, remote_count=2)
+
+    r = _run(env)
+
+    assert r.returncode == 13, r.stdout + r.stderr
+    assert '転送' not in r.stdout

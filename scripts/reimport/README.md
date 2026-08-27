@@ -106,6 +106,29 @@ bash ship_all.sh
 転送先をサーバ側で確かめるときは `SHIP_PATH` ではなく `SHIP_PATH/.incoming/` を見る。
 `ship_city.sh` はここへ送り、確定 (rename) はサーバ側の取り込みが開始時に行うので、届いた直後の入力は `SHIP_PATH` 直下には無い。
 
+## 無壁舎の書き換え
+
+変換の直後、`manifest.txt` を作る前に `apply_walless_roof.py` が走る。
+PLATEAU の建物区分が無壁舎 (`bldg:class` 3003 / 3004) の建物を
+`building=roof` にする。カーポートと庇がここに入る。
+
+区分は元データ (`.gml`) にしかなく、変換器は出力しない。
+転送は `.osm` と `manifest.txt` だけを送るので、`.gml` が手元に並んでいる
+この時点でしか当てられない。
+
+`ship_city.sh` が要約を 1 行で出す。
+
+- `rewritten` が書き換えた件数
+- `meshes_without_class` が区分を 1 件も持たなかったメッシュの数
+
+**`meshes_without_class` がメッシュ数と同じなら、その都市は 1 件も直っていない。**
+区分を持たない都市が実在する (茨木市 27209 の標本 12 メッシュで確認)。
+突き合わせ自体は通るので、この数を見ないと気づけない。
+
+`building` と `building:part` の両方を見る。融合は取り込まれる側の way の
+キーを `building:part` へ降格させるため、無壁舎の過半は降格側に載る
+(豊中市の 111MB のメッシュでは 405 件のうち 252 件が降格側だった)。
+
 ## 終了コード
 
 `ship_all.sh` はどの都市が失敗したかを最後にまとめて出すが、個別の理由は終了コードで区別する。
@@ -122,6 +145,7 @@ bash ship_all.sh
 | 10 | 取り出し (`extract_city.py`) の失敗。`.gml` が 1 つも無い場合を含む |
 | 11 | 変換 (`java`) の失敗、`conversion.json` を複製できない、`.osm` の枚数不一致、空ファイル、閉じタグの欠落 |
 | 12 | 転送先を作れない、転送 (`rsync` / `ssh`) の失敗、または転送先の枚数を数えられないか一致しない |
+| 13 | 無壁舎の書き換え (`apply_walless_roof.py`) の失敗。対の `.gml` が無い、`.osm` を XML として読めない場合を含む |
 
 ### `ship_all.sh`
 
@@ -143,6 +167,7 @@ bash ship_all.sh
 | `build_download_plan.py` | CKAN から都市ごとの CityGML zip の URL を集めて CSV に書く |
 | `scan_bldg.py` | 各 zip の中央ディレクトリを読み、建物データの量を数える |
 | `extract_city.py` | `udx/bldg/*.gml` だけを Range で取り出す |
+| `apply_walless_roof.py` | 無壁舎 (`bldg:class` 3003 / 3004) の建物を `building=roof` にする |
 | `ckan_download_plan.csv` | 148 都市の URL 一覧。`build_download_plan.py` が作る |
 
 CSV は 148 都市 (宇城市 43213 を含む) を全部カバーしている。

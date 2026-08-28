@@ -70,6 +70,57 @@ def _triangle_area_m2(coords):
     return area_deg2 * _METERS_PER_DEGREE_LAT * meters_per_degree_lon
 
 
+# type=building relation を取り込むかどうかを決める、最大の部材の面積 (m²)。
+# 変換出力のこの relation には、複数の棟を持つ工場や学校のほかに、戸建てと
+# カーポート、住宅密集地の戸建ての並びが混ざっている。残したいのは前者だけである。
+# PLATEAU の建築面積は中央値 67 m²、上位 5% で 255 m² なので、300 m² 以上の部材を
+# 持つ集合には戸建てだけの組み合わせが入りにくい。
+# 詳細は docs/superpowers/specs/2026-08-28-building-relation-area-gate-design.md を参照。
+RELATION_MIN_LARGEST_PART_AREA_M2 = 300.0
+
+
+def _polygon_area_m2(coords):
+    """多角形の面積を m² で返す。
+
+    `coords` は (lon, lat) のタプルの列。閉じていてもいなくてもよい。
+    3 点未満なら 0.0 を返す。
+
+    近似は `_triangle_area_m2` と同じで、緯度 1 度を 111,320 m、経度 1 度を
+    その cos(平均緯度) 倍とみなす。1 メッシュの内部なら緯度差が小さく、
+    300 m² の判定に要る精度は十分に出る。
+    """
+    ring = list(coords)
+    if len(ring) >= 2 and ring[0] == ring[-1]:
+        ring = ring[:-1]
+    if len(ring) < 3:
+        return 0.0
+    # 環の先頭を原点に寄せてから shoelace を掛ける。日本の経度は 139 度前後で、
+    # 建物 1 棟の辺は 0.0001 度ほどしかない。寄せずに掛けると引き算で桁が落ち、
+    # 面積の相対誤差が 1e-4 まで開く。寄せると 1e-12 以下に収まる。
+    x0, y0 = ring[0]
+    total = 0.0
+    for i in range(len(ring)):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % len(ring)]
+        total += (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+    area_deg2 = abs(total) / 2
+    lat_rad = math.radians(sum(y for _, y in ring) / len(ring))
+    meters_per_degree_lon = _METERS_PER_DEGREE_LAT * math.cos(lat_rad)
+    return area_deg2 * _METERS_PER_DEGREE_LAT * meters_per_degree_lon
+
+
+def _relation_passes_area_gate(part_areas):
+    """部材の面積の列から、その relation を取り込むかどうかを返す。
+
+    条件は「最大の部材が RELATION_MIN_LARGEST_PART_AREA_M2 以上」の 1 つだけ。
+    2 番目の部材に条件を足す案は、大きい建物に庇が 1 つ付いた形を巻き添えに
+    するだけで、落としたい形には効かなかったので採らなかった。
+    """
+    if not part_areas:
+        return False
+    return max(part_areas) >= RELATION_MIN_LARGEST_PART_AREA_M2
+
+
 class PlateauImporter2PostGIS:
     # 行政界フィルタの SELECT を包む SAVEPOINT 名。
     # SELECT が失敗しても直前までの INSERT を道連れにしないための退避点。

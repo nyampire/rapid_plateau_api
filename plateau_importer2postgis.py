@@ -1050,12 +1050,10 @@ class PlateauImporter2PostGIS:
                             # building:part 判定 (parse_osm_file_safe 由来)
                             is_part = bool(building.get('is_part'))
                             building_part_value = 'yes' if is_part else None
-                            # building タグ: part の場合は building タグ無しなので None
-                            building_value = (
-                                converted_tags.get('building', 'yes')
-                                if not is_part
-                                else tags.get('building')  # 通常 None
-                            )
+                            # 型は部材でも保存する。配信が building:part=<型> を
+                            # 出すのに要るため。convert_building_tags_enhanced は
+                            # building が無ければ building:part の値を型として読む。
+                            building_value = converted_tags.get('building', 'yes')
 
                             # 建物データ（plateau_buildingsテーブル構造に合わせる）
                             buildings_data.append((

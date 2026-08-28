@@ -9,6 +9,7 @@ plateau_importer2postgis.py のユニットテスト
 
 import io
 import logging
+import math
 import os
 import shutil
 import textwrap
@@ -17,7 +18,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from plateau_importer2postgis import PlateauImporter2PostGIS
+from plateau_importer2postgis import (
+    PlateauImporter2PostGIS,
+    RELATION_MIN_LARGEST_PART_AREA_M2,
+    _polygon_area_m2,
+    _relation_passes_area_gate,
+)
 
 
 def _make_row(osm_id, building_id, seq, lat, lon, ring_id=0):
@@ -1929,3 +1935,73 @@ class TestIdentifierlessMultipolygonIsAMergeOutline:
         hits = [r for r in rows if '35215-bldg-33333' in r]
         assert len(hits) == 1, 'twin から識別子を受け取る建物が落ちている'
         assert hits[0][8].count('(') >= 3, '中庭が塗り潰されている'
+
+
+# ----------------------------------------------------------------------
+# 面積の条件で type=building relation を選ぶ
+# ----------------------------------------------------------------------
+
+
+def _square_coords(side_m, lat=33.0, lon=133.0):
+    """1 辺 `side_m` メートルのおよそ正方形の環を (lon, lat) の列で返す。
+
+    緯度 1 度を 111,320 m、経度 1 度をその cos(緯度) 倍として辺の長さを度に直す。
+    面積の判定の境界をぎりぎりで跨がせる用途には使わない（丸めで裏返るため）。
+    境界そのものは `_relation_passes_area_gate` の単体テストで見る。
+    """
+    d_lat = side_m / 111320.0
+    d_lon = side_m / (111320.0 * math.cos(math.radians(lat)))
+    return [(lon, lat), (lon + d_lon, lat), (lon + d_lon, lat + d_lat),
+            (lon, lat + d_lat), (lon, lat)]
+
+
+class TestPolygonAreaM2:
+    """既知の矩形に対して期待値を返すこと。"""
+
+    def test_known_rectangle_matches_the_metric_estimate(self):
+        lat, lon, d = 35.0, 139.0, 0.0001
+        coords = [(lon, lat), (lon + d, lat), (lon + d, lat + d),
+                  (lon, lat + d), (lon, lat)]
+        # 実装と同じ近似で手計算した値。平均緯度で経度側を縮める。
+        expected = (d * 111320.0) * (
+            d * 111320.0 * math.cos(math.radians(lat + d / 2)))
+        assert _polygon_area_m2(coords) == pytest.approx(expected, rel=1e-9)
+        # 近似そのものが妥当な桁であることも押さえる (11.1 m x 9.1 m)。
+        assert _polygon_area_m2(coords) == pytest.approx(101.5, rel=0.01)
+
+    def test_square_helper_yields_the_requested_area(self):
+        assert _polygon_area_m2(_square_coords(20.0)) == pytest.approx(400.0, rel=1e-3)
+
+    def test_unclosed_ring_gives_the_same_area_as_closed(self):
+        closed = _square_coords(20.0)
+        assert _polygon_area_m2(closed[:-1]) == pytest.approx(
+            _polygon_area_m2(closed), rel=1e-12)
+
+    def test_fewer_than_three_points_is_zero(self):
+        assert _polygon_area_m2([]) == 0.0
+        assert _polygon_area_m2([(133.0, 33.0), (133.001, 33.0)]) == 0.0
+        # 閉じた 2 点 (同じ点に戻る) も面積を持たない。
+        assert _polygon_area_m2([(133.0, 33.0), (133.001, 33.0), (133.0, 33.0)]) == 0.0
+
+
+class TestRelationAreaGate:
+    """最大の部材の面積だけで relation を選ぶ。"""
+
+    def test_threshold_is_300(self):
+        assert RELATION_MIN_LARGEST_PART_AREA_M2 == 300.0
+
+    def test_just_below_the_threshold_is_rejected(self):
+        assert _relation_passes_area_gate([299.0]) is False
+
+    def test_exactly_the_threshold_is_accepted(self):
+        assert _relation_passes_area_gate([300.0]) is True
+
+    def test_a_single_large_part_is_enough(self):
+        assert _relation_passes_area_gate([301.0]) is True
+
+    def test_the_largest_part_decides(self):
+        assert _relation_passes_area_gate([1.0, 2.0, 301.0]) is True
+        assert _relation_passes_area_gate([299.0, 10.0, 5.0]) is False
+
+    def test_no_parts_is_rejected(self):
+        assert _relation_passes_area_gate([]) is False

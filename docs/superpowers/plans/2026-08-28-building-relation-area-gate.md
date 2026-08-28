@@ -820,10 +820,12 @@ Expected: 数パーセントから 20 パーセント程度。
 - [ ] **Step 1: 差分に機微情報が無いことを確かめる**
 
 検査に使う文字列そのものを残さないため、形で見ます。
+接続先の名前など、形では拾えないものは、実行するときに手元のメモから足します。
+この文書には書きません。
 
 ```bash
 git diff main --name-only | tr '\n' ' '
-git diff main -U0 | grep -nE '(^\+.*([0-9]{1,3}\.){3}[0-9]{1,3})|(^\+.*/(opt|var|etc|home)/)|(^\+.*sudo )|(^\+.*postgresql://)|(^\+.*(mydns|ik1-))' || echo "当たりなし"
+git diff main -U0 | grep -nE '(^\+.*([0-9]{1,3}\.){3}[0-9]{1,3})|(^\+.*/(opt|var|etc|home)/)|(^\+.*sudo )|(^\+.*postgresql://)' || echo "当たりなし"
 ```
 
 Expected: 「当たりなし」。当たった場合はその行を読み、実際に機微かを判断して直します。
@@ -831,7 +833,7 @@ Expected: 「当たりなし」。当たった場合はその行を読み、実�
 - [ ] **Step 2: コミットメッセージを確かめる**
 
 ```bash
-git log main..HEAD --format='%s%n%b' | grep -nE '(([0-9]{1,3}\.){3}[0-9]{1,3})|(/(opt|var|etc|home)/)|(sudo )|(postgresql://)|((mydns|ik1-))' || echo "当たりなし"
+git log main..HEAD --format='%s%n%b' | grep -nE '(([0-9]{1,3}\.){3}[0-9]{1,3})|(/(opt|var|etc|home)/)|(sudo )|(postgresql://)' || echo "当たりなし"
 ```
 
 Expected: 「当たりなし」
@@ -855,7 +857,7 @@ PR 本文には、設計文書へのリンク、変更した 2 箇所、Task 5 �
 作成後に本文へ同じ検査をかけます。
 
 ```bash
-gh pr view --json body --jq '.body' | grep -nE '(([0-9]{1,3}\.){3}[0-9]{1,3})|(/(opt|var|etc|home)/)|(sudo )|(postgresql://)|((mydns|ik1-))' || echo "当たりなし"
+gh pr view --json body --jq '.body' | grep -nE '(([0-9]{1,3}\.){3}[0-9]{1,3})|(/(opt|var|etc|home)/)|(sudo )|(postgresql://)' || echo "当たりなし"
 ```
 
 Expected: 「当たりなし」

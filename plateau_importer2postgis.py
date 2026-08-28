@@ -498,11 +498,12 @@ class PlateauImporter2PostGIS:
         """安全なOSMファイル解析（修復済み技術）
 
         building / building:part 対応 (importer source-fidelity task 1):
-        - <relation type=building> は読まない。融合で作られた合成 outline と
-          その親子関係を取り込まないため。よって parent_outline_way_id は
-          常に None、is_part は常に False になる。
+        - <relation type=building> は、最大の部材が 300 m² 以上のものだけを読む。
+          条件を満たしたものは outline を親、part を子として取り込む。
+          満たさないものは読まなかったことにし、メンバーは独立した建物になる。
         - `ref:MLIT_PLATEAU` タグを持たない building/building:part way は
-          融合で作られた合成形状とみなし、取り込まない。
+          融合で作られた合成形状とみなし、取り込まない。ただし条件を満たした
+          relation の outline メンバーだけは例外として取り込む。
         - `ref:MLIT_PLATEAU` を持つ way は building:part タグが付いていても
           実在する独立した建物として扱う（変換器は CityGML の BuildingPart
           を読まないため、真の部分立体は出力に存在しない）。
@@ -522,12 +523,10 @@ class PlateauImporter2PostGIS:
         nodes = {}
         buildings = []
 
-        # type=building の relation は読まない。
-        # この relation は「接触する建物を融合したまとまり」であり、outline は
-        # 融合で作られた形状、part は取り込まれた実在建物である。元データの
-        # BuildingPart に由来するものではない（変換器はそれを読んでいない）。
-        # 親子関係を作ると実在しない建物を親にすることになるため、作らない。
+        # type=building の relation の親子関係。面積の条件を通ったものだけが入る。
+        # 中身はノード収集の後で埋める（部材の面積に座標が要るため）。
         part_to_outline = {}
+        gated_outline_way_ids = set()
 
         # 建物を表す type=multipolygon は、穴のある建物である。
         # outer を外側、inner を内側のリングとして 1 棟にまとめる。
@@ -629,6 +628,41 @@ class PlateauImporter2PostGIS:
             except (ValueError, TypeError):
                 continue
 
+        # type=building の relation を、最大の部材の面積で選ぶ。
+        # この relation は「接触する建物を融合したまとまり」で、複数の棟を持つ
+        # 工場や学校のほかに、戸建てとカーポート、戸建ての並びが混ざっている。
+        # 残したいのは前者だけなので、最大の部材の面積 1 つで分ける。
+        # 建物区分は都市によって入っていないことがあるが、面積は図形から計算できる。
+        # 条件を満たさなかった relation は読まなかったことにする。メンバーは
+        # 下の way ループでこれまでどおり独立した建物として取り込まれる。
+        for rel_elem in root.findall('relation'):
+            rel_tags = {t.get('k'): t.get('v') for t in rel_elem.findall('tag')
+                        if t.get('k') and t.get('v')}
+            if rel_tags.get('type') != 'building':
+                continue
+            outline_way_id = None
+            part_way_ids = []
+            for m in rel_elem.findall('member'):
+                if m.get('type') != 'way':
+                    continue
+                role = m.get('role')
+                if role == 'outline':
+                    outline_way_id = m.get('ref')
+                elif role == 'part':
+                    part_way_ids.append(m.get('ref'))
+            if not outline_way_id or not part_way_ids:
+                continue
+            part_areas = []
+            for pwid in part_way_ids:
+                coords = [(nodes[r]['lon'], nodes[r]['lat'])
+                          for r in raw_way_nd_refs.get(pwid, []) if r in nodes]
+                part_areas.append(_polygon_area_m2(coords))
+            if not _relation_passes_area_gate(part_areas):
+                continue
+            gated_outline_way_ids.add(outline_way_id)
+            for pwid in part_way_ids:
+                part_to_outline[pwid] = outline_way_id
+
         # 建物ウェイ収集 (building または building:part を持つ way が対象)
         # way_id → nd_refs は multipolygon の outer/inner 解決にも使うので、
         # タグの有無に関わらず全 way について記録する。
@@ -665,8 +699,10 @@ class PlateauImporter2PostGIS:
 
             # 建物 ID を持たない建物 way は、融合で作られた合成形状である。
             # 元データに対応する形状が無いので取り込まない (10 メッシュ 386 本で確認)。
+            # 例外は、面積の条件を通った relation の outline メンバーだけ。融合は
+            # outline から ref:MLIT_PLATEAU を外すが、この合成外形は残したい。
             ref_mlit = tags.get('ref:MLIT_PLATEAU')
-            if (is_building or is_part) and not ref_mlit:
+            if not ref_mlit and way_id not in gated_outline_way_ids:
                 continue
 
             # 穴を潰した相方 (twin) なら、独立した建物として収集しない。
@@ -679,8 +715,8 @@ class PlateauImporter2PostGIS:
 
             # 最低3点でポリゴン形成
             if len(nd_refs) >= 3:
-                # part の場合は parent_outline_way_id を解決
-                parent_outline_way_id = part_to_outline.get(way_id) if is_part else None
+                # 面積の条件を通った relation の part メンバーだけが親を持つ。
+                parent_outline_way_id = part_to_outline.get(way_id)
                 buildings.append({
                     'way_id': way_id,
                     # 変換出力のどの要素から来たかの記録。osmEntity.id.fromOSM と
@@ -693,10 +729,11 @@ class PlateauImporter2PostGIS:
                     'source_file': osm_file.name,
                     'file_prefix': file_prefix,
                     'file_key': file_key,
-                    # 建物 ID を持つ way は、building:part に降格されていても
-                    # 元は独立した建物である。変換器は CityGML の BuildingPart を
-                    # 読まないので、真の部分立体は出力に存在しない。
-                    'is_part': False,
+                    # 面積の条件を通った relation の part メンバーだけを部材とする。
+                    # それ以外の way は、building:part に降格されていても独立した
+                    # 建物として扱う。変換器は CityGML の BuildingPart を読まない
+                    # ので、降格は融合の副産物であって部分立体ではない。
+                    'is_part': parent_outline_way_id is not None,
                     'parent_outline_way_id': parent_outline_way_id,
                 })
 

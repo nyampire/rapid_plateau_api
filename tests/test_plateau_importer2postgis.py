@@ -812,12 +812,12 @@ class TestWayIdNamespacePerFile:
         return all_nodes, all_buildings
 
     def test_part_links_to_outline_from_its_own_file(self, bare_importer):
-        """Renamed in spirit only (kept the original name to avoid churn):
-        the `type=building` relation is no longer read (importer
-        source-fidelity task 1), so no part->outline link is produced at
-        all — not a wrong cross-file one, none. `parts_parent_map` is always
-        empty. Both ways still carry `ref:MLIT_PLATEAU`, so all 4 buildings
-        (2 per mesh file) are still collected as independent buildings.
+        """part は自分と同じメッシュの outline に紐づく。
+
+        2026-08-28 の面積の条件で type=building relation を読み直した。
+        この標本の部材はおよそ 93,000 m² あるので条件を通り、親子関係が作られる。
+        両方のメッシュで way id が -10 / -20 と重なるので、`way_id` だけを鍵に
+        すると隣のメッシュの外形に紐づいてしまう。それが起きないことを見る。
         """
         importer = bare_importer(citycode='43100')
         all_nodes, all_buildings = self._batch(importer, [
@@ -836,7 +836,10 @@ class TestWayIdNamespacePerFile:
             'A-outline', 'A-part', 'B-outline', 'B-part'
         ]
 
-        assert parts_parent_map == []
+        assert len(parts_parent_map) == 2, 'part と outline の紐付けが 2 本ない'
+        linked = {name_by_osm_id[part]: name_by_osm_id[parent]
+                  for part, parent in parts_parent_map}
+        assert linked == {'A-part': 'A-outline', 'B-part': 'B-outline'}
 
     def test_plateau_id_keeps_the_raw_way_id(self, bare_importer):
         """`plateau_id` にファイルキーの名前空間が漏れないことを守る。
@@ -1023,6 +1026,11 @@ class TestDropSynthesizedShapes:
 
     融合で作られた外形は建物 ID を持たない。10 メッシュ 386 本すべてが
     元データの lod0FootPrint と一致しないことを確認済み。
+
+    2026-08-28 の面積の条件で例外が 1 つできた。最大の部材が 300 m² 以上の
+    type=building relation の外形だけは取り込む。`_SYNTH_OSM` の部材は
+    およそ 415 m² あってこの例外に当たるので、元からの主張は relation を
+    外した形で見る。例外そのものは最後のテストで見る。
     """
 
     def _parse(self, bare_importer, xml):
@@ -1031,20 +1039,35 @@ class TestDropSynthesizedShapes:
         osm_file.write_text(xml)
         return importer.parse_osm_file_safe(osm_file)
 
+    @staticmethod
+    def _without_relation():
+        """`_SYNTH_OSM` から relation を取り除いた XML を返す。"""
+        head, sep, _rest = _SYNTH_OSM.partition('  <relation')
+        assert sep, '標本に relation が無い'
+        return head + '</osm>\n'
+
     def test_way_without_building_id_is_not_collected(self, bare_importer):
-        nodes, buildings = self._parse(bare_importer, _SYNTH_OSM)
+        nodes, buildings = self._parse(bare_importer, self._without_relation())
         way_ids = {b['way_id'] for b in buildings}
         assert '-10' not in way_ids, '合成外形が収集されている'
         assert '-20' in way_ids, '建物 ID を持つ way が落ちている'
 
     def test_no_parent_link_is_produced(self, bare_importer):
-        nodes, buildings = self._parse(bare_importer, _SYNTH_OSM)
+        nodes, buildings = self._parse(bare_importer, self._without_relation())
         assert all(b['parent_outline_way_id'] is None for b in buildings)
 
     def test_part_with_building_id_becomes_a_building(self, bare_importer):
-        nodes, buildings = self._parse(bare_importer, _SYNTH_OSM)
+        nodes, buildings = self._parse(bare_importer, self._without_relation())
         by_id = {b['way_id']: b for b in buildings}
         assert by_id['-20']['is_part'] is False
+
+    def test_outline_of_a_qualifying_relation_is_kept(self, bare_importer):
+        """例外。部材が 300 m² 以上なら、建物 ID の無い外形も取り込む。"""
+        nodes, buildings = self._parse(bare_importer, _SYNTH_OSM)
+        by_id = {b['way_id']: b for b in buildings}
+        assert '-10' in by_id, '条件を満たした relation の外形が落ちている'
+        assert by_id['-20']['is_part'] is True
+        assert by_id['-20']['parent_outline_way_id'] == '-10'
 
 
 # ----------------------------------------------------------------------
@@ -2005,3 +2028,121 @@ class TestRelationAreaGate:
 
     def test_no_parts_is_rejected(self):
         assert _relation_passes_area_gate([]) is False
+
+
+def _relation_osm(part_side_m, outline_side_m=None, part_tag='building:part',
+                  part_value='yes', outline_ref=None, extra_part_side_m=None):
+    """outline 1 本と part 1〜2 本を持つ type=building relation の .osm を返す。
+
+    outline は建物 ID を持たない合成外形にしてある (`outline_ref=None`)。
+    融合が outline メンバーから `ref:MLIT_PLATEAU` を外すためで、実データと同じ形。
+    """
+    if outline_side_m is None:
+        outline_side_m = part_side_m * 2
+    lat, lon = 33.0, 133.0
+
+    def _ring(side_m, offset_lat=0.0, offset_lon=0.0):
+        d_lat = side_m / 111320.0
+        d_lon = side_m / (111320.0 * math.cos(math.radians(lat)))
+        y, x = lat + offset_lat, lon + offset_lon
+        return [(x, y), (x + d_lon, y), (x + d_lon, y + d_lat), (x, y + d_lat)]
+
+    rings = [('-100', _ring(outline_side_m)), ('-200', _ring(part_side_m))]
+    if extra_part_side_m is not None:
+        rings.append(('-300', _ring(extra_part_side_m, offset_lat=0.01)))
+
+    nodes, ways, node_id = [], [], -1
+    for way_id, ring in rings:
+        refs = []
+        for x, y in ring:
+            nodes.append(f'  <node id="{node_id}" lat="{y:.8f}" lon="{x:.8f}"/>')
+            refs.append(node_id)
+            node_id -= 1
+        nd = ''.join(f'<nd ref="{r}"/>' for r in refs + [refs[0]])
+        if way_id == '-100':
+            ref_tag = (f'\n    <tag k="ref:MLIT_PLATEAU" v="{outline_ref}"/>'
+                       if outline_ref else '')
+            ways.append(f'  <way id="{way_id}">\n    {nd}\n'
+                        f'    <tag k="building" v="yes"/>{ref_tag}\n  </way>')
+        else:
+            ways.append(f'  <way id="{way_id}">\n    {nd}\n'
+                        f'    <tag k="{part_tag}" v="{part_value}"/>\n'
+                        f'    <tag k="ref:MLIT_PLATEAU" v="39999-bldg{way_id}"/>\n'
+                        f'  </way>')
+
+    members = '\n'.join(
+        ['    <member type="way" ref="-100" role="outline"/>']
+        + [f'    <member type="way" ref="{w}" role="part"/>'
+           for w, _ in rings[1:]])
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n<osm version="0.6">\n'
+            + '\n'.join(nodes) + '\n' + '\n'.join(ways) + '\n'
+            + '  <relation id="-900">\n' + members + '\n'
+            + '    <tag k="type" v="building"/>\n'
+            + '    <tag k="building" v="yes"/>\n  </relation>\n</osm>\n')
+
+
+class TestRelationAreaGateOnOsmFiles:
+    """`.osm` を通した挙動。閾値の境界そのものは
+    `TestRelationAreaGate` で見ているので、ここは十分に大きい / 小さい形で見る。
+    """
+
+    def _parse(self, bare_importer, xml):
+        importer = bare_importer(citycode='39999')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(xml)
+        _nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        return {b['way_id']: b for b in buildings}
+
+    def test_large_part_keeps_the_relation(self, bare_importer):
+        """部材が 400 m² なら、外形が取り込まれ、部材に親が付く。"""
+        by_way = self._parse(bare_importer, _relation_osm(part_side_m=20.0))
+        assert '-100' in by_way, '条件を満たした relation の外形が落ちている'
+        assert by_way['-100']['is_part'] is False
+        assert by_way['-100']['parent_outline_way_id'] is None
+        assert by_way['-200']['is_part'] is True
+        assert by_way['-200']['parent_outline_way_id'] == '-100'
+
+    def test_a_single_large_part_is_enough(self, bare_importer):
+        """部材が 1 本しかなくても、それが大きければ通る。"""
+        by_way = self._parse(bare_importer, _relation_osm(part_side_m=25.0))
+        assert len(by_way) == 2
+        assert by_way['-200']['is_part'] is True
+
+    def test_small_parts_drop_the_relation(self, bare_importer):
+        """部材が小さい relation は読まれず、外形も取り込まれない。"""
+        by_way = self._parse(bare_importer, _relation_osm(part_side_m=8.0))
+        assert '-100' not in by_way, '建物 ID の無い外形が取り込まれている'
+        assert by_way['-200']['is_part'] is False
+        assert by_way['-200']['parent_outline_way_id'] is None
+
+    def test_members_of_a_dropped_relation_stay_independent(self, bare_importer):
+        """条件を満たさなかった relation のメンバーは独立した建物として残る。"""
+        by_way = self._parse(
+            bare_importer, _relation_osm(part_side_m=8.0, extra_part_side_m=6.0))
+        assert set(by_way) == {'-200', '-300'}
+        assert all(b['is_part'] is False for b in by_way.values())
+
+    def test_the_largest_part_decides(self, bare_importer):
+        """小さい部材が混ざっていても、最大が大きければ全部が部材になる。"""
+        by_way = self._parse(
+            bare_importer, _relation_osm(part_side_m=20.0, extra_part_side_m=4.0))
+        assert by_way['-200']['is_part'] is True
+        assert by_way['-300']['is_part'] is True
+        assert by_way['-300']['parent_outline_way_id'] == '-100'
+
+    def test_outline_exception_does_not_leak_to_other_ways(self, bare_importer):
+        """relation に属さない建物 ID 無しの way は、これまでどおり落ちる。"""
+        xml = _relation_osm(part_side_m=20.0).replace(
+            '</osm>',
+            '  <node id="-90" lat="33.05" lon="133.05"/>\n'
+            '  <node id="-91" lat="33.0505" lon="133.05"/>\n'
+            '  <node id="-92" lat="33.0505" lon="133.0505"/>\n'
+            '  <node id="-93" lat="33.05" lon="133.0505"/>\n'
+            '  <way id="-400">\n'
+            '    <nd ref="-90"/><nd ref="-91"/><nd ref="-92"/>'
+            '<nd ref="-93"/><nd ref="-90"/>\n'
+            '    <tag k="building" v="yes"/>\n  </way>\n</osm>')
+        by_way = self._parse(bare_importer, xml)
+        assert '-400' not in by_way, 'relation に属さない合成形状が通っている'
+        assert '-100' in by_way, '条件を満たした外形まで落ちている'
+

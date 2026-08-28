@@ -2146,3 +2146,44 @@ class TestRelationAreaGateOnOsmFiles:
         assert '-400' not in by_way, 'relation に属さない合成形状が通っている'
         assert '-100' in by_way, '条件を満たした外形まで落ちている'
 
+
+
+class TestPartKeepsItsTypeInTheDatabase:
+    """部材の行も建物の型を持つ。配信が `building:part=<型>` を出すのに要る。
+
+    無壁舎の後処理は way のキーを見て値を書き換えるので、部材には
+    `building:part=roof` が付く。これを `building` 列に保存する。
+    """
+
+    def _rows(self, bare_importer, xml):
+        importer = bare_importer(citycode='39999')
+        osm_file = Path(importer.data_dir) / 'mesh.osm'
+        osm_file.write_text(xml)
+        nodes, buildings = importer.parse_osm_file_safe(osm_file)
+        key = importer._file_key(osm_file)
+        all_nodes = {f'{key}:{k}': v for k, v in nodes.items()}
+        for b in buildings:
+            b['rings'] = [[f'{key}:{r}' for r in ring] for ring in b['rings']]
+        buildings_data, _, _ = importer.process_buildings_safe(all_nodes, buildings)
+        # 添字 7 が plateau_id ('w-100' のような形)。way ごとに引けるようにする。
+        return {row[7]: row for row in buildings_data}
+
+    def test_part_row_keeps_its_type(self, bare_importer):
+        rows = self._rows(bare_importer, _relation_osm(
+            part_side_m=20.0, part_value='roof'))
+        # 部材として保存されていることを先に押さえる。独立した建物として
+        # 入っていると、型が残るのは当たり前になってしまう。
+        assert rows['w-200'][23] == 'yes', '部材として保存されていない'
+        assert rows['w-200'][1] == 'roof', '部材の型が保存されていない'
+
+    def test_part_without_a_type_falls_back_to_yes(self, bare_importer):
+        """回帰テスト。型の無い部材はこれまでどおり yes で入る。"""
+        rows = self._rows(bare_importer, _relation_osm(part_side_m=20.0))
+        assert rows['w-200'][23] == 'yes'
+        assert rows['w-200'][1] == 'yes'
+
+    def test_outline_row_is_not_marked_as_a_part(self, bare_importer):
+        """回帰テスト。外形は部材の印を持たず、型は building から取る。"""
+        rows = self._rows(bare_importer, _relation_osm(part_side_m=20.0))
+        assert rows['w-100'][23] is None
+        assert rows['w-100'][1] == 'yes'

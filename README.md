@@ -31,6 +31,9 @@ osmfj_plateau_api.py         PostGIS から Rapid 向けに OSM XML を配信 (F
 その出力の性質と、取り込み側でどこまで対処できるかは
 [docs/converter-output.md](docs/converter-output.md) にまとめてある。
 
+変換から配信まで、どの段が建物の図形に何をするかは
+[docs/geometry-pipeline.md](docs/geometry-pipeline.md) にまとめてある。
+
 ## 必要環境
 
 - Python 3.9+

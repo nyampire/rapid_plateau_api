@@ -70,6 +70,57 @@ def _triangle_area_m2(coords):
     return area_deg2 * _METERS_PER_DEGREE_LAT * meters_per_degree_lon
 
 
+# type=building relation を取り込むかどうかを決める、最大の部材の面積 (m²)。
+# 変換出力のこの relation には、複数の棟を持つ工場や学校のほかに、戸建てと
+# カーポート、住宅密集地の戸建ての並びが混ざっている。残したいのは前者だけである。
+# PLATEAU の建築面積は中央値 67 m²、上位 5% で 255 m² なので、300 m² 以上の部材を
+# 持つ集合には戸建てだけの組み合わせが入りにくい。
+# 詳細は docs/superpowers/specs/2026-08-28-building-relation-area-gate-design.md を参照。
+RELATION_MIN_LARGEST_PART_AREA_M2 = 300.0
+
+
+def _polygon_area_m2(coords):
+    """多角形の面積を m² で返す。
+
+    `coords` は (lon, lat) のタプルの列。閉じていてもいなくてもよい。
+    3 点未満なら 0.0 を返す。
+
+    近似は `_triangle_area_m2` と同じで、緯度 1 度を 111,320 m、経度 1 度を
+    その cos(平均緯度) 倍とみなす。1 メッシュの内部なら緯度差が小さく、
+    300 m² の判定に要る精度は十分に出る。
+    """
+    ring = list(coords)
+    if len(ring) >= 2 and ring[0] == ring[-1]:
+        ring = ring[:-1]
+    if len(ring) < 3:
+        return 0.0
+    # 環の先頭を原点に寄せてから shoelace を掛ける。日本の経度は 139 度前後で、
+    # 建物 1 棟の辺は 0.0001 度ほどしかない。寄せずに掛けると引き算で桁が落ち、
+    # 面積の相対誤差が 1e-4 まで開く。寄せると 1e-12 以下に収まる。
+    x0, y0 = ring[0]
+    total = 0.0
+    for i in range(len(ring)):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % len(ring)]
+        total += (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+    area_deg2 = abs(total) / 2
+    lat_rad = math.radians(sum(y for _, y in ring) / len(ring))
+    meters_per_degree_lon = _METERS_PER_DEGREE_LAT * math.cos(lat_rad)
+    return area_deg2 * _METERS_PER_DEGREE_LAT * meters_per_degree_lon
+
+
+def _relation_passes_area_gate(part_areas):
+    """部材の面積の列から、その relation を取り込むかどうかを返す。
+
+    条件は「最大の部材が RELATION_MIN_LARGEST_PART_AREA_M2 以上」の 1 つだけ。
+    2 番目の部材に条件を足す案は、大きい建物に庇が 1 つ付いた形を巻き添えに
+    するだけで、落としたい形には効かなかったので採らなかった。
+    """
+    if not part_areas:
+        return False
+    return max(part_areas) >= RELATION_MIN_LARGEST_PART_AREA_M2
+
+
 class PlateauImporter2PostGIS:
     # 行政界フィルタの SELECT を包む SAVEPOINT 名。
     # SELECT が失敗しても直前までの INSERT を道連れにしないための退避点。
@@ -447,11 +498,12 @@ class PlateauImporter2PostGIS:
         """安全なOSMファイル解析（修復済み技術）
 
         building / building:part 対応 (importer source-fidelity task 1):
-        - <relation type=building> は読まない。融合で作られた合成 outline と
-          その親子関係を取り込まないため。よって parent_outline_way_id は
-          常に None、is_part は常に False になる。
+        - <relation type=building> は、最大の部材が 300 m² 以上のものだけを読む。
+          条件を満たしたものは outline を親、part を子として取り込む。
+          満たさないものは読まなかったことにし、メンバーは独立した建物になる。
         - `ref:MLIT_PLATEAU` タグを持たない building/building:part way は
-          融合で作られた合成形状とみなし、取り込まない。
+          融合で作られた合成形状とみなし、取り込まない。ただし条件を満たした
+          relation の outline メンバーだけは例外として取り込む。
         - `ref:MLIT_PLATEAU` を持つ way は building:part タグが付いていても
           実在する独立した建物として扱う（変換器は CityGML の BuildingPart
           を読まないため、真の部分立体は出力に存在しない）。
@@ -471,12 +523,10 @@ class PlateauImporter2PostGIS:
         nodes = {}
         buildings = []
 
-        # type=building の relation は読まない。
-        # この relation は「接触する建物を融合したまとまり」であり、outline は
-        # 融合で作られた形状、part は取り込まれた実在建物である。元データの
-        # BuildingPart に由来するものではない（変換器はそれを読んでいない）。
-        # 親子関係を作ると実在しない建物を親にすることになるため、作らない。
+        # type=building の relation の親子関係。面積の条件を通ったものだけが入る。
+        # 中身はノード収集の後で埋める（部材の面積に座標が要るため）。
         part_to_outline = {}
+        gated_outline_way_ids = set()
 
         # 建物を表す type=multipolygon は、穴のある建物である。
         # outer を外側、inner を内側のリングとして 1 棟にまとめる。
@@ -578,6 +628,41 @@ class PlateauImporter2PostGIS:
             except (ValueError, TypeError):
                 continue
 
+        # type=building の relation を、最大の部材の面積で選ぶ。
+        # この relation は「接触する建物を融合したまとまり」で、複数の棟を持つ
+        # 工場や学校のほかに、戸建てとカーポート、戸建ての並びが混ざっている。
+        # 残したいのは前者だけなので、最大の部材の面積 1 つで分ける。
+        # 建物区分は都市によって入っていないことがあるが、面積は図形から計算できる。
+        # 条件を満たさなかった relation は読まなかったことにする。メンバーは
+        # 下の way ループでこれまでどおり独立した建物として取り込まれる。
+        for rel_elem in root.findall('relation'):
+            rel_tags = {t.get('k'): t.get('v') for t in rel_elem.findall('tag')
+                        if t.get('k') and t.get('v')}
+            if rel_tags.get('type') != 'building':
+                continue
+            outline_way_id = None
+            part_way_ids = []
+            for m in rel_elem.findall('member'):
+                if m.get('type') != 'way':
+                    continue
+                role = m.get('role')
+                if role == 'outline':
+                    outline_way_id = m.get('ref')
+                elif role == 'part':
+                    part_way_ids.append(m.get('ref'))
+            if not outline_way_id or not part_way_ids:
+                continue
+            part_areas = []
+            for pwid in part_way_ids:
+                coords = [(nodes[r]['lon'], nodes[r]['lat'])
+                          for r in raw_way_nd_refs.get(pwid, []) if r in nodes]
+                part_areas.append(_polygon_area_m2(coords))
+            if not _relation_passes_area_gate(part_areas):
+                continue
+            gated_outline_way_ids.add(outline_way_id)
+            for pwid in part_way_ids:
+                part_to_outline[pwid] = outline_way_id
+
         # 建物ウェイ収集 (building または building:part を持つ way が対象)
         # way_id → nd_refs は multipolygon の outer/inner 解決にも使うので、
         # タグの有無に関わらず全 way について記録する。
@@ -614,8 +699,10 @@ class PlateauImporter2PostGIS:
 
             # 建物 ID を持たない建物 way は、融合で作られた合成形状である。
             # 元データに対応する形状が無いので取り込まない (10 メッシュ 386 本で確認)。
+            # 例外は、面積の条件を通った relation の outline メンバーだけ。融合は
+            # outline から ref:MLIT_PLATEAU を外すが、この合成外形は残したい。
             ref_mlit = tags.get('ref:MLIT_PLATEAU')
-            if (is_building or is_part) and not ref_mlit:
+            if not ref_mlit and way_id not in gated_outline_way_ids:
                 continue
 
             # 穴を潰した相方 (twin) なら、独立した建物として収集しない。
@@ -628,8 +715,8 @@ class PlateauImporter2PostGIS:
 
             # 最低3点でポリゴン形成
             if len(nd_refs) >= 3:
-                # part の場合は parent_outline_way_id を解決
-                parent_outline_way_id = part_to_outline.get(way_id) if is_part else None
+                # 面積の条件を通った relation の part メンバーだけが親を持つ。
+                parent_outline_way_id = part_to_outline.get(way_id)
                 buildings.append({
                     'way_id': way_id,
                     # 変換出力のどの要素から来たかの記録。osmEntity.id.fromOSM と
@@ -642,10 +729,11 @@ class PlateauImporter2PostGIS:
                     'source_file': osm_file.name,
                     'file_prefix': file_prefix,
                     'file_key': file_key,
-                    # 建物 ID を持つ way は、building:part に降格されていても
-                    # 元は独立した建物である。変換器は CityGML の BuildingPart を
-                    # 読まないので、真の部分立体は出力に存在しない。
-                    'is_part': False,
+                    # 面積の条件を通った relation の part メンバーだけを部材とする。
+                    # それ以外の way は、building:part に降格されていても独立した
+                    # 建物として扱う。変換器は CityGML の BuildingPart を読まない
+                    # ので、降格は融合の副産物であって部分立体ではない。
+                    'is_part': parent_outline_way_id is not None,
                     'parent_outline_way_id': parent_outline_way_id,
                 })
 
@@ -962,12 +1050,10 @@ class PlateauImporter2PostGIS:
                             # building:part 判定 (parse_osm_file_safe 由来)
                             is_part = bool(building.get('is_part'))
                             building_part_value = 'yes' if is_part else None
-                            # building タグ: part の場合は building タグ無しなので None
-                            building_value = (
-                                converted_tags.get('building', 'yes')
-                                if not is_part
-                                else tags.get('building')  # 通常 None
-                            )
+                            # 型は部材でも保存する。配信が building:part=<型> を
+                            # 出すのに要るため。convert_building_tags_enhanced は
+                            # building が無ければ building:part の値を型として読む。
+                            building_value = converted_tags.get('building', 'yes')
 
                             # 建物データ（plateau_buildingsテーブル構造に合わせる）
                             buildings_data.append((

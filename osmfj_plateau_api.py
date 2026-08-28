@@ -447,7 +447,9 @@ class OSMFJPlateauAPI:
     def _emit_building_tags(self, parent_elem, building: Dict, is_part: bool):
         """way / relation 共通のタグを追加するヘルパー。
 
-        is_part=True の場合は `building:part=yes`、それ以外は `building=*`。
+        is_part=True の場合は `building:part=<型>`、それ以外は `building=<型>`。
+        型は DB の building 列から取る。取り込みは部材の行にも型を保存している。
+        型が空の行 (2026-08-28 より前に取り込まれた部材) は yes に落とす。
         どちらでも height / ele / building:levels / name / addr / 等を出力。
         """
         def add_tag(key, value):
@@ -457,9 +459,9 @@ class OSMFJPlateauAPI:
                 tag_elem.set('v', str(value))
 
         if is_part:
-            add_tag('building:part', 'yes')
+            add_tag('building:part', building.get('building') or 'yes')
         else:
-            add_tag('building', building.get('building', 'yes'))
+            add_tag('building', building.get('building') or 'yes')
 
         if building.get('height'):
             add_tag('height', str(building['height']))

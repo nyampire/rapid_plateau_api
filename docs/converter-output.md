@@ -8,6 +8,9 @@ PLATEAU の CityGML は [citygml-osm](https://github.com/yuuhayashi/citygml-osm)
 
 個別タスクの設計は `docs/superpowers/specs/` にある。この文書はそれらをまたぐ恒久的な参照である。
 
+変換から配信まで、どの段が建物の図形に何をするかは
+[geometry-pipeline.md](geometry-pipeline.md) にまとめてある。この文書は変換出力の性質に絞る。
+
 上流に何を相談するか、どこまで判っているかは [upstream-consultation.md](upstream-consultation.md) にまとめてある。
 
 ---

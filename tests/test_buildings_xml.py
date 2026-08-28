@@ -474,6 +474,47 @@ class TestBuildingsToOsmXmlRelations:
         assert tags.get('height') == '5.4'
         assert tags.get('ele') == '3'
 
+    def test_part_emits_its_building_type(self, api):
+        """部材の型を building:part の値として出す。DB の型を捨てない。"""
+        part = _make_part(part_id=11, parent_id=None, building='industrial')
+        xml_str = api.buildings_to_osm_xml([part])
+        root = ET.fromstring(xml_str)
+        tags = {t.get('k'): t.get('v') for t in root.find('way').findall('tag')}
+        assert tags.get('building:part') == 'industrial'
+        assert 'building' not in tags
+
+    def test_walless_part_emits_building_part_roof(self, api):
+        """無壁舎が部材になった場合は building:part=roof になる。"""
+        part = _make_part(part_id=12, parent_id=None, building='roof')
+        xml_str = api.buildings_to_osm_xml([part])
+        root = ET.fromstring(xml_str)
+        tags = {t.get('k'): t.get('v') for t in root.find('way').findall('tag')}
+        assert tags.get('building:part') == 'roof'
+
+    def test_part_without_a_type_stays_yes(self, api):
+        """回帰テスト。型が空の行はこれまでどおり building:part=yes を出す。"""
+        part = _make_part(part_id=13, parent_id=None, building=None)
+        xml_str = api.buildings_to_osm_xml([part])
+        root = ET.fromstring(xml_str)
+        tags = {t.get('k'): t.get('v') for t in root.find('way').findall('tag')}
+        assert tags.get('building:part') == 'yes'
+
+    def test_typed_part_inside_a_relation_keeps_its_type(self, api):
+        """relation の中でも部材の型は落ちず、外形の型とは別に出る。"""
+        outline = _make_building(building_id=1, building='school', height=10)
+        p1 = _make_part(part_id=2, parent_id=1, building='roof', height=4)
+        xml_str = api.buildings_to_osm_xml([outline, p1])
+        root = ET.fromstring(xml_str)
+        by_id = {w.get('id'): {t.get('k'): t.get('v') for t in w.findall('tag')}
+                 for w in root.findall('way')}
+        assert by_id[str(-(1 * 1000))].get('building') == 'school'
+        assert by_id[str(-(2 * 1000))].get('building:part') == 'roof'
+        # relation 側は外形のタグを写すので building=school のまま。
+        rel_tags = {t.get('k'): t.get('v')
+                    for t in root.find('relation').findall('tag')}
+        assert rel_tags.get('building') == 'school'
+        assert 'building:part' not in rel_tags
+
     def test_orphan_part_emits_no_relation(self, api):
         """parent_building_id=None の part は way のみ、relation 出力なし"""
         orphan = _make_part(part_id=20, parent_id=None, height=3)

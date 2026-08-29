@@ -89,4 +89,29 @@ if [ "$EXIT" -eq 1 ]; then
   say "2 周目の終了コード $EXIT"
 fi
 
+if [ "$EXIT" -eq 0 ]; then
+  rm -f "$MARKER"
+  say "=== 全都市の送信が終わった ==="
+  TARGETS=$(ls -t "$WORK_ROOT"/reimport_targets_*.txt 2>/dev/null | head -1)
+  if [ -n "$TARGETS" ]; then
+    say "対象一覧: $(basename "$TARGETS") ($(grep -c . "$TARGETS") 都市)"
+  fi
+  echo
+  echo "次にサーバで取り込みを起動する。"
+  echo "その前に、サーバの done.txt を別の名前に改名する必要がある。"
+  echo "153 都市が済みとして記録されており、改名しないとその都市は飛ばされ、"
+  echo "古いデータのまま残る。"
+  echo
+  if [ -n "${REIMPORT_DONE_PATH:-}" ]; then
+    echo "  ssh $SHIP_HOST \"mv '$REIMPORT_DONE_PATH' '$REIMPORT_DONE_PATH.\$(date +%Y%m%d-%H%M%S)'\""
+    echo "  ssh $SHIP_HOST 'bash ~/start_reimport.sh'"
+  else
+    echo "  ship.env に REIMPORT_DONE_PATH が未設定のため、コマンドを表示しない。"
+    echo "  サーバの done.txt を改名してから start_reimport.sh を実行する。"
+  fi
+else
+  say "=== 終了コード $EXIT で終わった。印は残す ==="
+  say "同じコマンドで再実行すれば、送信済みの都市を飛ばして続きから進む"
+fi
+
 exit "$EXIT"

@@ -105,6 +105,8 @@ class TestFirstRun:
         assert backups[0].read_text() == '01100 50\n01202 30\n'
 
     def test_writes_the_marker(self, env):
+        # 成功すると印は消えるので、失敗して終わる ship_all.sh で見る。
+        _stub_exits(env, 1, 1)
         env.shipped.write_text('01100 50\n')
         _run(env)
         assert env.marker.exists()
@@ -133,6 +135,8 @@ class TestSecondRun:
         assert sorted(env.tmp.glob('shipped.txt.*')) == []
 
     def test_does_not_overwrite_the_marker(self, env):
+        # 成功すると印は消えるので、失敗して終わる ship_all.sh で見る。
+        _stub_exits(env, 1, 1)
         original = '開始 2026-08-29 00:00:00\n退避 shipped.txt.old\n'
         env.marker.write_text(original)
         _run(env)
@@ -190,3 +194,47 @@ class TestRetry:
         r = _run(env)
         assert r.returncode == 4
         assert _calls(env) == 1
+
+
+class TestFinish:
+    """印は全都市が成功したときだけ消す。次の手順を表示する。"""
+
+    def test_removes_the_marker_on_success(self, env):
+        _stub_exits(env, 0)
+        _run(env)
+        assert not env.marker.exists()
+
+    def test_keeps_the_marker_when_some_cities_fail(self, env):
+        _stub_exits(env, 1, 1)
+        _run(env)
+        assert env.marker.exists(), '続きから進めるように印を残す'
+
+    def test_keeps_the_marker_on_disk_shortage(self, env):
+        _stub_exits(env, 2)
+        _run(env)
+        assert env.marker.exists()
+
+    def test_tells_how_to_resume_when_it_failed(self, env):
+        _stub_exits(env, 1, 1)
+        r = _run(env)
+        assert '再実行' in r.stdout
+
+    def test_mentions_clearing_the_done_record(self, env):
+        _stub_exits(env, 0)
+        r = _run(env)
+        assert 'done.txt' in r.stdout
+        assert '済み' in r.stdout
+
+    def test_prints_the_concrete_command_when_the_path_is_configured(self, env):
+        env.ship_env.write_text(
+            env.ship_env.read_text()
+            + 'REIMPORT_DONE_PATH="/stub/logs/done.txt"\n')
+        _stub_exits(env, 0)
+        r = _run(env)
+        assert '/stub/logs/done.txt' in r.stdout
+        assert 'stubhost' in r.stdout
+
+    def test_hides_the_path_when_it_is_not_configured(self, env):
+        _stub_exits(env, 0)
+        r = _run(env)
+        assert 'REIMPORT_DONE_PATH' in r.stdout, '未設定であることを伝える'

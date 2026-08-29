@@ -137,3 +137,56 @@ class TestSecondRun:
         env.marker.write_text(original)
         _run(env)
         assert env.marker.read_text() == original
+
+
+def _stub_exits(env, *codes):
+    """呼ばれるたびに codes の順で終了コードを返す ship_all.sh に差し替える。"""
+    seq = env.tmp / 'seq.txt'
+    seq.write_text('\n'.join(str(c) for c in codes) + '\n')
+    _stub(env.bin, 'ship_all_stub',
+          'echo call >> "%s"\n'
+          'N=$(wc -l < "%s" | tr -d " ")\n'
+          'I=$(wc -l < "%s" | tr -d " ")\n'
+          'CODE=$(sed -n "${I}p" "%s")\n'
+          '[ -z "$CODE" ] && CODE=$(sed -n "${N}p" "%s")\n'
+          'exit "$CODE"' % (env.called, seq, env.called, seq, seq))
+
+
+class TestRetry:
+    """1 周目が一部失敗 (1) のときだけ、もう 1 度だけ実行する。"""
+
+    def test_runs_once_when_everything_succeeds(self, env):
+        _stub_exits(env, 0)
+        r = _run(env)
+        assert r.returncode == 0
+        assert _calls(env) == 1
+
+    def test_runs_twice_when_some_cities_fail(self, env):
+        _stub_exits(env, 1, 0)
+        r = _run(env)
+        assert r.returncode == 0, '2 周目で全部成功したので 0 になる'
+        assert _calls(env) == 2
+
+    def test_stops_after_the_second_round(self, env):
+        _stub_exits(env, 1, 1)
+        r = _run(env)
+        assert r.returncode == 1
+        assert _calls(env) == 2, '3 周目は実行しない'
+
+    def test_does_not_retry_on_disk_shortage(self, env):
+        _stub_exits(env, 2)
+        r = _run(env)
+        assert r.returncode == 2
+        assert _calls(env) == 1, 'ディスク不足はやり直しても直らない'
+
+    def test_does_not_retry_on_config_error(self, env):
+        _stub_exits(env, 3)
+        r = _run(env)
+        assert r.returncode == 3
+        assert _calls(env) == 1
+
+    def test_does_not_retry_on_transfer_failure(self, env):
+        _stub_exits(env, 4)
+        r = _run(env)
+        assert r.returncode == 4
+        assert _calls(env) == 1

@@ -21,6 +21,7 @@ import pytest
 from plateau_importer2postgis import (
     PlateauImporter2PostGIS,
     RELATION_MIN_LARGEST_PART_AREA_M2,
+    RELATION_MIXED_ROOF_MIN_OTHER_AREA_M2,
     _polygon_area_m2,
     _relation_passes_area_gate,
 )
@@ -2030,8 +2031,58 @@ class TestRelationAreaGate:
         assert _relation_passes_area_gate([]) is False
 
 
+class TestRelationAreaGateWithRoof:
+    """`building=roof` と他の値が混ざった集合は、roof 以外の最大面積で選ぶ。
+
+    無壁舎に付ける `roof` は、庇にもカーポートにも同じように付く。
+    値だけでは区別が付かないので、roof 以外の部材（母屋にあたる部分）の
+    大きさで分ける。詳細は
+    docs/superpowers/specs/2026-08-28-building-relation-area-gate-design.md の
+    2026-08-29 の追記を参照。
+    """
+
+    def test_threshold_is_150(self):
+        assert RELATION_MIXED_ROOF_MIN_OTHER_AREA_M2 == 150.0
+
+    def test_mixed_at_the_threshold_is_accepted(self):
+        """roof 以外の最大が 150 なら、全体の最大が 300 未満でも通る。"""
+        assert _relation_passes_area_gate(
+            [150.0, 20.0], ['yes', 'roof']) is True
+
+    def test_mixed_just_below_the_threshold_is_rejected(self):
+        assert _relation_passes_area_gate(
+            [149.0, 20.0], ['yes', 'roof']) is False
+
+    def test_the_300_rule_still_applies_to_a_mixed_relation(self):
+        """roof 以外が 150 未満でも、部材全体の最大が 300 以上なら通る。
+
+        大きい無壁舎に小さい建物が付いた形。300 の条件は残す。
+        """
+        assert _relation_passes_area_gate(
+            [149.0, 400.0], ['yes', 'roof']) is True
+
+    def test_all_roof_uses_the_300_rule(self):
+        """部材がすべて roof の集合は混在ではないので、150 を使わない。"""
+        assert _relation_passes_area_gate(
+            [200.0, 100.0], ['roof', 'roof']) is False
+        assert _relation_passes_area_gate(
+            [300.0, 100.0], ['roof', 'roof']) is True
+
+    def test_no_roof_uses_the_300_rule(self):
+        assert _relation_passes_area_gate(
+            [200.0, 100.0], ['yes', 'yes']) is False
+        assert _relation_passes_area_gate(
+            [300.0, 100.0], ['yes', 'yes']) is True
+
+    def test_omitting_the_values_uses_the_300_rule(self):
+        """型を渡さない呼び出しは、これまでどおりの判定になる。"""
+        assert _relation_passes_area_gate([200.0, 100.0]) is False
+        assert _relation_passes_area_gate([300.0, 100.0]) is True
+
+
 def _relation_osm(part_side_m, outline_side_m=None, part_tag='building:part',
-                  part_value='yes', outline_ref=None, extra_part_side_m=None):
+                  part_value='yes', outline_ref=None, extra_part_side_m=None,
+                  extra_part_value=None):
     """outline 1 本と part 1〜2 本を持つ type=building relation の .osm を返す。
 
     outline は建物 ID を持たない合成外形にしてある (`outline_ref=None`)。
@@ -2050,6 +2101,10 @@ def _relation_osm(part_side_m, outline_side_m=None, part_tag='building:part',
     rings = [('-100', _ring(outline_side_m)), ('-200', _ring(part_side_m))]
     if extra_part_side_m is not None:
         rings.append(('-300', _ring(extra_part_side_m, offset_lat=0.01)))
+    # 2 本目の部材だけ別の型にできるようにする。`building=roof` と他の値が
+    # 混ざった集合を組み立てるのに要る。
+    value_by_way = {'-200': part_value,
+                    '-300': extra_part_value or part_value}
 
     nodes, ways, node_id = [], [], -1
     for way_id, ring in rings:
@@ -2066,7 +2121,7 @@ def _relation_osm(part_side_m, outline_side_m=None, part_tag='building:part',
                         f'    <tag k="building" v="yes"/>{ref_tag}\n  </way>')
         else:
             ways.append(f'  <way id="{way_id}">\n    {nd}\n'
-                        f'    <tag k="{part_tag}" v="{part_value}"/>\n'
+                        f'    <tag k="{part_tag}" v="{value_by_way[way_id]}"/>\n'
                         f'    <tag k="ref:MLIT_PLATEAU" v="39999-bldg{way_id}"/>\n'
                         f'  </way>')
 
@@ -2145,6 +2200,33 @@ class TestRelationAreaGateOnOsmFiles:
         by_way = self._parse(bare_importer, xml)
         assert '-400' not in by_way, 'relation に属さない合成形状が通っている'
         assert '-100' in by_way, '条件を満たした外形まで落ちている'
+
+    def test_mixed_roof_keeps_a_relation_below_300(self, bare_importer):
+        """母屋 196 m² と庇 100 m² の集合。全体の最大は 300 未満だが残す。"""
+        by_way = self._parse(bare_importer, _relation_osm(
+            part_side_m=14.0, part_value='yes',
+            extra_part_side_m=10.0, extra_part_value='roof'))
+        assert '-100' in by_way, '混在した relation の外形が落ちている'
+        assert by_way['-200']['is_part'] is True
+        assert by_way['-300']['is_part'] is True
+        assert by_way['-300']['parent_outline_way_id'] == '-100'
+
+    def test_mixed_roof_with_a_small_main_part_is_dropped(self, bare_importer):
+        """母屋が 121 m² しかない集合は、カーポートの形とみなして分ける。"""
+        by_way = self._parse(bare_importer, _relation_osm(
+            part_side_m=11.0, part_value='yes',
+            extra_part_side_m=10.0, extra_part_value='roof'))
+        assert '-100' not in by_way, '母屋の小さい relation が通っている'
+        assert by_way['-200']['is_part'] is False
+        assert by_way['-300']['is_part'] is False
+
+    def test_all_roof_parts_below_300_are_dropped(self, bare_importer):
+        """部材がどちらも roof なら混在ではないので、196 m² でも分ける。"""
+        by_way = self._parse(bare_importer, _relation_osm(
+            part_side_m=14.0, part_value='roof',
+            extra_part_side_m=10.0, extra_part_value='roof'))
+        assert '-100' not in by_way, 'roof だけの relation が通っている'
+        assert by_way['-200']['is_part'] is False
 
 
 

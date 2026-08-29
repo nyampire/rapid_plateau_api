@@ -79,6 +79,14 @@ def _triangle_area_m2(coords):
 RELATION_MIN_LARGEST_PART_AREA_M2 = 300.0
 
 
+# `building=roof` と他の値が混ざった relation で、roof 以外の部材に求める最大面積 (m²)。
+# 無壁舎に付ける `roof` は、大きい建物の庇にも戸建てのカーポートにも同じように付く。
+# 値だけでは区別が付かないので、roof 以外の部材（母屋にあたる部分）の大きさで分ける。
+# 再変換済み 21 都市からの抜き取りでは、この値より上は庇、100 m² より下はカーポート
+# だった。詳細は上と同じ設計文書の 2026-08-29 の追記を参照。
+RELATION_MIXED_ROOF_MIN_OTHER_AREA_M2 = 150.0
+
+
 def _polygon_area_m2(coords):
     """多角形の面積を m² で返す。
 
@@ -109,15 +117,28 @@ def _polygon_area_m2(coords):
     return area_deg2 * _METERS_PER_DEGREE_LAT * meters_per_degree_lon
 
 
-def _relation_passes_area_gate(part_areas):
+def _relation_passes_area_gate(part_areas, part_values=None):
     """部材の面積の列から、その relation を取り込むかどうかを返す。
 
-    条件は「最大の部材が RELATION_MIN_LARGEST_PART_AREA_M2 以上」の 1 つだけ。
+    基本の条件は「最大の部材が RELATION_MIN_LARGEST_PART_AREA_M2 以上」の 1 つ。
     2 番目の部材に条件を足す案は、大きい建物に庇が 1 つ付いた形を巻き添えに
     するだけで、落としたい形には効かなかったので採らなかった。
+
+    `part_values` に部材ごとの建物の型 (`building:part` か `building` の値) を
+    `part_areas` と同じ並びで渡すと、`roof` と他の値が混ざった relation に
+    RELATION_MIXED_ROOF_MIN_OTHER_AREA_M2 の条件を足す。庇の付いた建物が
+    集合ごと落ちるのを防ぐためで、混ざっていない relation の判定は変わらない。
+    渡さない呼び出しは基本の条件だけで判定する。
     """
     if not part_areas:
         return False
+    if part_values:
+        pairs = list(zip(part_areas, part_values))
+        roof_areas = [a for a, v in pairs if v == 'roof']
+        other_areas = [a for a, v in pairs if v != 'roof']
+        if (roof_areas and other_areas
+                and max(other_areas) >= RELATION_MIXED_ROOF_MIN_OTHER_AREA_M2):
+            return True
     return max(part_areas) >= RELATION_MIN_LARGEST_PART_AREA_M2
 
 
@@ -499,6 +520,8 @@ class PlateauImporter2PostGIS:
 
         building / building:part 対応 (importer source-fidelity task 1):
         - <relation type=building> は、最大の部材が 300 m² 以上のものだけを読む。
+          `roof` と他の値が混ざった relation は、roof 以外の最大が 150 m²
+          以上なら 300 m² に届かなくても読む。
           条件を満たしたものは outline を親、part を子として取り込む。
           満たさないものは読まなかったことにし、メンバーは独立した建物になる。
         - `ref:MLIT_PLATEAU` タグを持たない building/building:part way は
@@ -586,6 +609,15 @@ class PlateauImporter2PostGIS:
             w.get('id'): [nd.get('ref') for nd in w.findall('nd')]
             for w in root.findall('way')
         }
+        # way ごとの建物の型。relation の部材が `roof` かどうかの判定に使う。
+        # 部材には `building:part` が付くが、`building` しか持たない way も
+        # あるので両方を見る。
+        raw_way_building_value = {}
+        for w in root.findall('way'):
+            tags = {t.get('k'): t.get('v') for t in w.findall('tag')
+                    if t.get('k') and t.get('v')}
+            raw_way_building_value[w.get('id')] = (
+                tags.get('building:part') or tags.get('building'))
         twin_ref_by_rel_id = {}
         mp_ring_key_to_rel_id = {}
         for rel_id, _rel_tags, outer_way_id, _inners in mp_buildings:
@@ -631,7 +663,9 @@ class PlateauImporter2PostGIS:
         # type=building の relation を、最大の部材の面積で選ぶ。
         # この relation は「接触する建物を融合したまとまり」で、複数の棟を持つ
         # 工場や学校のほかに、戸建てとカーポート、戸建ての並びが混ざっている。
-        # 残したいのは前者だけなので、最大の部材の面積 1 つで分ける。
+        # 残したいのは前者だけなので、最大の部材の面積で分ける。
+        # ただし `roof` と他の値が混ざっている場合は、大きい建物に庇が付いた形が
+        # 混ざるので、roof 以外の最大の面積で分ける。
         # 建物区分は都市によって入っていないことがあるが、面積は図形から計算できる。
         # 条件を満たさなかった relation は読まなかったことにする。メンバーは
         # 下の way ループでこれまでどおり独立した建物として取り込まれる。
@@ -653,11 +687,13 @@ class PlateauImporter2PostGIS:
             if not outline_way_id or not part_way_ids:
                 continue
             part_areas = []
+            part_values = []
             for pwid in part_way_ids:
                 coords = [(nodes[r]['lon'], nodes[r]['lat'])
                           for r in raw_way_nd_refs.get(pwid, []) if r in nodes]
                 part_areas.append(_polygon_area_m2(coords))
-            if not _relation_passes_area_gate(part_areas):
+                part_values.append(raw_way_building_value.get(pwid))
+            if not _relation_passes_area_gate(part_areas, part_values):
                 continue
             gated_outline_way_ids.add(outline_way_id)
             for pwid in part_way_ids:

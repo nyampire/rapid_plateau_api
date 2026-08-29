@@ -238,3 +238,37 @@ class TestFinish:
         _stub_exits(env, 0)
         r = _run(env)
         assert 'REIMPORT_DONE_PATH' in r.stdout, '未設定であることを伝える'
+
+
+class TestSleepAndLog:
+    """スリープの抑止は、あれば使い、無ければ警告して続ける。"""
+
+    def test_calls_caffeinate_when_available(self, env):
+        marker = env.tmp / 'caffeinate_called.txt'
+        _stub(env.bin, 'caffeinate', 'echo "$@" >> "%s"' % marker)
+        # caffeinate は背景で実行するので、ship_all.sh を待たせて時間を作る。
+        # 待たせないと、書き込みの前にスクリプトが終わって結果が揺れる。
+        _stub(env.bin, 'ship_all_stub',
+              'echo call >> "%s"\nsleep 1\nexit 0' % env.called)
+        r = _run(env)
+        assert r.returncode == 0
+        assert marker.exists(), 'caffeinate が呼ばれていない'
+        assert '-i' in marker.read_text()
+
+    def test_continues_without_caffeinate(self, env):
+        env.run_env['CAFFEINATE_BIN'] = 'caffeinate_not_installed'
+        r = _run(env)
+        assert r.returncode == 0
+        assert '警告' in r.stdout
+        assert 'caffeinate_not_installed' in r.stdout
+
+    def test_writes_a_log_file(self, env):
+        _run(env)
+        logs = sorted(env.work.glob('reship_*.log'))
+        assert len(logs) == 1
+        assert 'reship_all 開始' in logs[0].read_text()
+
+    def test_the_log_holds_the_same_lines_as_the_screen(self, env):
+        r = _run(env)
+        log = sorted(env.work.glob('reship_*.log'))[0].read_text()
+        assert log == r.stdout

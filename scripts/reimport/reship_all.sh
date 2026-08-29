@@ -45,6 +45,16 @@ say() { echo "[$(ts)] $*"; }
 MARKER="$WORK_ROOT/reship_in_progress"
 STAMP=$(date '+%Y%m%d-%H%M%S')
 
+# 画面とファイルの両方に記録を残す。自分自身をもう一度実行して tee に通す。
+# exec > >(tee ...) の形は、スクリプトが終わるときに tee が書き終える前に
+# 切れることがあり、ログの末尾が欠ける。パイプなら最後まで書き切る。
+# 終了コードは PIPESTATUS[0] から取るので、tee の成否に影響されない。
+if [ -z "${RESHIP_LOG:-}" ]; then
+  export RESHIP_LOG="$WORK_ROOT/reship_$STAMP.log"
+  bash "$0" "$@" 2>&1 | tee -a "$RESHIP_LOG"
+  exit "${PIPESTATUS[0]}"
+fi
+
 say "=== reship_all 開始 ==="
 
 if [ -e "$MARKER" ]; then
@@ -70,6 +80,18 @@ else
   fi
   printf '開始 %s\n退避 %s\n' "$(ts)" "$BACKUP_NAME" > "$MARKER"
   say "やり直しを開始する。計画の全都市が対象になる"
+fi
+
+# 手元が macOS だと、無操作のままスリープして処理が止まる。前回の送信では
+# 30 分を超える中断が 10 回、合計 10.1 時間あった (実働は 12.6 時間)。
+# -w に自分のプロセス ID を渡すので、このスクリプトが終われば抑止も解ける。
+if command -v "$CAFFEINATE_BIN" > /dev/null 2>&1; then
+  "$CAFFEINATE_BIN" -i -w $$ &
+  say "スリープを抑止する ($CAFFEINATE_BIN pid=$!)"
+else
+  # macOS 以外には caffeinate が無い。抑止できないことは、
+  # やり直しを止める理由にならない。
+  say "警告: $CAFFEINATE_BIN が無い。スリープを抑止せずに続ける"
 fi
 
 say "=== 1 周目 ==="

@@ -90,3 +90,50 @@ class TestConfigCheck:
         r = _run(env)
         assert r.returncode == 3
         assert _calls(env) == 0
+
+
+class TestFirstRun:
+    """印が無ければ初回。shipped.txt を改名して空にし、印を置く。"""
+
+    def test_renames_shipped_and_leaves_it_empty(self, env):
+        env.shipped.write_text('01100 50\n01202 30\n')
+        r = _run(env)
+        assert r.returncode == 0
+        assert env.shipped.read_text() == ''
+        backups = sorted(env.tmp.glob('shipped.txt.*'))
+        assert len(backups) == 1, '改名した控えが 1 つだけ残る'
+        assert backups[0].read_text() == '01100 50\n01202 30\n'
+
+    def test_writes_the_marker(self, env):
+        env.shipped.write_text('01100 50\n')
+        _run(env)
+        assert env.marker.exists()
+        lines = env.marker.read_text().splitlines()
+        assert lines[0].startswith('開始 ')
+        assert 'shipped.txt.' in lines[1]
+
+    def test_works_when_shipped_does_not_exist(self, env):
+        # shipped.txt がまだ無い状態でも止まらない。控えは作らない。
+        assert not env.shipped.exists()
+        r = _run(env)
+        assert r.returncode == 0
+        assert env.shipped.read_text() == ''
+        assert sorted(env.tmp.glob('shipped.txt.*')) == []
+
+
+class TestSecondRun:
+    """印があれば再実行。shipped.txt に触らない。"""
+
+    def test_keeps_shipped_when_marker_exists(self, env):
+        env.marker.write_text('開始 2026-08-29 00:00:00\n退避 shipped.txt.old\n')
+        env.shipped.write_text('01100 50\n01202 30\n')
+        r = _run(env)
+        assert r.returncode == 0
+        assert env.shipped.read_text() == '01100 50\n01202 30\n'
+        assert sorted(env.tmp.glob('shipped.txt.*')) == []
+
+    def test_does_not_overwrite_the_marker(self, env):
+        original = '開始 2026-08-29 00:00:00\n退避 shipped.txt.old\n'
+        env.marker.write_text(original)
+        _run(env)
+        assert env.marker.read_text() == original

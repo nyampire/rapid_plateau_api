@@ -42,4 +42,32 @@ fi
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 say() { echo "[$(ts)] $*"; }
 
+MARKER="$WORK_ROOT/reship_in_progress"
+STAMP=$(date '+%Y%m%d-%H%M%S')
+
 say "=== reship_all 開始 ==="
+
+if [ -e "$MARKER" ]; then
+  # 前回の実行が途中で終わっている。shipped.txt には送信済みの都市が
+  # 入っているので、そのまま ship_all.sh に飛ばさせる。
+  say "前回の続きから進む ($(head -1 "$MARKER"))"
+else
+  # 初回。送信済みの記録を控えに移してから空にする。
+  # これをしないと ship_all.sh が 298 都市すべてを飛ばして 1 都市も送らない。
+  BACKUP_NAME="(元から無し)"
+  if [ -e "$SHIPPED_TXT" ]; then
+    BACKUP="$SHIPPED_TXT.$STAMP"
+    if ! mv "$SHIPPED_TXT" "$BACKUP"; then
+      say "中止: shipped.txt を改名できない ($SHIPPED_TXT)"
+      exit 3
+    fi
+    BACKUP_NAME=$(basename "$BACKUP")
+    say "shipped.txt を $BACKUP_NAME に改名した"
+  fi
+  if ! : > "$SHIPPED_TXT"; then
+    say "中止: shipped.txt を作れない ($SHIPPED_TXT)"
+    exit 3
+  fi
+  printf '開始 %s\n退避 %s\n' "$(ts)" "$BACKUP_NAME" > "$MARKER"
+  say "やり直しを開始する。計画の全都市が対象になる"
+fi

@@ -5,6 +5,10 @@
 #
 # shipped.txt にある都市は飛ばすので、途中で止めて再実行できる。
 # 1 都市の失敗では止まらない。ディスクが閾値を割ったときだけ全体を止める。
+#
+# SHIP_PARALLEL に 2 以上を入れると、その数だけ都市を同時に処理する。
+# 変換が 1 コアしか使わないので、コアが余っていれば台数分だけ速くなる。
+# 空き容量の下限は同時実行数の分だけ引き上げる。
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,6 +30,8 @@ fi
 : "${DISK_MIN_KB:=5242880}"
 : "${EXPECTED_CITIES:=148}"
 : "${KEEP_RETAINED_DIRS:=3}"
+# 同時に処理する都市の数。1 なら 1 都市ずつで、これまでと同じ動きになる。
+: "${SHIP_PARALLEL:=1}"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 say() { echo "[$(ts)] $*"; }
@@ -72,7 +78,7 @@ report_retained() {
 # ship_city.sh がそこで exit 1 して落ちる。ship_all.sh はそれを
 # 「1 都市の失敗」として積んで次へ進むので、148 都市すべてが同じ理由で
 # 落ちてから気づくことになる。ここで先に止める。
-for v in DISK_MIN_KB EXPECTED_CITIES KEEP_RETAINED_DIRS; do
+for v in DISK_MIN_KB EXPECTED_CITIES KEEP_RETAINED_DIRS SHIP_PARALLEL; do
   eval "val=\$$v"
   if ! need_int "$val"; then
     say "ABORT: ${v} が数字でない (値: ${val})"
@@ -87,6 +93,17 @@ for v in DISK_MIN_KB EXPECTED_CITIES KEEP_RETAINED_DIRS; do
   val=$((10#$val))
   eval "$v=\$val"
 done
+
+# 0 を通すと 1 都市も起動しないまま「ok=0」で正常終了に見える。
+# 走らなかったことに気づけないので、設定検査と同じ exit 3 で止める。
+if [ "$SHIP_PARALLEL" -lt 1 ]; then
+  say "ABORT: SHIP_PARALLEL が 1 未満 (値: $SHIP_PARALLEL)"
+  exit 3
+fi
+
+# 空き容量の下限は同時実行数の分だけ要る。作業ディレクトリが
+# 同時に SHIP_PARALLEL 個できるので、1 都市分で判定すると足りない。
+DISK_FLOOR=$((DISK_MIN_KB * SHIP_PARALLEL))
 
 # 失敗すると再開の飛ばしが無言で無効になり (grep が読む相手が無い)、
 # 最後の cut もリダイレクト先が無く失敗して TARGETS が空のまま作られる。
@@ -132,6 +149,73 @@ failed=""
 ok=0
 skip=0
 i=0
+DISK_ABORT=0
+
+# 走っている子を枠で管理する。bash 3.2 には wait -n が無いので、
+# 枠を順に見て回り、kill -0 で死んでいる子を見つけて回収する。
+# 死んだ子には wait がすぐ返るので、そこで終了コードが取れる。
+SLOT_PID=()
+SLOT_CITY=()
+FREE_SLOT=""
+
+# 枠 $1 の子を回収して、結果を数え上げる。
+reap_slot() {
+  local idx=$1
+  local pid=${SLOT_PID[$idx]}
+  local label=${SLOT_CITY[$idx]}
+  local code
+  wait "$pid"
+  code=$?
+  SLOT_PID[$idx]=""
+  SLOT_CITY[$idx]=""
+  if [ "$code" -eq 0 ]; then
+    ok=$((ok + 1))
+    say "$label: OK"
+  elif [ "$code" -eq 2 ]; then
+    # 2 はディスク不足の合図で、他の失敗と混ぜてはいけない。
+    # 走っている残りを待ってから全体を止める。
+    say "ABORT: $label でディスク不足"
+    report_retained
+    DISK_ABORT=1
+  else
+    failed="$failed ${label##* }"
+    say "$label: FAIL exit=$code"
+  fi
+}
+
+# 空いている枠の番号を FREE_SLOT に入れる。埋まっていれば 1 つ空くまで待つ。
+take_slot() {
+  local idx
+  while :; do
+    for idx in $(seq 0 $((SHIP_PARALLEL - 1))); do
+      if [ -z "${SLOT_PID[$idx]:-}" ]; then
+        FREE_SLOT=$idx
+        return 0
+      fi
+      if ! kill -0 "${SLOT_PID[$idx]}" 2> /dev/null; then
+        reap_slot "$idx"
+        FREE_SLOT=$idx
+        return 0
+      fi
+    done
+    # 1 都市に数分かかるので、1 秒ごとに見に行けば十分である。
+    sleep 1
+  done
+}
+
+# 走っている子を全部待って回収する。
+drain_slots() {
+  local idx
+  for idx in $(seq 0 $((SHIP_PARALLEL - 1))); do
+    if [ -n "${SLOT_PID[$idx]:-}" ]; then
+      reap_slot "$idx"
+    fi
+  done
+}
+
+if [ "$SHIP_PARALLEL" -gt 1 ]; then
+  say "同時に $SHIP_PARALLEL 都市を処理する (空きの下限 $DISK_FLOOR KB)"
+fi
 # tr -d '\r' は CRLF の CSV に備える。\r が残ると shipped.txt との照合が
 # 一致しなくなり、再開のたびに全都市を送り直す。
 for CITY in $(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | tr -d '\r'); do
@@ -148,32 +232,36 @@ for CITY in $(tail -n +2 "$PLAN_CSV" | cut -d, -f1 | tr -d '\r'); do
     say "ABORT: 空き容量を読めない (df の出力: $AVAIL)"
     exit 2
   fi
-  if [ "$AVAIL" -lt "$DISK_MIN_KB" ]; then
-    say "ABORT: 空きが $AVAIL KB で下限 $DISK_MIN_KB を割った"
+  if [ "$AVAIL" -lt "$DISK_FLOOR" ]; then
+    say "ABORT: 空きが $AVAIL KB で下限 $DISK_FLOOR KB を割った"
     # 起動時の report_retained (この時点では何時間も前) だけだと、原因が
     # 退避の堆積だと運用者が気づけない。実際に走行を止めるのはここなので、
     # 止まる直前にもう一度出す。
     report_retained
-    exit 2
+    DISK_ABORT=1
+    break
+  fi
+
+  # 枠が空くまで待つ。待っているあいだに回収した子がディスク不足を
+  # 返していたら、次の都市は起動しない。
+  take_slot
+  if [ "$DISK_ABORT" -ne 0 ]; then
+    break
   fi
 
   say "[$i/$CODES] $CITY: START"
-  $SHIP_CITY_CMD "$CITY"
-  EXIT=$?
-  if [ "$EXIT" -eq 0 ]; then
-    ok=$((ok + 1))
-    say "[$i/$CODES] $CITY: OK"
-  elif [ "$EXIT" -eq 2 ]; then
-    say "ABORT: $CITY でディスク不足"
-    # 1 都市の処理中にディスク不足を検知するこの経路も走行を止める門で、
-    # 1 都市で数 GB 使うためループ先頭の門より先に踏まれることもある。
-    report_retained
-    exit 2
-  else
-    failed="$failed $CITY"
-    say "[$i/$CODES] $CITY: FAIL exit=$EXIT"
-  fi
+  $SHIP_CITY_CMD "$CITY" &
+  SLOT_PID[$FREE_SLOT]=$!
+  SLOT_CITY[$FREE_SLOT]="[$i/$CODES] $CITY"
 done
+
+# 起動し終えた分を待つ。ディスク不足で抜けた場合も、走っている子は
+# 最後まで待つ。途中で殺すと作業ディレクトリが中途半端に残る。
+drain_slots
+
+if [ "$DISK_ABORT" -ne 0 ]; then
+  exit 2
+fi
 
 # 一覧は毎回新しい名前で置く。第 2 段の走行中に送り直しても、
 # 走っているバッチが読むファイルを書き換えない。

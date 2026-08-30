@@ -528,3 +528,159 @@ def test_expected_cities_with_leading_zero_0148_matches_148_cities(env):
     assert len(env.called.read_text().split()) == 148, r.stdout
     assert '(期待 148)' in r.stdout, r.stdout
     assert '(期待 0148)' not in r.stdout, r.stdout
+
+
+# ----------------------------------------------------------------------
+# 並列で都市を処理する
+# ----------------------------------------------------------------------
+
+
+def _concurrency_stub(e, sleep_s='0.4', fail_city=None, parallel_dir=None):
+    """同時に何都市が動いていたかを記録する ship_city の代役を置く。
+
+    走り始めに `running/<都市>` を作り、少し待ってからその時点の
+    ディレクトリの数を `peak.txt` に書き足し、最後に自分の印を消す。
+    数の最大値を見れば、同時実行数が実際に上がったかが判る。
+    """
+    running = parallel_dir or (e.tmp / 'running')
+    running.mkdir(exist_ok=True)
+    peak = e.tmp / 'peak.txt'
+    fail = ('if [ "$1" = "%s" ]; then rm -f "%s/$1"; exit 11; fi\n'
+            % (fail_city, running)) if fail_city else ''
+    _stub(e.bin, 'ship_city_stub',
+          'echo "$1" >> "%s"\n'
+          'touch "%s/$1"\n'
+          'sleep %s\n'
+          'ls "%s" | wc -l | tr -d " " >> "%s"\n'
+          '%s'
+          'echo "$1 3" >> "%s"\n'
+          'rm -f "%s/$1"\n'
+          'exit 0'
+          % (e.called, running, sleep_s, running, peak, fail,
+             e.shipped, running))
+    return peak
+
+
+def _with_env(e, replacements):
+    """ship.env を書き換えた別ファイルを使わせる。"""
+    path = e.tmp / 'ship_variant.env'
+    text = (e.tmp / 'ship.env').read_text()
+    for old, new in replacements:
+        assert old in text, old
+        text = text.replace(old, new)
+    path.write_text(text)
+    e.run_env['SHIP_ENV'] = str(path)
+    return path
+
+
+class TestShipParallel:
+    """SHIP_PARALLEL で同時に走らせる都市の数を決める。"""
+
+    def test_defaults_to_one_at_a_time(self, env):
+        """設定しなければ、これまでどおり 1 都市ずつ処理する。"""
+        _write_plan(env, ['13402', '30406', '43213'])
+        peak = _concurrency_stub(env)
+
+        r = _run(env)
+
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert max(int(x) for x in peak.read_text().split()) == 1
+
+    def test_three_cities_run_at_the_same_time(self, env):
+        _write_plan(env, ['13402', '30406', '43213'])
+        peak = _concurrency_stub(env)
+        _with_env(env, [('DISK_MIN_KB=0', 'DISK_MIN_KB=0\nSHIP_PARALLEL=3')])
+
+        r = _run(env)
+
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert max(int(x) for x in peak.read_text().split()) == 3
+
+    def test_every_city_is_processed_exactly_once(self, env):
+        _write_plan(env, ['13402', '30406', '43213'])
+        _concurrency_stub(env)
+        _with_env(env, [('DISK_MIN_KB=0', 'DISK_MIN_KB=0\nSHIP_PARALLEL=3')])
+
+        r = _run(env)
+
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert sorted(env.called.read_text().split()) == [
+            '13402', '30406', '43213']
+
+    def test_already_shipped_cities_are_still_skipped(self, env):
+        _write_plan(env, ['13402', '30406', '43213'])
+        _concurrency_stub(env)
+        env.shipped.write_text('13402 8\n')
+        _with_env(env, [('DISK_MIN_KB=0', 'DISK_MIN_KB=0\nSHIP_PARALLEL=3')])
+
+        r = _run(env)
+
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert sorted(env.called.read_text().split()) == ['30406', '43213']
+
+    def test_a_failure_is_reported_and_the_rest_still_run(self, env):
+        """並列でも、失敗した都市を数え上げて終了コード 1 を返す。"""
+        _write_plan(env, ['13402', '30406', '43213'])
+        _concurrency_stub(env, fail_city='30406')
+        _with_env(env, [('DISK_MIN_KB=0', 'DISK_MIN_KB=0\nSHIP_PARALLEL=3')])
+
+        r = _run(env)
+
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert sorted(env.called.read_text().split()) == [
+            '13402', '30406', '43213']
+        assert '30406' in r.stdout
+
+    def test_a_non_numeric_value_stops_before_any_city(self, env):
+        _write_plan(env, ['13402', '30406', '43213'])
+        _concurrency_stub(env)
+        _with_env(env, [('DISK_MIN_KB=0', 'DISK_MIN_KB=0\nSHIP_PARALLEL=three')])
+
+        r = _run(env)
+
+        assert r.returncode == 3, r.stdout + r.stderr
+        assert not env.called.exists()
+
+    def test_zero_stops_before_any_city(self, env):
+        """0 を通すと 1 都市も起動しないまま正常終了に見える。"""
+        _write_plan(env, ['13402', '30406', '43213'])
+        _concurrency_stub(env)
+        _with_env(env, [('DISK_MIN_KB=0', 'DISK_MIN_KB=0\nSHIP_PARALLEL=0')])
+
+        r = _run(env)
+
+        assert r.returncode == 3, r.stdout + r.stderr
+        assert not env.called.exists()
+
+    def test_the_disk_floor_scales_with_the_parallel_count(self, env):
+        """3 並列なら、3 都市分の空きを求める。
+
+        1 都市分しか見ないままだと、3 つの作業ディレクトリが同時に
+        膨らんで、下限を割ったことに誰も気づかないまま書き込みが失敗する。
+        """
+        _write_plan(env, ['13402', '30406', '43213'])
+        _concurrency_stub(env)
+        # df を差し替えて空きを 300 KB に固定する。下限 100 KB の 3 倍は
+        # 300 KB なので 1 都市分では通り、3 都市分では通らない値にする。
+        _stub(env.bin, 'df', 'echo "Filesystem 1K-blocks Used Available"\n'
+                             'echo "stub 1000 700 299"')
+        _with_env(env, [('DISK_MIN_KB=0', 'DISK_MIN_KB=100\nSHIP_PARALLEL=3')])
+
+        r = _run(env)
+
+        assert r.returncode == 2, r.stdout + r.stderr
+        assert not env.called.exists()
+
+    def test_one_at_a_time_still_uses_the_plain_floor(self, env):
+        """1 並列なら、これまでどおり 1 都市分の空きで判定する。"""
+        _write_plan(env, ['13402', '30406', '43213'])
+        _concurrency_stub(env)
+        _stub(env.bin, 'df', 'echo "Filesystem 1K-blocks Used Available"\n'
+                             'echo "stub 1000 700 299"')
+        _with_env(env, [('DISK_MIN_KB=0', 'DISK_MIN_KB=100\nSHIP_PARALLEL=1')])
+
+        r = _run(env)
+
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert sorted(env.called.read_text().split()) == [
+            '13402', '30406', '43213']

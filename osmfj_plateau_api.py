@@ -461,7 +461,13 @@ class OSMFJPlateauAPI:
         if is_part:
             add_tag('building:part', building.get('building') or 'yes')
         else:
-            add_tag('building', building.get('building') or 'yes')
+            building_type = building.get('building') or 'yes'
+            add_tag('building', building_type)
+            # iD は building=roof に layer が無いと警告を出す。無壁舎とカーポート、
+            # 庇はここに入り、地表の地物の上に架かる構造なので layer=1 を添える。
+            # 部材 (building:part) には付けない。建物そのものではないため。
+            if building_type == 'roof':
+                add_tag('layer', '1')
 
         if building.get('height'):
             add_tag('height', str(building['height']))

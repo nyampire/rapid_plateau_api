@@ -1309,3 +1309,43 @@ class TestOsmChangePlaceholderContract:
             for nd in way.findall('nd'):
                 assert nd.get('ref') in emitted, \
                     f"way {way.get('id')} が未出力のノード {nd.get('ref')} を参照している"
+
+class TestRoofLayer:
+    """building=roof には layer=1 を添える (iD が layer なしで警告を出すため)"""
+
+    def test_roof_building_gets_layer_1(self, api):
+        """無壁舎の外形 (building=roof) に layer=1 が乗る。"""
+        building = _make_building(building_id=1, building='roof')
+        xml_str = api.buildings_to_osm_xml([building])
+        root = ET.fromstring(xml_str)
+        tags = {t.get('k'): t.get('v') for t in root.find('way').findall('tag')}
+        assert tags.get('building') == 'roof'
+        assert tags.get('layer') == '1'
+
+    def test_non_roof_building_gets_no_layer(self, api):
+        """回帰テスト。roof 以外の建物に layer は付かない。"""
+        building = _make_building(building_id=1, building='residential')
+        xml_str = api.buildings_to_osm_xml([building])
+        root = ET.fromstring(xml_str)
+        tags = {t.get('k'): t.get('v') for t in root.find('way').findall('tag')}
+        assert 'layer' not in tags
+
+    def test_building_part_roof_gets_no_layer(self, api):
+        """部材は建物そのものではないので layer を付けない。"""
+        part = _make_part(part_id=12, parent_id=None, building='roof')
+        xml_str = api.buildings_to_osm_xml([part])
+        root = ET.fromstring(xml_str)
+        tags = {t.get('k'): t.get('v') for t in root.find('way').findall('tag')}
+        assert tags.get('building:part') == 'roof'
+        assert 'layer' not in tags
+
+    def test_roof_relation_gets_layer_1(self, api):
+        """外形が roof なら relation 側にも layer=1 が乗る。"""
+        outline = _make_building(building_id=1, building='roof')
+        part = _make_part(part_id=2, parent_id=1, height=4)
+        xml_str = api.buildings_to_osm_xml([outline, part])
+        root = ET.fromstring(xml_str)
+        rel_tags = {t.get('k'): t.get('v')
+                    for t in root.find('relation').findall('tag')}
+        assert rel_tags.get('building') == 'roof'
+        assert rel_tags.get('layer') == '1'

@@ -222,7 +222,7 @@ def test_rewrite_osm_leaves_no_part_file(tmp_path):
 def test_apply_dir_reports_mesh_without_class(tmp_path):
     """区分を持たない都市を黙って通さない。
 
-    茨木市 27209 は標本の 12 メッシュで bldg:class が 1 件も無かった。
+    守口市 27209 は標本の 12 メッシュで bldg:class が 1 件も無かった。
     建物 ID はあるので突き合わせは通り、1 件も直らないまま完走する。
     """
     (tmp_path / 'm1.gml').write_text(_gml([('c-bldg-1', None)]), encoding='utf-8')

@@ -258,7 +258,7 @@ outline との重心距離とハウスドルフ距離が小さいことが決め
 | 27204 池田 | `ConcurrentModificationException` | `OutlineFactory.java:32` |
 | 20201 長野 | `NullPointerException` | `OutlineFactory.java:51` |
 | 27203 豊中 | `NullPointerException` | `OutlineFactory.java:51` |
-| 27209 茨木 | `NullPointerException` | `OutlineFactory.java:58` |
+| 27209 守口 | `NullPointerException` | `OutlineFactory.java:58` |
 
 #### 甲: 反復している地図に、その反復の中から要素を足す
 

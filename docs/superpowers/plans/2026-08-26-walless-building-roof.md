@@ -511,7 +511,7 @@ git commit -m "feat(reimport): 無壁舎の way を building=roof にする"
 def test_apply_dir_reports_mesh_without_class(tmp_path):
     """区分を持たない都市を黙って通さない。
 
-    茨木市 27209 は標本の 12 メッシュで bldg:class が 1 件も無かった。
+    守口市 27209 は標本の 12 メッシュで bldg:class が 1 件も無かった。
     建物 ID はあるので突き合わせは通り、1 件も直らないまま完走する。
     """
     (tmp_path / 'm1.gml').write_text(_gml([('c-bldg-1', None)]), encoding='utf-8')
@@ -832,7 +832,7 @@ PLATEAU の建物区分が無壁舎 (`bldg:class` 3003 / 3004) の建物を
 - `meshes_without_class` が区分を 1 件も持たなかったメッシュの数
 
 **`meshes_without_class` がメッシュ数と同じなら、その都市は 1 件も直っていない。**
-区分を持たない都市が実在する (茨木市 27209 の標本 12 メッシュで確認)。
+区分を持たない都市が実在する (守口市 27209 の標本 12 メッシュで確認)。
 突き合わせ自体は通るので、この数を見ないと気づけない。
 ```
 

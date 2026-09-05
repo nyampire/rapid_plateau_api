@@ -1,4 +1,5 @@
 city_code,package,year,citygml_v,bytes,url
+01100,plateau-01100-sapporo-shi-2020,2020,4,2718857710,https://assets.cms.plateau.reearth.io/assets/be/3b8cfb-5459-4f9d-b08c-fb4ab72fbdbd/01100_sapporo-shi_city_2020_citygml_7_op.zip
 01205,plateau-01205-muroran-shi-2022,2022,4,238403688,https://assets.cms.plateau.reearth.io/assets/ab/da35f0-8c55-43d1-ad9e-1689bbc084a8/01205_muroran-shi_city_2022_citygml_4_op.zip
 01639,plateau-01639-sarabetsu-mura-2023,2023,4,1148012455,https://assets.cms.plateau.reearth.io/assets/81/fcc64a-cc94-403e-9022-d187415f00f5/01639_sarabetsu-mura_city_2023_citygml_2_op.zip
 02208,plateau-02208-mutsu-shi-2022,2022,4,1348782311,https://assets.cms.plateau.reearth.io/assets/13/5cb74c-b92a-42f2-9f98-0b7897487f33/02208_mutsu-shi_city_2022_citygml_4_op.zip
@@ -138,12 +139,14 @@ city_code,package,year,citygml_v,bytes,url
 13402,plateau-13402-aogashima-mura-2024,2024,4,26248802,https://assets.cms.plateau.reearth.io/assets/ae/cf5f1c-8691-422f-ae90-691dda948cb9/13402_aogashima-mura_pref_2024_citygml_1_op.zip
 13421,plateau-13421-ogasawara-mura-2025,2025,5,124829724,https://assets.cms.plateau.reearth.io/assets/72/11b5b0-10e6-491e-b6e8-82921d0bbf51/13421_ogasawara-mura_pref_2025_citygml_1_op.zip
 14100,plateau-14100-yokohama-shi-2024,2024,4,2777093929,https://assets.cms.plateau.reearth.io/assets/04/96d45a-a30b-4c9f-88c0-c1323b5a0f86/14100_yokohama-shi_city_2024_citygml_2_op.zip
+14130,plateau-14130-kawasaki-shi-2022,2022,4,1851264826,https://assets.cms.plateau.reearth.io/assets/40/25bd0a-f174-4f55-a9bd-0e6868ece0ae/14130_kawasaki-shi_city_2022_citygml_4_op.zip
 14150,plateau-14150-sagamihara-shi-2024,2024,4,626454974,https://assets.cms.plateau.reearth.io/assets/62/28918e-31cd-458e-80d1-370326b4084b/14150_sagamihara-shi_city_2024_citygml_1_op.zip
 14201,plateau-14201-yokosuka-shi-2020,2020,4,388268320,https://assets.cms.plateau.reearth.io/assets/08/70e768-0ad0-4164-8db4-046878adfc7f/14201_yokosuka-shi_city_2020_citygml_7_op.zip
 14204,plateau-14204-kamakura-shi-2024,2024,4,469040313,https://assets.cms.plateau.reearth.io/assets/24/fdd285-69b7-4ded-acab-5182de9a966a/14204_kamakura-shi_city_2024_citygml_1_op.zip
 14205,plateau-14205-fujisawa-shi-2025,2025,5,736037983,https://assets.cms.plateau.reearth.io/assets/f6/937d63-b787-4319-a5a5-bedcafde2cc7/14205_fujisawa-shi_city_2025_citygml_1_op.zip
 14212,plateau-14212-atsugi-shi-2023,2023,4,2706383236,https://assets.cms.plateau.reearth.io/assets/3a/b7cefe-c29d-48d5-91e8-dbae8edd04b8/14212_atsugi-shi_city_2023_citygml_2_op.zip
 14382,plateau-14382-hakone-machi-2020,2020,4,148471534,https://assets.cms.plateau.reearth.io/assets/70/9ebd69-7a0e-47f4-a5d9-5241f1c0fee2/14382_hakone-machi_city_2020_citygml_9_op.zip
+15100,plateau-15100-niigata-shi-2023,2023,4,4296842386,https://assets.cms.plateau.reearth.io/assets/b0/abb9a1-3696-4802-bfad-edd83fe99e93/15100_niigata-shi_city_2023_citygml_2_op.zip
 15202,plateau-15202-nagaoka-shi-2024,2024,4,1564337268,https://assets.cms.plateau.reearth.io/assets/74/5ad8c3-35da-465a-8991-677b05db31a8/15202_nagaoka-shi_city_2024_citygml_1_op.zip
 15204,plateau-15204-sanjo-shi-2025,2025,4,16948582,https://assets.cms.plateau.reearth.io/assets/6b/b49d75-5bf5-434e-bd6e-89fb1ea8010a/15204_sanjo-shi_city_2025_citygml_1_op.zip
 15206,plateau-15206-shibata-shi-2025,2025,5,345302729,https://assets.cms.plateau.reearth.io/assets/86/07194d-cedc-407a-8d38-629be444c440/15206_shibata-shi_city_2025_citygml_1_op.zip
@@ -202,6 +205,7 @@ city_code,package,year,citygml_v,bytes,url
 22424,plateau-22424-yoshida-cho-2023,2023,4,4582695961,https://assets.cms.plateau.reearth.io/assets/fd/318032-a9f1-4229-a3cd-4aab8ed47623/22424_yoshida-cho_city_2023_citygml_2_op.zip
 22429,plateau-22429-kawanehon-cho-2023,2023,4,49972036557,https://assets.cms.plateau.reearth.io/assets/8e/2f254d-c3e7-4842-9417-9f053a47203c/22429_kawanehon-cho_city_2023_citygml_2_op.zip
 22461,plateau-22461-mori-machi-2023,2023,4,31618751176,https://assets.cms.plateau.reearth.io/assets/de/9de23a-097a-4865-94cd-60fe67306057/22461_mori-machi_city_2023_citygml_3_op.zip
+23100,plateau-23100-nagoya-shi-2022,2022,4,2776827480,https://assets.cms.plateau.reearth.io/assets/79/e43a02-06b6-40c2-ae97-51eba1b4297b/23100_nagoya-shi_city_2022_citygml_4_op.zip
 23201,plateau-23201-toyohashi-shi-2024,2024,4,817975350,https://assets.cms.plateau.reearth.io/assets/9b/bf5782-2bcd-46ae-8ba5-20830f0777c2/23201_toyohashi-shi_city_2024_citygml_2_op.zip
 23202,plateau-23202-okazaki-shi-2020,2020,4,1388325994,https://assets.cms.plateau.reearth.io/assets/75/41eaa8-eb6d-4bc9-8b71-e0516bad9b33/23202_okazaki-shi_city_2020_citygml_8_op.zip
 23206,plateau-23206-kasugai-shi-2023,2023,4,360610469,https://assets.cms.plateau.reearth.io/assets/d0/b21e9e-cd61-41d7-88a3-28dea81bfd92/23206_kasugai-shi_city_2023_citygml_2_op.zip
@@ -218,6 +222,7 @@ city_code,package,year,citygml_v,bytes,url
 26100,plateau-26100-kyoto-shi-2025,2025,5,2700713512,https://assets.cms.plateau.reearth.io/assets/c8/4c6540-2bcf-4773-b21d-74ad2d9f1ba1/26100_kyoto-shi_city_2025_citygml_1_op.zip
 26202,plateau-26202-maizuru-shi-2025,2025,5,914222089,https://assets.cms.plateau.reearth.io/assets/8f/8ad134-6969-4a6c-a7c2-4ac370a73096/26202_maizuru-shi_city_2025_citygml_1_op.zip
 26465,plateau-26465-yosano-cho-2025,2025,5,76568301,https://assets.cms.plateau.reearth.io/assets/b5/7b5f81-ca0a-491d-80ff-b4d282fe1671/26465_yosano-cho_city_2025_citygml_1_op.zip
+27100,plateau-27100-osaka-shi-2025,2025,5,1580421888,https://assets.cms.plateau.reearth.io/assets/10/a0aecb-67d1-4463-92d5-d67c99f3b8b6/27100_osaka-shi_city_2025_citygml_1_op.zip
 27140,plateau-27140-sakai-shi-2024,2024,4,864489357,https://assets.cms.plateau.reearth.io/assets/9e/a93aed-31f1-449d-9478-5b4d4c04eb71/27140_sakai-shi_city_2024_citygml_1_op.zip
 27202,plateau-27202-kishiwadashi-2024,2024,4,264932302,https://assets.cms.plateau.reearth.io/assets/08/a3bb64-07c2-4d7d-82e4-e3c0231a1e9a/27202_kishiwadashi_city_2024_citygml_1_op.zip
 27203,plateau-27203-toyonaka-shi-2020,2020,4,577524506,https://assets.cms.plateau.reearth.io/assets/e3/e5cae3-d980-4333-8e0d-3764a2cdf01e/27203_toyonaka-shi_city_2020_citygml_7_op.zip
@@ -248,6 +253,7 @@ city_code,package,year,citygml_v,bytes,url
 32201,plateau-32201-matsue-shi-2024,2024,4,3003627216,https://assets.cms.plateau.reearth.io/assets/7c/606e42-b9e0-410b-8c0b-b64731336e05/32201_matsue-shi_city_2024_citygml_1_op.zip
 32204,plateau-32204-masuda-shi-2024,2024,4,120882356,https://assets.cms.plateau.reearth.io/assets/ec/ce477c-fdb0-4879-9a8d-ef9cc1f8f9d1/32204_masuda-shi_city_2024_citygml_1_op.zip
 32528,plateau-32528-okinoshima-cho-2024,2024,4,558709104,https://assets.cms.plateau.reearth.io/assets/63/e6ab2d-4bbe-4929-89c9-3bef7263ffc3/32528_okinoshima-cho_city_2024_citygml_1_op.zip
+33100,plateau-33100-okayama-shi-2025,2025,5,5138039994,https://assets.cms.plateau.reearth.io/assets/0a/984fc5-6af6-4a7c-9188-d825eea4a17f/33100_okayama-shi_city_2025_citygml_1_op.zip
 33202,plateau-33202-kurashiki-shi-2024,2024,4,2050202761,https://assets.cms.plateau.reearth.io/assets/02/12130c-8b20-4a9f-a686-77d18db6bac0/33202_kurashiki-shi_city_2024_citygml_1_op.zip
 33203,plateau-33203-tsuyama-shi-2025,2025,5,240530547,https://assets.cms.plateau.reearth.io/assets/ee/2a756d-2384-488c-a471-e7a67550908f/33203_tsuyama-shi_city_2025_citygml_1_op.zip
 33211,plateau-33211-bizen-shi-2023,2023,4,379744425,https://assets.cms.plateau.reearth.io/assets/f0/ae58f3-79c0-4322-8fc1-f0c15f3d57dc/33211_bizen-shi_city_2023_citygml_2_op.zip
@@ -271,6 +277,8 @@ city_code,package,year,citygml_v,bytes,url
 39203,plateau-39203-aki-shi-2025,2025,5,452762711,https://assets.cms.plateau.reearth.io/assets/29/478934-8571-4967-9e53-234e9891b401/39203_aki-shi_pref_2025_citygml_1_op.zip
 39211,plateau-39211-konan-shi-2025,2025,5,332143802,https://assets.cms.plateau.reearth.io/assets/3b/6ebf7a-c57e-4910-9988-0a36ac09f91b/39211_konan-shi_pref_2025_citygml_1_op.zip
 39386,plateau-39386-ino-cho-2024,2024,4,641816277,https://assets.cms.plateau.reearth.io/assets/74/1dfe52-e827-4b56-82b5-7a5ce814eb0b/39386_ino-cho_city_2024_citygml_1_op.zip
+40100,plateau-40100-kitakyushu-shi-2020,2020,4,1565826766,https://assets.cms.plateau.reearth.io/assets/de/52718a-9944-4750-9e9e-047971f37ba9/40100_kitakyushu-shi_city_2020_citygml_7_op.zip
+40130,plateau-40130-fukuoka-shi-2024,2024,4,992977577,https://assets.cms.plateau.reearth.io/assets/c5/263250-3d72-486d-8b76-f8c62aaaca03/40130_fukuoka-shi_city_2024_citygml_2_op.zip
 40202,plateau-40202-omuta-shi-2023,2023,4,320924619,https://assets.cms.plateau.reearth.io/assets/a4/8ea102-9bb3-4e53-acbc-bcb68b494412/40202_omuta-shi_city_2023_citygml_2_op.zip
 40203,plateau-40203-kurume-shi-2020,2020,4,1681516152,https://assets.cms.plateau.reearth.io/assets/c9/9ff21b-d141-4f5a-9808-320a31f04c4a/40203_kurume-shi_city_2020_citygml_6_op.zip
 40205,plateau-40205-iizuka-shi-2020,2020,4,672540960,https://assets.cms.plateau.reearth.io/assets/2c/fe0945-fe87-4b80-8cbe-ea318e96af35/40205_iizuka-shi_city_2020_citygml_9_op.zip

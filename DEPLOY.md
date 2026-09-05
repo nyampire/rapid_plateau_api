@@ -599,6 +599,30 @@ python3 plateau_coverage.py --refresh --no-concurrent --postgres-url "$DATABASE_
 メモリが足りない場合は、実行のあいだだけ一時的に swap を足す。
 swap の増設には管理者権限が要る。
 
+### 8-5. ダッシュボードの都市一覧を更新する
+
+進捗ダッシュボードを併設している場合のみ行う。
+
+ダッシュボードは `dash_city_master.in_local_db` を見て、都市を「対象」と「対象外」に
+分けて表示する。
+この列は取り込みでは更新されず、週次バッチの Phase 0 でしか再計算されない。
+都市を足したあとに実行しないと、取り込み済みの都市が「対象外」と表示されたままになる。
+
+```bash
+cd <ダッシュボードのリポジトリ>
+source /opt/plateau-api/venv/bin/activate
+set -a
+source /opt/plateau-api/.env
+set +a
+python3 ingest/load_city_master.py data/plateau_city_master_2025.csv \
+  --postgres-url "$DATABASE_URL"
+```
+
+数秒で終わる。出力の `in_local_db=<件数>` が `plateau_coverage` の都市数と
+一致していれば正しい。
+
+次の週次バッチでも同じ処理が動くので、待てるなら省いてよい。
+
 ### サービス管理
 
 ```bash

@@ -20,3 +20,10 @@ scripts/reimport/*.tmp
 # 手元の設定と進捗 (実サーバの識別子を含む)
 scripts/reimport/ship.env
 scripts/reimport/shipped.txt
+scripts/reimport/shipped.txt.*
+
+# OSM の抽出データ (計測用に落とすもの。数 GB になる)
+*.osm.pbf
+
+# 引き継ぎメモ (手元の作業状態。公開しない)
+docs/handoff/

@@ -9,17 +9,38 @@ import pytest
 from tests.test_dedup_city_duplicates import _seed_building, _square_wkt
 
 
+def _set_wkt(conn, building_id, wkt):
+    """建物の輪郭を指定した WKT に置き換える。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            'UPDATE plateau_buildings SET geom = ST_GeomFromText(%s, 4326) '
+            'WHERE id = %s',
+            (wkt, building_id),
+        )
+
+
 def _resize(conn, building_id, lat, lon, size_deg):
     """建物の輪郭を指定した大きさの正方形に置き換える。
 
     `_seed_building` は大きさが固定なので、底面積を変える試験で使う。
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            'UPDATE plateau_buildings SET geom = ST_GeomFromText(%s, 4326) '
-            'WHERE id = %s',
-            (_square_wkt(lat, lon, size_deg), building_id),
-        )
+    _set_wkt(conn, building_id, _square_wkt(lat, lon, size_deg))
+
+
+def _bowtie_wkt(lat, lon, size_deg=0.0002):
+    """面積が 0 になる自己交差した輪郭。
+
+    対角どうしを結んで 2 つの葉が打ち消し合う形にしている。
+    """
+    return (
+        f"POLYGON(("
+        f"{lon} {lat},"
+        f"{lon + size_deg} {lat + size_deg},"
+        f"{lon + size_deg} {lat},"
+        f"{lon} {lat + size_deg},"
+        f"{lon} {lat}"
+        f"))"
+    )
 
 
 @pytest.mark.integration
@@ -345,3 +366,55 @@ def test_run_check_can_limit_to_one_city(
     assert result.total == 1
     assert result.by_city == [('42201', 1)]
     assert [row['id'] for row in result.samples] == [kept]
+
+
+@pytest.mark.integration
+def test_needle_skips_polygons_whose_area_is_not_positive(
+    fresh_plateau_full_schema, integration_db_url
+):
+    """平面での面積が正でない多角形を対象から外す。
+
+    球面の面積計算は負の値を受け取ると内部エラーになる。
+    本番には該当する多角形が 7 件あり、走査の途中で落ちる。
+    """
+    from plateau_height_outliers import HeightOutlierSurvey
+
+    conn = fresh_plateau_full_schema
+    lat, lon = 36.70, 137.20
+    broken = _seed_building(
+        conn, osm_id=1, city_code='16201', lat=lat, lon=lon, height=20.0
+    )
+    _set_wkt(conn, broken, _bowtie_wkt(lat, lon))
+
+    survey = HeightOutlierSurvey(postgres_url=integration_db_url)
+    result = survey.run_check('needle')
+
+    assert result.total == 0
+
+
+@pytest.mark.integration
+def test_degenerate_area_reports_polygons_with_non_positive_area(
+    fresh_plateau_full_schema, integration_db_url
+):
+    """面積が正でない多角形を、それ自体の誤りとして報告する。
+
+    needle はこれを対象から外すので、外したものがどこかに出る必要がある。
+    """
+    from plateau_height_outliers import HeightOutlierSurvey
+
+    conn = fresh_plateau_full_schema
+    lat, lon = 36.70, 137.20
+    broken = _seed_building(
+        conn, osm_id=1, city_code='16201', lat=lat, lon=lon, height=20.0
+    )
+    _set_wkt(conn, broken, _bowtie_wkt(lat, lon))
+    # 通常の建物は報告しない。
+    _seed_building(
+        conn, osm_id=2, city_code='16201', lat=lat, lon=lon, height=7.0
+    )
+
+    survey = HeightOutlierSurvey(postgres_url=integration_db_url)
+    result = survey.run_check('degenerate-area')
+
+    assert result.total == 1
+    assert [row['id'] for row in result.samples] == [broken]

@@ -27,3 +27,6 @@ scripts/reimport/shipped.txt.*
 
 # 引き継ぎメモ (手元の作業状態。公開しない)
 docs/handoff/
+
+# 筆ポリゴンの配布データ (容量の計測用に落とすもの。数百 MB になる)
+fude/

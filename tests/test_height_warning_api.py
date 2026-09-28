@@ -124,3 +124,65 @@ def test_floor_height_warns_only_for_residential(
 
     assert rows[house]['height_warnings'] == ['floor-height']
     assert rows[factory]['height_warnings'] == []
+
+
+def test_api_agrees_with_the_survey_on_the_same_buildings(
+    fresh_plateau_full_schema, integration_db_url, plateau_api_class
+):
+    """同じ建物に対して、調査と API が同じ建物を選ぶ。
+
+    判定を SQL と Python の 2 か所で持つので、食い違いをここで捕まえる。
+    警告にしない条件（absolute の上側、住宅以外の floor-height）は、
+    調査の結果から除いて比べる。
+    """
+    from plateau_height_outliers import HeightOutlierSurvey
+    from plateau_height_warning import RESIDENTIAL_BUILDING_VALUES
+
+    conn = fresh_plateau_full_schema
+    seeds = [
+        dict(height=7.0),
+        dict(height=0.5),
+        dict(height=250.0),
+        dict(height=18.4, tiny=True),
+        dict(height=24.6, levels=2, building='house'),
+        dict(height=24.6, levels=2, building='warehouse'),
+        dict(height=20.0, broken=True),
+    ]
+    for osm_id, s in enumerate(seeds, start=1):
+        lon = LON + STEP * osm_id
+        bid = _seed_building(
+            conn, osm_id=osm_id, city_code='16201', lat=LAT, lon=lon,
+            height=s['height'], building_levels=s.get('levels'),
+        )
+        if 'building' in s:
+            _set_building(conn, bid, s['building'])
+        if s.get('tiny'):
+            _set_wkt(conn, bid, _square_wkt(LAT, lon, 0.00001))
+        if s.get('broken'):
+            _set_wkt(conn, bid, _bowtie_with_hole_wkt(LAT, lon))
+    outline = _seed_building(
+        conn, osm_id=100, city_code='16201', lat=LAT, lon=LON, height=9.1,
+    )
+    _seed_building(
+        conn, osm_id=101, city_code='16201', lat=LAT, lon=LON, height=149.2,
+        building_part='yes', parent_building_id=outline,
+    )
+
+    survey = HeightOutlierSurvey(postgres_url=integration_db_url)
+    rows = _rows_by_id(plateau_api_class, integration_db_url)
+
+    for check in ('degenerate-area', 'part-over-outline', 'needle',
+                  'absolute', 'floor-height'):
+        result = survey.run_check(check, samples=100)
+        expected = set()
+        for s in result.samples:
+            if check == 'absolute' and s['height'] >= 1.0:
+                continue
+            if (check == 'floor-height'
+                    and s['building'] not in RESIDENTIAL_BUILDING_VALUES):
+                continue
+            expected.add(s['id'])
+        actual = {
+            bid for bid, r in rows.items() if check in r['height_warnings']
+        }
+        assert actual == expected, check

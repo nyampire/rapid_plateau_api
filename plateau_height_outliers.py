@@ -9,6 +9,15 @@
 各検査は「該当する行を返す SELECT」を組み立てます。
 件数、都市ごとの集計、代表例は、その結果から導きます。
 
+### degenerate-area
+
+平面での面積が正でない多角形を探します。
+輪郭が自己交差し、符号付き面積が打ち消し合うか負になった形です。
+建物として成り立ちません。
+
+球面の面積計算はこの多角形で内部エラーになるため、needle は対象から外します。
+外したものがどこにも出ないと見落とすので、この検査で報告します。
+
 ### part-over-outline
 
 部分立体が親の外形より高いものを探します。
@@ -52,13 +61,19 @@ floor-height が使えない、階数の無い建物を対象に含めるため�
 
 既定の閾値での見込み件数は次のとおりです。
 
-| 検査 | 見込み件数 |
+| 検査 | 件数 |
 |---|---:|
+| degenerate-area | 7 |
 | part-over-outline | 180 |
 | sibling-spike | 5,766 |
-| needle | 約 3 万 |
-| floor-height | 約 17 万 |
+| needle | 約 3 万（見込み） |
+| floor-height | 約 17 万（見込み） |
 | absolute | 未測定 |
+
+自己交差する多角形は約 2,500 件あります。
+そのうち符号付き面積まで 0 以下になったものが 7 件です。
+ST_MakeValid を通すと MultiPolygon として修復できますが、
+このスクリプトは読むだけなので修復はしません。
 """
 
 import argparse
@@ -85,6 +100,7 @@ DEFAULT_ABSOLUTE_MAX_M = 200.0
 # 検査の名前から、それを実行するメソッドの名前への対応。
 # 並びは確からしさの高いものからにしてあり、報告の読み順になる。
 CHECKS = {
+    'degenerate-area': '_degenerate_area',
     'part-over-outline': '_part_over_outline',
     'sibling-spike': '_sibling_spike',
     'needle': '_needle',
@@ -197,6 +213,25 @@ class HeightOutlierSurvey:
             name=name, total=total, by_city=by_city, samples=rows
         )
 
+    def _degenerate_area(self) -> MatchQuery:
+        """平面での面積が正でない多角形を探します。
+
+        輪郭が自己交差し、符号付き面積が打ち消し合うか負になった形です。
+        建物として成り立たないので、それ自体がデータの誤りです。
+        """
+        return MatchQuery(
+            sql="""
+                SELECT id, city_code, height,
+                       ST_Area(geom) AS planar_area,
+                       ST_NPoints(geom) AS n_points
+                FROM plateau_buildings
+                WHERE geom IS NOT NULL
+                  AND ST_Area(geom) <= 0
+            """,
+            params=(),
+            order_by='planar_area',
+        )
+
     def _part_over_outline(
         self, tolerance: float = DEFAULT_PART_TOLERANCE_M
     ) -> MatchQuery:
@@ -254,6 +289,11 @@ class HeightOutlierSurvey:
     ) -> MatchQuery:
         # 面積は geography に変換して平方メートルで測る。
         # 緯度によって経度 1 度の長さが変わるため。
+        #
+        # 平面での面積が正でない多角形は、球面の計算が内部エラーになる。
+        # 該当するものは degenerate-area で別に報告するので、ここでは外す。
+        # CASE を使うのは、WHERE の条件の評価順が保証されないため。
+        # CASE は選ばれた枝だけを評価することが保証されている。
         return MatchQuery(
             sql="""
                 SELECT id, city_code, height,
@@ -262,7 +302,10 @@ class HeightOutlierSurvey:
                 WHERE height IS NOT NULL
                   AND geom IS NOT NULL
                   AND height > %s
-                  AND ST_Area(geom::geography) < %s
+                  AND CASE WHEN ST_Area(geom) > 0
+                           THEN ST_Area(geom::geography) < %s
+                           ELSE false
+                      END
             """,
             params=(min_height, max_area),
             order_by='height / NULLIF(area_m2, 0) DESC',

@@ -377,7 +377,8 @@ def format_result(result: CheckResult, top_cities: int = 5,
     lines.append('')
     lines.append('件数の多い building の値:')
     for building, n in result.by_building[:top_buildings]:
-        lines.append(f'  {building}  {n} 件')
+        label = building if building is not None else '(なし)'
+        lines.append(f'  {label}  {n} 件')
 
     lines.append('')
     lines.append('代表例:')

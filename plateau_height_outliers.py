@@ -20,9 +20,26 @@
 
 ### part-over-outline
 
-部分立体が親の外形より高いものを探します。
-部分立体は建物の一部なので、外形より高いのは定義上ありえません。
-既定の許容差 0.5 m は、丸め誤差を除くための値です。
+部分立体が親の外形より、既定で 10 m 以上高いものを探します。
+
+部分立体が外形より高いこと自体は誤りではありません。
+屋上の塔屋や階段室は、外形の高さを主屋根までで取っていればそれより高くなります。
+実データでも、超過 0.5 m 超の 180 件のうち中央値は 3.85 m でした。
+
+超過の帯ごとに、外形に対する部分立体の面積比を見ると性質が分かれます。
+
+| 超過 | 件数 | 面積比の中央値 |
+|---|---:|---:|
+| 2 m 以下 | 45 | 0.004 |
+| 2 〜 5 m | 66 | 0.145 |
+| 5 〜 10 m | 32 | 0.065 |
+| 10 m 超 | 37 | 4.481 |
+
+10 m 以下は外形の 1 割前後しか覆っておらず、屋上の構造物の平面です。
+10 m 超だけが外形の 4 倍以上の面積を持ち、建物の一部が全体より広い状態です。
+
+既定値 10 m は、この 2 つの集団を分ける位置にあります。
+代表例には面積比を添えるので、判断はその列で行えます。
 
 ### sibling-spike
 
@@ -64,11 +81,14 @@ floor-height が使えない、階数の無い建物を対象に含めるため�
 | 検査 | 件数 |
 |---|---:|
 | degenerate-area | 7 |
-| part-over-outline | 180 |
+| part-over-outline | 37 |
 | sibling-spike | 5,766 |
 | needle | 約 3 万（見込み） |
 | floor-height | 約 17 万（見込み） |
 | absolute | 未測定 |
+
+part-over-outline の 37 件は、超過 10 m 超のものです。
+許容差を 0.5 m まで下げると 180 件になりますが、143 件は屋上の構造物です。
 
 自己交差する多角形は約 2,500 件あります。
 そのうち符号付き面積まで 0 以下になったものが 7 件です。
@@ -87,7 +107,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 DEFAULT_SAMPLES = 10
-DEFAULT_PART_TOLERANCE_M = 0.5
+DEFAULT_PART_TOLERANCE_M = 10.0
 DEFAULT_SIBLING_RATIO = 3.0
 DEFAULT_MIN_PARTS = 3
 DEFAULT_NEEDLE_HEIGHT_M = 15.0
@@ -182,8 +202,8 @@ class HeightOutlierSurvey:
     def _run(self, name: str, match: MatchQuery, samples: int,
              city: Optional[str] = None) -> CheckResult:
         """1 つの検査から、件数、都市ごとの集計、代表例を取ります。"""
-        # 絞り込みは検査ごとの SQL を包む形にします。
-        # 5 つの検査すべてに同じ条件が同じ書き方で効きます。
+        # 絞り込みは、検査ごとの SQL を副問い合わせにして外側で条件を足します。
+        # すべての検査に同じ書き方で適用できます。
         inner = f'({match.sql}) AS m'
         params = match.params
         if city is not None:
@@ -235,11 +255,17 @@ class HeightOutlierSurvey:
     def _part_over_outline(
         self, tolerance: float = DEFAULT_PART_TOLERANCE_M
     ) -> MatchQuery:
+        # area_ratio は外形に対する部分立体の面積の比です。
+        # 屋上の構造物は平面が小さく 0.1 前後になります。
+        # 外形より広い部分立体は構造が壊れており 1 を超えます。
+        # 比は平面のまま取ります。外形と部分立体は同じ緯度にあるためです。
         return MatchQuery(
             sql="""
                 SELECT c.id, c.city_code,
                        c.height AS part_height,
-                       o.height AS outline_height
+                       o.height AS outline_height,
+                       ST_Area(c.geom) / NULLIF(ST_Area(o.geom), 0)
+                           AS area_ratio
                 FROM plateau_buildings c
                 JOIN plateau_buildings o ON o.id = c.parent_building_id
                 WHERE c.height IS NOT NULL

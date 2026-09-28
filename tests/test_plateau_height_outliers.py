@@ -292,7 +292,7 @@ def test_check_result_counts_by_building_value_in_descending_order(
 def test_sibling_spike_is_no_longer_a_check():
     """sibling-spike は正常な建物の形を数えていたので外した。
 
-    突出した部分立体の 96 % 以上は、高さが外形と一致する主な棟だった。
+    突出した部分立体の 96 % 前後は、高さが外形と一致する主な棟だった。
     """
     from plateau_height_outliers import CHECKS
 
@@ -522,3 +522,19 @@ def test_part_over_outline_reports_the_area_ratio(
 
     assert result.total == 1
     assert result.samples[0]['area_ratio'] == pytest.approx(0.25, rel=1e-6)
+
+
+def test_format_result_shows_missing_building_value_in_words():
+    """building が空の建物を、Python の None のまま表示しない。"""
+    from plateau_height_outliers import CheckResult, format_result
+
+    result = CheckResult(
+        name='floor-height', total=2,
+        by_city=[('16201', 2)],
+        by_building=[('house', 1), (None, 1)],
+    )
+    text = format_result(result)
+
+    assert '  house  1 件' in text
+    assert '  (なし)  1 件' in text
+    assert 'None' not in text

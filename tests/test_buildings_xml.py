@@ -1349,3 +1349,84 @@ class TestRoofLayer:
                     for t in root.find('relation').findall('tag')}
         assert rel_tags.get('building') == 'roof'
         assert rel_tags.get('layer') == '1'
+
+
+# ----------------------------------------------------------------------
+# 高さの警告のタグ
+# ----------------------------------------------------------------------
+def _square_nodes(base_id, lat=35.68, lon=139.76, size=0.0001):
+    """外側の環だけを持つ正方形のノード列。"""
+    corners = [(lat, lon), (lat, lon + size),
+               (lat + size, lon + size), (lat + size, lon)]
+    return [
+        {'id': base_id + i, 'osm_id': base_id + i, 'lat': la, 'lon': lo,
+         'sequence_id': i, 'ring_id': 0}
+        for i, (la, lo) in enumerate(corners)
+    ]
+
+
+def _tags_of(elem):
+    return {t.get('k'): t.get('v') for t in elem.findall('tag')}
+
+
+class TestHeightWarningTags:
+    """判定の結果を、OSM に無い補助のタグとして出す"""
+
+    def test_way_carries_the_warning_and_the_footprint(self, api):
+        building = {
+            'id': 1, 'building': 'yes', 'height': 18.4,
+            'building_part': None, 'parent_building_id': None,
+            'height_warnings': ['needle'], 'footprint_m2': 0.0036,
+            'nodes': _square_nodes(100),
+        }
+        root = ET.fromstring(api.buildings_to_osm_xml([building]))
+        tags = _tags_of(root.find('way'))
+
+        assert tags['plateau:height_warning'] == 'needle'
+        assert tags['plateau:footprint_m2'] == '0.0036'
+
+    def test_several_warnings_are_joined_with_semicolons(self, api):
+        building = {
+            'id': 1, 'building': 'house', 'height': 0.5,
+            'building_levels': 3,
+            'building_part': None, 'parent_building_id': None,
+            'height_warnings': ['absolute', 'floor-height'],
+            'footprint_m2': None,
+            'nodes': _square_nodes(100),
+        }
+        root = ET.fromstring(api.buildings_to_osm_xml([building]))
+        tags = _tags_of(root.find('way'))
+
+        assert tags['plateau:height_warning'] == 'absolute;floor-height'
+        # needle でなければ底面積は出さない。
+        assert 'plateau:footprint_m2' not in tags
+
+    def test_no_warning_no_tag(self, api):
+        building = {
+            'id': 1, 'building': 'yes', 'height': 7.0,
+            'building_part': None, 'parent_building_id': None,
+            'height_warnings': [], 'footprint_m2': None,
+            'nodes': _square_nodes(100),
+        }
+        root = ET.fromstring(api.buildings_to_osm_xml([building]))
+        tags = _tags_of(root.find('way'))
+
+        assert 'plateau:height_warning' not in tags
+
+    def test_relation_copies_the_outline_warning(self, api):
+        outline = {
+            'id': 1, 'building': 'yes', 'height': 0.5,
+            'building_part': None, 'parent_building_id': None,
+            'height_warnings': ['absolute'], 'footprint_m2': None,
+            'nodes': _square_nodes(100),
+        }
+        part = {
+            'id': 2, 'building': 'yes', 'height': 3.0,
+            'building_part': 'yes', 'parent_building_id': 1,
+            'height_warnings': [], 'footprint_m2': None,
+            'nodes': _square_nodes(200),
+        }
+        root = ET.fromstring(api.buildings_to_osm_xml([outline, part]))
+        relation = root.find('relation')
+
+        assert _tags_of(relation)['plateau:height_warning'] == 'absolute'

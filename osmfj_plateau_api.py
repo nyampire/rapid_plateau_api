@@ -538,6 +538,16 @@ class OSMFJPlateauAPI:
         if rp is not None:
             add_tag('representative_point', f'{rp[0]:.7f},{rp[1]:.7f}')
 
+        # 高さの警告です。
+        # OSM のタグではないので、エディタが受け取った時点で取り除きます。
+        # needle の警告の文に値を入れるため、底面積を添えます。
+        warnings = building.get('height_warnings') or []
+        if warnings:
+            add_tag('plateau:height_warning', ';'.join(warnings))
+            footprint = building.get('footprint_m2')
+            if 'needle' in warnings and footprint is not None:
+                add_tag('plateau:footprint_m2', f'{float(footprint):.4f}')
+
     def buildings_to_osm_xml(self, buildings: List[Dict]) -> str:
         """建物データを OSM XML 形式に変換 (Phase 2: relation 出力対応)
 

@@ -45,13 +45,6 @@ PostGIS は外環の面積から内環の面積を引いて面積を出します
 10 m 超の 37 件のうち 12 件は面積比が 0.7 未満です。
 代表例には面積比を添えるので、判断はその列で行えます。
 
-### sibling-spike
-
-同じ建物に属する部分立体のうち、最大が中央値の N 倍を超えるものを探します。
-中央値を基準にするのは、平均だと突出した値自身に引きずられるためです。
-塔屋のある建物では正常に起きる形なので、既定の倍率 3.0 には根拠がありません。
-最初の実行結果を見て決め直す前提の値です。
-
 ### absolute
 
 高さ自体が範囲の外にあるものを探します。
@@ -69,7 +62,8 @@ floor-height が使えない、階数の無い建物を対象に含めるため�
 既定の範囲は 1.5 m から 10.2 m です。
 階数が入っているのは全体の約 51 パーセントで、残りはこの検査の対象になりません。
 体育館、工場、倉庫、寺社では 1 階あたりが大きい値を正常に取るため、
-この検査は建物の種別を区別できないまま働きます。
+この検査は建物の種別を区別できないまま数えます。
+結果には building の値ごとの件数を添えるので、種別ごとの偏りはそこで見ます。
 
 ## 閾値を決めた根拠（2026-09-28 時点の実測）
 
@@ -86,7 +80,6 @@ floor-height が使えない、階数の無い建物を対象に含めるため�
 |---|---:|
 | degenerate-area | 7 |
 | part-over-outline | 37 |
-| sibling-spike | 5,766 |
 | absolute | 3,460 |
 | needle | 29,587 |
 | floor-height | 262,009 |
@@ -112,8 +105,6 @@ from psycopg2.extras import RealDictCursor
 
 DEFAULT_SAMPLES = 10
 DEFAULT_PART_TOLERANCE_M = 10.0
-DEFAULT_SIBLING_RATIO = 3.0
-DEFAULT_MIN_PARTS = 3
 DEFAULT_NEEDLE_HEIGHT_M = 15.0
 DEFAULT_NEEDLE_AREA_M2 = 20.0
 DEFAULT_FLOOR_HEIGHT_MIN_M = 1.5
@@ -126,7 +117,6 @@ DEFAULT_ABSOLUTE_MAX_M = 200.0
 CHECKS = {
     'degenerate-area': '_degenerate_area',
     'part-over-outline': '_part_over_outline',
-    'sibling-spike': '_sibling_spike',
     'absolute': '_absolute',
     'needle': '_needle',
     'floor-height': '_floor_height',
@@ -153,7 +143,7 @@ def resolve_checks(names: Optional[List[str]]) -> List[str]:
 class MatchQuery:
     """該当する行を返す SELECT と、代表例を並べる順序。
 
-    sql は id と city_code を必ず含めます。
+    sql は id、city_code、building を必ず含めます。
     order_by は sql が返す列の名前で書きます。
     """
 
@@ -168,12 +158,16 @@ class CheckResult:
 
     total は該当した件数です。
     by_city は都市ごとの件数を多い順に並べたものです。
+    by_building は building の値ごとの件数を、同じく多い順に並べたものです。
     samples は確認用に取り出した代表例です。
     """
 
     name: str
     total: int
     by_city: List[Tuple[str, int]] = field(default_factory=list)
+    by_building: List[Tuple[Optional[str], int]] = field(
+        default_factory=list
+    )
     samples: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -220,16 +214,23 @@ class HeightOutlierSurvey:
             conn.set_session(readonly=True)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    f'SELECT COUNT(*) AS n FROM {inner}', params
-                )
-                total = cur.fetchone()['n']
-
-                cur.execute(
                     f'SELECT city_code, COUNT(*) AS n FROM {inner} '
                     'GROUP BY city_code ORDER BY n DESC, city_code',
                     params,
                 )
                 by_city = [(r['city_code'], r['n']) for r in cur.fetchall()]
+                # 件数は都市ごとの件数の合計から出します。
+                # 全件の走査を 1 回減らせます。
+                total = sum(n for _, n in by_city)
+
+                cur.execute(
+                    f'SELECT building, COUNT(*) AS n FROM {inner} '
+                    'GROUP BY building ORDER BY n DESC, building',
+                    params,
+                )
+                by_building = [
+                    (r['building'], r['n']) for r in cur.fetchall()
+                ]
 
                 cur.execute(
                     f'SELECT * FROM {inner} ORDER BY {match.order_by} '
@@ -240,7 +241,8 @@ class HeightOutlierSurvey:
         finally:
             conn.close()
         return CheckResult(
-            name=name, total=total, by_city=by_city, samples=rows
+            name=name, total=total, by_city=by_city,
+            by_building=by_building, samples=rows,
         )
 
     def _degenerate_area(self) -> MatchQuery:
@@ -251,7 +253,7 @@ class HeightOutlierSurvey:
         """
         return MatchQuery(
             sql="""
-                SELECT id, city_code, height,
+                SELECT id, city_code, building, height,
                        ST_Area(geom) AS planar_area,
                        ST_NPoints(geom) AS n_points
                 FROM plateau_buildings
@@ -271,7 +273,7 @@ class HeightOutlierSurvey:
         # 比は平面のまま取ります。外形と部分立体は同じ緯度にあるためです。
         return MatchQuery(
             sql="""
-                SELECT c.id, c.city_code,
+                SELECT c.id, c.city_code, c.building,
                        c.height AS part_height,
                        o.height AS outline_height,
                        ST_Area(c.geom) / NULLIF(ST_Area(o.geom), 0)
@@ -284,39 +286,6 @@ class HeightOutlierSurvey:
             """,
             params=(tolerance,),
             order_by='part_height - outline_height DESC',
-        )
-
-    def _sibling_spike(
-        self, ratio: float = DEFAULT_SIBLING_RATIO,
-        min_parts: int = DEFAULT_MIN_PARTS
-    ) -> MatchQuery:
-        # 同じ建物に複数の部分立体が最大の高さで並ぶ場合があるため、
-        # DISTINCT ON で建物ごとに 1 件へ絞る。
-        return MatchQuery(
-            sql="""
-                WITH g AS (
-                    SELECT parent_building_id AS pid,
-                           MAX(height) AS hmax,
-                           PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY height)
-                               AS hmed
-                    FROM plateau_buildings
-                    WHERE parent_building_id IS NOT NULL
-                      AND height IS NOT NULL
-                    GROUP BY parent_building_id
-                    HAVING COUNT(*) >= %s
-                )
-                SELECT DISTINCT ON (g.pid)
-                       c.id, c.city_code,
-                       c.height AS part_height,
-                       g.hmed AS sibling_median
-                FROM g
-                JOIN plateau_buildings c
-                  ON c.parent_building_id = g.pid AND c.height = g.hmax
-                WHERE g.hmed > 0 AND g.hmax > g.hmed * %s
-                ORDER BY g.pid, c.id
-            """,
-            params=(min_parts, ratio),
-            order_by='part_height / NULLIF(sibling_median, 0) DESC',
         )
 
     def _needle(
@@ -332,7 +301,7 @@ class HeightOutlierSurvey:
         # CASE は選ばれた枝だけを評価することが保証されている。
         return MatchQuery(
             sql="""
-                SELECT id, city_code, height,
+                SELECT id, city_code, building, height,
                        ST_Area(geom::geography) AS area_m2
                 FROM plateau_buildings
                 WHERE height IS NOT NULL
@@ -356,7 +325,7 @@ class HeightOutlierSurvey:
         # 倍率で比べると、両端が同じ尺度に乗ります。
         return MatchQuery(
             sql="""
-                SELECT id, city_code, height, building_levels,
+                SELECT id, city_code, building, height, building_levels,
                        height / building_levels AS floor_height,
                        GREATEST(
                            %s / NULLIF(height / building_levels, 0),
@@ -381,7 +350,7 @@ class HeightOutlierSurvey:
         # outside_factor の考え方は floor-height と同じです。
         return MatchQuery(
             sql="""
-                SELECT id, city_code, height,
+                SELECT id, city_code, building, height,
                        GREATEST(%s / NULLIF(height, 0), height / %s)
                            AS outside_factor
                 FROM plateau_buildings
@@ -393,7 +362,8 @@ class HeightOutlierSurvey:
         )
 
 
-def format_result(result: CheckResult, top_cities: int = 5) -> str:
+def format_result(result: CheckResult, top_cities: int = 5,
+                  top_buildings: int = 10) -> str:
     """1 つの検査の結果を、読める形の文字列にします。"""
     lines = [f'## {result.name}: {result.total} 件']
     if result.total == 0:
@@ -403,6 +373,12 @@ def format_result(result: CheckResult, top_cities: int = 5) -> str:
     lines.append('件数の多い都市:')
     for city, n in result.by_city[:top_cities]:
         lines.append(f'  {city}  {n} 件')
+
+    lines.append('')
+    lines.append('件数の多い building の値:')
+    for building, n in result.by_building[:top_buildings]:
+        label = building if building is not None else '(なし)'
+        lines.append(f'  {label}  {n} 件')
 
     lines.append('')
     lines.append('代表例:')

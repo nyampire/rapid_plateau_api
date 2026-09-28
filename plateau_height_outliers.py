@@ -209,7 +209,11 @@ class HeightOutlierSurvey:
         if city is not None:
             inner = f'(SELECT * FROM {inner} WHERE city_code = %s) AS mc'
             params = params + (city,)
-        with psycopg2.connect(self.postgres_url) as conn:
+        # 読み取り専用のトランザクションにして、書き込みをデータベースの側で拒ませます。
+        # 検査を足したときの誤りも、ここで止まります。
+        conn = psycopg2.connect(self.postgres_url)
+        try:
+            conn.set_session(readonly=True)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     f'SELECT COUNT(*) AS n FROM {inner}', params
@@ -229,6 +233,8 @@ class HeightOutlierSurvey:
                     params + (samples,),
                 )
                 rows = [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
         return CheckResult(
             name=name, total=total, by_city=by_city, samples=rows
         )

@@ -234,6 +234,24 @@ def test_absolute_flags_heights_outside_the_plausible_range(
     )
 
 
+def _bowtie_with_hole_wkt(lat, lon, size_deg=0.0002):
+    """平面での面積が負になる自己交差した輪郭。
+
+    PostGIS は外環の面積の絶対値から、内環の面積の絶対値を引く。
+    面積が 0 の蝶形に小さな内環を足すと、差し引きが負になる。
+    本番で球面の面積計算を止めたのと同じ形になる。
+    """
+    step = size_deg / 20
+    hole = (
+        f"({lon + step} {lat + step},"
+        f"{lon + step} {lat + 2 * step},"
+        f"{lon + 2 * step} {lat + 2 * step},"
+        f"{lon + 2 * step} {lat + step},"
+        f"{lon + step} {lat + step})"
+    )
+    return _bowtie_wkt(lat, lon, size_deg)[:-1] + ',' + hole + ')'
+
+
 def test_resolve_checks_defaults_to_every_check_in_registry_order():
     """--check を省いたときは、登録してある順にすべて返す。
 
@@ -402,6 +420,52 @@ def test_needle_skips_polygons_whose_area_is_not_positive(
     result = survey.run_check('needle')
 
     assert result.total == 0
+
+
+@pytest.mark.integration
+def test_needle_skips_polygons_whose_area_is_negative(
+    fresh_plateau_full_schema, integration_db_url
+):
+    """平面での面積が負の多角形でも、走査が止まらない。
+
+    面積がちょうど 0 の輪郭では、球面の面積計算は止まらない。
+    本番で起きた内部エラーは、面積が負のときにだけ出る。
+    """
+    from plateau_height_outliers import HeightOutlierSurvey
+
+    conn = fresh_plateau_full_schema
+    lat, lon = 36.70, 137.20
+    broken = _seed_building(
+        conn, osm_id=1, city_code='16201', lat=lat, lon=lon, height=20.0
+    )
+    _set_wkt(conn, broken, _bowtie_with_hole_wkt(lat, lon))
+
+    survey = HeightOutlierSurvey(postgres_url=integration_db_url)
+    assert survey.run_check('needle').total == 0
+    degenerate = survey.run_check('degenerate-area')
+    assert [row['id'] for row in degenerate.samples] == [broken]
+
+
+@pytest.mark.integration
+def test_survey_opens_the_database_read_only(integration_db_url):
+    """検査の SQL は、読み取り専用のトランザクションの中で実行する。
+
+    読むだけであることを、コードを読まなくても接続の側で確かめられる。
+    """
+    from plateau_height_outliers import HeightOutlierSurvey, MatchQuery
+
+    probe = MatchQuery(
+        sql="""
+            SELECT 1 AS id, '16201' AS city_code,
+                   current_setting('transaction_read_only') AS read_only
+        """,
+        params=(),
+        order_by='id',
+    )
+    survey = HeightOutlierSurvey(postgres_url=integration_db_url)
+    result = survey._run('probe', probe, samples=1)
+
+    assert result.samples[0]['read_only'] == 'on'
 
 
 @pytest.mark.integration

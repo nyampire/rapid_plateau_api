@@ -84,52 +84,6 @@ def test_part_over_outline_ignores_rooftop_scale_excess(
 
 
 @pytest.mark.integration
-def test_sibling_spike_flags_one_part_far_taller_than_its_siblings(
-    fresh_plateau_full_schema, integration_db_url
-):
-    """部分立体を 3 つ以上持つ建物で、最大が中央値の N 倍を超えるものを検出する。
-
-    塔屋のある建物と区別できないため、既定の倍率は 3.0 にしている。
-    """
-    from plateau_height_outliers import HeightOutlierSurvey
-
-    conn = fresh_plateau_full_schema
-    lat, lon = 36.70, 137.20
-
-    # 突出した部分立体を持つ建物。
-    # 兄弟の高さは 8, 9, 10, 40 で中央値は 9.5 になる。
-    spiked = _seed_building(
-        conn, osm_id=1, city_code='16201', lat=lat, lon=lon, height=10.0
-    )
-    for osm_id, height in ((2, 8.0), (3, 9.0), (4, 10.0)):
-        _seed_building(
-            conn, osm_id=osm_id, city_code='16201', lat=lat, lon=lon,
-            height=height, building_part='yes', parent_building_id=spiked,
-        )
-    spike = _seed_building(
-        conn, osm_id=5, city_code='16201', lat=lat, lon=lon, height=40.0,
-        building_part='yes', parent_building_id=spiked,
-    )
-
-    # ばらつきの小さい建物。
-    # 兄弟の高さは 8, 9, 10, 11 で中央値は 9.5 になる。
-    even = _seed_building(
-        conn, osm_id=6, city_code='16201', lat=lat, lon=lon, height=11.0
-    )
-    for osm_id, height in ((7, 8.0), (8, 9.0), (9, 10.0), (10, 11.0)):
-        _seed_building(
-            conn, osm_id=osm_id, city_code='16201', lat=lat, lon=lon,
-            height=height, building_part='yes', parent_building_id=even,
-        )
-
-    survey = HeightOutlierSurvey(postgres_url=integration_db_url)
-    result = survey.run_check('sibling-spike')
-
-    assert result.total == 1
-    assert [row['id'] for row in result.samples] == [spike]
-
-
-@pytest.mark.integration
 def test_floor_height_flags_values_outside_the_configured_range(
     fresh_plateau_full_schema, integration_db_url
 ):
@@ -303,6 +257,49 @@ def test_check_result_counts_by_city_in_descending_order(
 
 
 @pytest.mark.integration
+def test_check_result_counts_by_building_value_in_descending_order(
+    fresh_plateau_full_schema, integration_db_url
+):
+    """該当件数を building の値ごとにも数える。
+
+    工場や倉庫は 1 階あたりの高さが大きくても正常なことが多い。
+    住宅と分けて数えると、誤りの可能性が高いものが見分けやすくなる。
+    """
+    from plateau_height_outliers import HeightOutlierSurvey
+
+    conn = fresh_plateau_full_schema
+    kinds = ['industrial', 'industrial', 'house', None]
+    for osm_id, kind in enumerate(kinds, start=1):
+        building_id = _seed_building(
+            conn, osm_id=osm_id, city_code='16201',
+            lat=36.70, lon=137.20, height=24.0, building_levels=2,
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                'UPDATE plateau_buildings SET building = %s WHERE id = %s',
+                (kind, building_id),
+            )
+
+    survey = HeightOutlierSurvey(postgres_url=integration_db_url)
+    result = survey.run_check('floor-height')
+
+    assert result.total == 4
+    assert result.by_building == [
+        ('industrial', 2), ('house', 1), (None, 1)
+    ]
+
+
+def test_sibling_spike_is_no_longer_a_check():
+    """sibling-spike は正常な建物の形を数えていたので外した。
+
+    突出した部分立体の 96 % 以上は、高さが外形と一致する主な棟だった。
+    """
+    from plateau_height_outliers import CHECKS
+
+    assert 'sibling-spike' not in CHECKS
+
+
+@pytest.mark.integration
 def test_floor_height_samples_show_both_ends_of_the_range(
     fresh_plateau_full_schema, integration_db_url
 ):
@@ -456,7 +453,7 @@ def test_survey_opens_the_database_read_only(integration_db_url):
 
     probe = MatchQuery(
         sql="""
-            SELECT 1 AS id, '16201' AS city_code,
+            SELECT 1 AS id, '16201' AS city_code, 'yes' AS building,
                    current_setting('transaction_read_only') AS read_only
         """,
         params=(),

@@ -44,10 +44,16 @@ def _bowtie_wkt(lat, lon, size_deg=0.0002):
 
 
 @pytest.mark.integration
-def test_part_over_outline_finds_part_taller_than_its_outline(
+def test_part_over_outline_ignores_rooftop_scale_excess(
     fresh_plateau_full_schema, integration_db_url
 ):
-    """部分立体が親の外形より高い場合だけを拾う。"""
+    """外形より高い部分立体のうち、超過が大きいものだけを検出する。
+
+    屋上の塔屋や階段室は外形より高くなるので、小さな超過は正常である。
+    実データで超過 10 m 以下の 143 件は面積比の中央値が 0.004 から 0.145 で、
+    外形のごく一部しか覆っていない。
+    超過 10 m 超の 37 件だけ面積比の中央値が 4.481 で、性質が違う。
+    """
     from plateau_height_outliers import HeightOutlierSurvey
 
     conn = fresh_plateau_full_schema
@@ -55,12 +61,18 @@ def test_part_over_outline_finds_part_taller_than_its_outline(
     outline = _seed_building(
         conn, osm_id=1, city_code='16201', lat=lat, lon=lon, height=10.0
     )
-    taller = _seed_building(
-        conn, osm_id=2, city_code='16201', lat=lat, lon=lon, height=15.0,
+    far_above = _seed_building(
+        conn, osm_id=2, city_code='16201', lat=lat, lon=lon, height=25.0,
         building_part='yes', parent_building_id=outline,
     )
+    # 超過 5 m は塔屋の高さにあたるので検出しない。
     _seed_building(
-        conn, osm_id=3, city_code='16201', lat=lat, lon=lon, height=8.0,
+        conn, osm_id=3, city_code='16201', lat=lat, lon=lon, height=15.0,
+        building_part='yes', parent_building_id=outline,
+    )
+    # 外形より低い部分立体は検出しない。
+    _seed_building(
+        conn, osm_id=4, city_code='16201', lat=lat, lon=lon, height=8.0,
         building_part='yes', parent_building_id=outline,
     )
 
@@ -68,14 +80,14 @@ def test_part_over_outline_finds_part_taller_than_its_outline(
     result = survey.run_check('part-over-outline')
 
     assert result.total == 1
-    assert [row['id'] for row in result.samples] == [taller]
+    assert [row['id'] for row in result.samples] == [far_above]
 
 
 @pytest.mark.integration
 def test_sibling_spike_flags_one_part_far_taller_than_its_siblings(
     fresh_plateau_full_schema, integration_db_url
 ):
-    """部分立体を 3 つ以上持つ建物で、最大が中央値の N 倍を超えるものを拾う。
+    """部分立体を 3 つ以上持つ建物で、最大が中央値の N 倍を超えるものを検出する。
 
     塔屋のある建物と区別できないため、既定の倍率は 3.0 にしている。
     """
@@ -121,9 +133,9 @@ def test_sibling_spike_flags_one_part_far_taller_than_its_siblings(
 def test_floor_height_flags_values_outside_the_configured_range(
     fresh_plateau_full_schema, integration_db_url
 ):
-    """1 階あたりの高さが範囲の外にあるものを拾う。
+    """1 階あたりの高さが範囲の外にあるものを検出する。
 
-    範囲の内側にある建物は拾わない。
+    範囲の内側にある建物は検出しない。
     """
     from plateau_height_outliers import HeightOutlierSurvey
 
@@ -156,9 +168,9 @@ def test_floor_height_flags_values_outside_the_configured_range(
 def test_needle_flags_a_tall_building_on_a_tiny_footprint(
     fresh_plateau_full_schema, integration_db_url
 ):
-    """高さの割に底面積が小さいものを拾う。
+    """高さの割に底面積が小さいものを検出する。
 
-    高さか底面積のどちらかが条件を外れていれば拾わない。
+    高さか底面積のどちらかが条件を外れていれば検出しない。
     """
     from plateau_height_outliers import HeightOutlierSurvey
 
@@ -193,7 +205,7 @@ def test_needle_flags_a_tall_building_on_a_tiny_footprint(
 def test_absolute_flags_heights_outside_the_plausible_range(
     fresh_plateau_full_schema, integration_db_url
 ):
-    """高さ自体が範囲の外にあるものを拾う。
+    """高さ自体が範囲の外にあるものを検出する。
 
     階数が入っているのは全体の約半分なので、
     floor-height が使えない建物をこの検査が受け持つ。
@@ -418,3 +430,34 @@ def test_degenerate_area_reports_polygons_with_non_positive_area(
 
     assert result.total == 1
     assert [row['id'] for row in result.samples] == [broken]
+
+
+@pytest.mark.integration
+def test_part_over_outline_reports_the_area_ratio(
+    fresh_plateau_full_schema, integration_db_url
+):
+    """代表例に、外形に対する部分立体の面積比を添える。
+
+    屋上の構造物は平面が小さく、比が 0.1 前後になる。
+    外形より広い部分立体は構造が壊れており、比が 1 を超える。
+    高さの差だけでは区別できないので、この列を判断材料にする。
+    """
+    from plateau_height_outliers import HeightOutlierSurvey
+
+    conn = fresh_plateau_full_schema
+    lat, lon = 36.70, 137.20
+    outline = _seed_building(
+        conn, osm_id=1, city_code='16201', lat=lat, lon=lon, height=10.0
+    )
+    part = _seed_building(
+        conn, osm_id=2, city_code='16201', lat=lat, lon=lon, height=25.0,
+        building_part='yes', parent_building_id=outline,
+    )
+    # 一辺を半分にすると面積は 4 分の 1 になる。
+    _resize(conn, part, lat, lon, 0.00005)
+
+    survey = HeightOutlierSurvey(postgres_url=integration_db_url)
+    result = survey.run_check('part-over-outline')
+
+    assert result.total == 1
+    assert result.samples[0]['area_ratio'] == pytest.approx(0.25, rel=1e-6)

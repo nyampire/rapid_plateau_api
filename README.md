@@ -335,8 +335,7 @@ Rapid エディタの Plateau データセット設定で、この API の URL �
 含む部分集合）。`absolute` は高さが 1.0m 未満のときだけ、`floor-height` は
 `building` が house/apartments/residential のときだけ該当します。
 `needle` は部分立体には付けません。
-`needle` が
-含まれる場合は、あわせて `plateau:footprint_m2` に底面積を平方メートル・
+`needle` が含まれる場合は、あわせて `plateau:footprint_m2` に底面積を平方メートル・
 小数点以下 4 桁で付与します。
 
 `plateau:height_warning` と `plateau:footprint_m2` は OSM のタグではありません。

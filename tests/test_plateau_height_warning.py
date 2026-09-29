@@ -14,7 +14,8 @@ from plateau_height_warning import (
 def _row(**kwargs):
     """判定に関係しない列を既定値で埋めた行。"""
     row = {
-        'id': 1, 'parent_building_id': None, 'building': 'yes',
+        'id': 1, 'parent_building_id': None, 'building_part': None,
+        'building': 'yes',
         'height': 7.0, 'building_levels': None,
         'planar_area': 1e-8, 'footprint_m2': None,
     }
@@ -60,6 +61,15 @@ def test_part_over_outline_is_skipped_without_both_heights():
 ])
 def test_needle(height, area, expected):
     assert height_warnings(_row(height=height, footprint_m2=area)) == expected
+
+
+def test_needle_skips_building_parts():
+    # 屋上の塔屋や階段室は、地面からの高さが 15 m を超え底面積が小さい。
+    part = _row(
+        id=2, parent_building_id=1, building_part='yes',
+        height=18.4, footprint_m2=0.0036,
+    )
+    assert height_warnings(part) == []
 
 
 @pytest.mark.parametrize('height, expected', [

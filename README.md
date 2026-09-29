@@ -333,7 +333,9 @@ Rapid エディタの Plateau データセット設定で、この API の URL �
 `degenerate-area`、`part-over-outline`、`absolute`、`needle`、`floor-height` の
 うち該当した検査名を、この順に `;` で連結したものです（該当したものだけを
 含む部分集合）。`absolute` は高さが 1.0m 未満のときだけ、`floor-height` は
-`building` が house/apartments/residential のときだけ該当します。`needle` が
+`building` が house/apartments/residential のときだけ該当します。
+`needle` は部分立体には付けません。
+`needle` が
 含まれる場合は、あわせて `plateau:footprint_m2` に底面積を平方メートル・
 小数点以下 4 桁で付与します。
 

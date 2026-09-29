@@ -23,6 +23,8 @@ import re
 import hashlib
 
 from plateau_coverage import CoverageManager
+from plateau_height_outliers import DEFAULT_NEEDLE_HEIGHT_M
+from plateau_height_warning import annotate_height_warnings
 
 # ログ設定
 logging.basicConfig(
@@ -171,6 +173,9 @@ class OSMFJPlateauAPI:
             # さらに bbox 内の orphan part (relation 無しの building:part) も併せて返す。
             # LATERAL JOIN で各 building のノードを個別に集約（GROUP BY 不要）。
             query = f"""
+                -- planar_area と footprint_m2 は、高さの警告の判定に使います。
+                -- 球面上の面積は、平面での面積が正で、高さが needle の下限を超えるときだけ計算します。
+                -- 面積が 0 以下の輪郭では、球面上の計算が内部エラーで止まるためです。
                 WITH bbox_outlines AS (
                     -- bbox 内の outline / simple (building_part IS NULL)
                     SELECT DISTINCT ON ({dedup_key})
@@ -182,6 +187,11 @@ class OSMFJPlateauAPI:
                         b.parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
+                        ST_Area(b.geom) AS planar_area,
+                        CASE WHEN b.height > {DEFAULT_NEEDLE_HEIGHT_M}
+                                  AND ST_Area(b.geom) > 0
+                             THEN ST_Area(b.geom::geography)
+                        END AS footprint_m2,
                         COUNT(*) OVER () AS pre_dedup_count,
                         NULL::boolean AS intersects_parent
                     FROM plateau_buildings b
@@ -210,6 +220,11 @@ class OSMFJPlateauAPI:
                         b.parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
+                        ST_Area(b.geom) AS planar_area,
+                        CASE WHEN b.height > {DEFAULT_NEEDLE_HEIGHT_M}
+                                  AND ST_Area(b.geom) > 0
+                             THEN ST_Area(b.geom::geography)
+                        END AS footprint_m2,
                         0 AS pre_dedup_count,
                         ST_Intersects(ST_MakeValid(b.geom), g.geom) AS intersects_parent
                     FROM plateau_buildings b
@@ -227,6 +242,11 @@ class OSMFJPlateauAPI:
                         b.parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
+                        ST_Area(b.geom) AS planar_area,
+                        CASE WHEN b.height > {DEFAULT_NEEDLE_HEIGHT_M}
+                                  AND ST_Area(b.geom) > 0
+                             THEN ST_Area(b.geom::geography)
+                        END AS footprint_m2,
                         0 AS pre_dedup_count,
                         NULL::boolean AS intersects_parent
                     FROM plateau_buildings b
@@ -256,6 +276,8 @@ class OSMFJPlateauAPI:
                     ub.tourism, ub.leisure, ub.landuse, ub.building_part,
                     ub.parent_building_id,
                     ub.representative_point,
+                    ub.planar_area,
+                    ub.footprint_m2,
                     ub.pre_dedup_count,
                     ub.intersects_parent,
                     bn.nodes
@@ -298,6 +320,10 @@ class OSMFJPlateauAPI:
                 else:
                     r['representative_point'] = None
 
+            # 高さの警告を判定して、各行に書き込みます。
+            # 部分立体は、同じ応答に含まれる外形と比べます。
+            annotate_height_warnings(result)
+
             # Observability for dedup effectiveness and LIMIT truncation.
             # raw_count = COUNT(*) OVER () inside bbox_outlines = outline
             # candidates that passed WHERE, before DISTINCT ON and LIMIT.
@@ -324,6 +350,8 @@ class OSMFJPlateauAPI:
             # shape is unchanged.
             for r in result:
                 r.pop('pre_dedup_count', None)
+                # planar_area は判定にだけ使う列で、応答には含めません。
+                r.pop('planar_area', None)
 
             logger.info(
                 f"検索結果: {len(result)}件 "
@@ -509,6 +537,16 @@ class OSMFJPlateauAPI:
         rp = building.get('representative_point')
         if rp is not None:
             add_tag('representative_point', f'{rp[0]:.7f},{rp[1]:.7f}')
+
+        # 高さの警告です。
+        # OSM のタグではないので、エディタが受け取った時点で取り除きます。
+        # needle の警告の文に値を入れるため、底面積を添えます。
+        warnings = building.get('height_warnings') or []
+        if warnings:
+            add_tag('plateau:height_warning', ';'.join(warnings))
+            footprint = building.get('footprint_m2')
+            if 'needle' in warnings and footprint is not None:
+                add_tag('plateau:footprint_m2', f'{float(footprint):.4f}')
 
     def buildings_to_osm_xml(self, buildings: List[Dict]) -> str:
         """建物データを OSM XML 形式に変換 (Phase 2: relation 出力対応)

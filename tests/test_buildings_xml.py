@@ -1430,3 +1430,24 @@ class TestHeightWarningTags:
         relation = root.find('relation')
 
         assert _tags_of(relation)['plateau:height_warning'] == 'absolute'
+
+    def test_multipolygon_relation_carries_the_warning(self, api):
+        """中庭 (内環) のある建物は type=multipolygon の relation で返るが、
+        その relation にも plateau:height_warning が付くことを確かめる。
+        """
+        def ring(base, lat, lon, d, r):
+            return [{'id': base + i, 'lat': la, 'lon': lo, 'sequence_id': i, 'ring_id': r}
+                    for i, (la, lo) in enumerate([
+                        (lat, lon), (lat + d, lon), (lat + d, lon + d), (lat, lon + d)])]
+
+        building = {
+            'id': 1, 'building': 'public', 'height': 0.5,
+            'building_part': None, 'parent_building_id': None,
+            'height_warnings': ['absolute'], 'footprint_m2': None,
+            'nodes': ring(100, 33.0, 133.0, 0.001, 0) + ring(200, 33.0003, 133.0003, 0.0004, 1),
+        }
+        root = ET.fromstring(api.buildings_to_osm_xml([building]))
+        relation = root.find('relation')
+
+        assert relation is not None, 'relation が出ていない'
+        assert _tags_of(relation)['plateau:height_warning'] == 'absolute'

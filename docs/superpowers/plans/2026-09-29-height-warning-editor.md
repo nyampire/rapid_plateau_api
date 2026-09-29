@@ -1,6 +1,7 @@
 # 高さの警告（エディタ側）実装計画
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** API が添えた高さの警告を、Rapid のサイドバー、地図の塗り、タグ転記の印と欄に表示します。
 
@@ -16,14 +17,17 @@
 ## Global Constraints
 
 - API は way と relation に `plateau:height_warning`（検査の名前を `;` でつないだ値）と `plateau:footprint_m2`（needle のときだけ）を添えます。
-- この 2 つのタグは OSM に送りません。`PlateauService` で必ず取り除きます。
-- 警告のある PLATEAU の建物は、塗りを `dots` の模様にします。追加できないとき（`construction`）はそちらを優先します。
+- この 2 つのタグは OSM に送りません。
+  `PlateauService` で必ず取り除きます。
+- 警告のある PLATEAU の建物は、塗りを `dots` の模様にします。
+  追加できないとき（`construction`）はそちらを優先します。
 - タグ転記の印は、状態が `CANDIDATE` で転記元に警告があるときだけ、マゼンタの丸に赤い縁（`0xE53935`）と「!」にします。
 - 追加と適用の操作は止めません。
 - 文言は `data/core.yaml`（英語）と `data/l10n/core.ja.json`（日本語）の両方に足します。
 - コメントとコミットメッセージは日本語で、1 行に 1 文です。
 - `git add -A` は使いません。
-- 試験は `npm run test:browser` で実行します。1 つのファイルだけ試すときも、この計画では全体を実行して結果を確かめます。
+- 試験は `npm run test:browser` で実行します。
+  1 つのファイルだけ試すときも、この計画では全体を実行して結果を確かめます。
 - lint は `npm run lint` です。
 
 ---
@@ -150,7 +154,8 @@ Expected: 追加した 3 件のうち 2 件が FAIL（`heightWarnings` が undef
 
   /**
    * _applyHeightWarning
-   * 取り出した警告を、entity の属性に移す。警告が無ければ何も付けない。
+   * 取り出した警告を、entity の属性に移す。
+   * 警告が無ければ何も付けない。
    */
   _applyHeightWarning(entity, warning) {
     if (warning.checks.length) entity.heightWarnings = warning.checks;
@@ -211,7 +216,7 @@ git commit -m "feat(plateau): 高さの警告のタグを取り除き、建物�
   - `utilPlateauHeightWarningMessages(entity, graph, l10n) -> string[]`
     entity が建物 relation に属していれば、relation とそのメンバーの警告もまとめ、同じ文は 1 回だけ返します。
     graph が無いときは entity だけを見ます。
-  - 文言のキー: `plateau_height_warning.title`、`.advice`、`.degenerate_area`、`.part_over_outline`、`.part_over_outline_generic`、`.needle`、`.needle_generic`、`.absolute`、`.floor_height_high`、`.floor_height_low`
+  - 文言のキー: `plateau_height_warning.title`、`.advice`、`.degenerate_area`、`.part_over_outline`、`.part_over_outline_generic`、`.needle`、`.needle_generic`、`.absolute`、`.absolute_generic`、`.floor_height_high`、`.floor_height_low`、`.floor_height_generic`
 
 - [ ] **Step 1: 失敗する試験を書く**
 
@@ -269,6 +274,15 @@ describe('utilPlateauHeightWarningMessages', () => {
     expect(Rapid.utilPlateauHeightWarningMessages(w, null, l10n)).to.eql([
       'plateau_height_warning.degenerate_area',
       'plateau_height_warning.absolute {"height":"0.5"}'
+    ]);
+  });
+
+  it('falls back to generic messages when there is no height tag', () => {
+    const w = way('w1', { building: 'house' },
+      { heightWarnings: ['absolute', 'floor-height'] });
+    expect(Rapid.utilPlateauHeightWarningMessages(w, null, l10n)).to.eql([
+      'plateau_height_warning.absolute_generic',
+      'plateau_height_warning.floor_height_generic'
     ]);
   });
 
@@ -423,15 +437,23 @@ function _warningItems(entity, graph) {
       }
 
     } else if (check === 'absolute') {
-      items.push(['plateau_height_warning.absolute', { height: _fmt(height) }]);
+      if (Number.isFinite(height)) {
+        items.push(['plateau_height_warning.absolute', { height: _fmt(height) }]);
+      } else {
+        items.push(['plateau_height_warning.absolute_generic', null]);
+      }
 
     } else if (check === 'floor-height') {
       const levels = parseFloat(tags['building:levels']);
-      const perFloor = height / levels;
-      const key = (perFloor > FLOOR_HEIGHT_SIDE_M)
-        ? 'plateau_height_warning.floor_height_high'
-        : 'plateau_height_warning.floor_height_low';
-      items.push([key, { per_floor: _fmt(perFloor) }]);
+      if (Number.isFinite(height) && Number.isFinite(levels) && levels > 0) {
+        const perFloor = height / levels;
+        const key = (perFloor > FLOOR_HEIGHT_SIDE_M)
+          ? 'plateau_height_warning.floor_height_high'
+          : 'plateau_height_warning.floor_height_low';
+        items.push([key, { per_floor: _fmt(perFloor) }]);
+      } else {
+        items.push(['plateau_height_warning.floor_height_generic', null]);
+      }
     }
   }
   return items;
@@ -458,8 +480,10 @@ export { utilPlateauHeightWarningMessages } from './plateau_height_warning.js';
     needle: "The footprint is only {area} m² for a height of {height} m."
     needle_generic: The footprint is too small for the height.
     absolute: "The height is {height} m, too low for a building."
+    absolute_generic: The height is too low for a building.
     floor_height_high: "Each floor is {per_floor} m tall, too tall for a residential building."
     floor_height_low: "Each floor is {per_floor} m tall, too low for a residential building."
+    floor_height_generic: The height per floor is unusual for a residential building.
 ```
 
 `data/l10n/core.ja.json` の `"height_transfer": { ... },` の閉じ括弧の行の直後に、同じ字下げで足します。
@@ -474,8 +498,10 @@ export { utilPlateauHeightWarningMessages } from './plateau_height_warning.js';
       "needle": "高さ {height} m に対して、底面積が {area} m² しかありません。",
       "needle_generic": "高さに対して、底面積が小さすぎます。",
       "absolute": "高さが {height} m で、建物としては低すぎます。",
+      "absolute_generic": "建物としては高さが低すぎます。",
       "floor_height_high": "1 階あたりの高さが {per_floor} m で、住宅としては高すぎます。",
-      "floor_height_low": "1 階あたりの高さが {per_floor} m で、住宅としては低すぎます。"
+      "floor_height_low": "1 階あたりの高さが {per_floor} m で、住宅としては低すぎます。",
+      "floor_height_generic": "住宅としては 1 階あたりの高さが極端です。"
     },
 ```
 

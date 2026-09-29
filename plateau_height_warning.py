@@ -8,7 +8,8 @@
 ここでは、API が取り出した行を Python で判定します。
 
 警告にするのは、調査の検査のうち誤りの可能性が高いものだけです。
-degenerate-area、part-over-outline、needle はすべて警告にします。
+degenerate-area と part-over-outline はすべて警告にします。
+needle は、部分立体を除いて警告にします。
 absolute は、高さが低すぎる側だけを警告にします。
 floor-height は、住宅だけを警告にします。
 """
@@ -61,8 +62,11 @@ def height_warnings(row: Dict, outline: Optional[Dict] = None) -> List[str]:
                 and height > outline_height + DEFAULT_PART_TOLERANCE_M):
             found.add('part-over-outline')
 
+    # 部分立体は needle にしない。
+    # 屋上の塔屋や階段室は地面からの高さが 15 m を超え、底面積が小さいため。
     footprint = _num(row.get('footprint_m2'))
-    if (height is not None and footprint is not None
+    if (row.get('building_part') is None
+            and height is not None and footprint is not None
             and height > DEFAULT_NEEDLE_HEIGHT_M
             and footprint < DEFAULT_NEEDLE_AREA_M2):
         found.add('needle')

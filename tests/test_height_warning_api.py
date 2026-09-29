@@ -132,7 +132,8 @@ def test_api_agrees_with_the_survey_on_the_same_buildings(
     """同じ建物に対して、調査と API が同じ建物を選ぶ。
 
     判定を SQL と Python の 2 か所で持つので、食い違いをここで捕まえる。
-    警告にしない条件（absolute の上側、住宅以外の floor-height）は、
+    警告にしない条件（absolute の上側、住宅以外の floor-height、
+    部分立体の needle）は、
     調査の結果から除いて比べる。
     """
     from plateau_height_outliers import HeightOutlierSurvey
@@ -147,12 +148,21 @@ def test_api_agrees_with_the_survey_on_the_same_buildings(
         dict(height=24.6, levels=2, building='house'),
         dict(height=24.6, levels=2, building='warehouse'),
         dict(height=20.0, broken=True),
+        dict(height=18.4, tiny=True, part=True),
     ]
+    # 屋上の塔屋にあたる部分立体の親。塔屋より高くして part-over-outline を避ける。
+    tower_parent = _seed_building(
+        conn, osm_id=200, city_code='16201', lat=LAT,
+        lon=LON - STEP * 5, height=60.0,
+    )
     for osm_id, s in enumerate(seeds, start=1):
         lon = LON + STEP * osm_id
+        part = {}
+        if s.get('part'):
+            part = dict(building_part='yes', parent_building_id=tower_parent)
         bid = _seed_building(
             conn, osm_id=osm_id, city_code='16201', lat=LAT, lon=lon,
-            height=s['height'], building_levels=s.get('levels'),
+            height=s['height'], building_levels=s.get('levels'), **part,
         )
         if 'building' in s:
             _set_building(conn, bid, s['building'])
@@ -168,6 +178,12 @@ def test_api_agrees_with_the_survey_on_the_same_buildings(
         building_part='yes', parent_building_id=outline,
     )
 
+    # 調査の代表例には building_part の列が無いので、部分立体の id を別に読む。
+    with conn.cursor() as cur:
+        cur.execute(
+            'SELECT id FROM plateau_buildings WHERE building_part IS NOT NULL'
+        )
+        part_ids = {r[0] for r in cur.fetchall()}
     survey = HeightOutlierSurvey(postgres_url=integration_db_url)
     rows = _rows_by_id(plateau_api_class, integration_db_url)
 
@@ -181,8 +197,14 @@ def test_api_agrees_with_the_survey_on_the_same_buildings(
             if (check == 'floor-height'
                     and s['building'] not in RESIDENTIAL_BUILDING_VALUES):
                 continue
+            if check == 'needle' and s['id'] in part_ids:
+                continue
             expected.add(s['id'])
         actual = {
             bid for bid, r in rows.items() if check in r['height_warnings']
         }
         assert actual == expected, check
+        if check == 'needle':
+            # 調査は部分立体も数え、API は警告にしない。
+            surveyed = {s['id'] for s in result.samples}
+            assert surveyed & part_ids

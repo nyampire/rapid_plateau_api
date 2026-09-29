@@ -329,6 +329,20 @@ Rapid エディタの Plateau データセット設定で、この API の URL �
 
 ジオメトリが壊れていて代表点を計算できない場合、このタグは省略されます。
 
+さらに、高さが怪しい建物には `plateau:height_warning` を付与しています。値は
+`degenerate-area`、`part-over-outline`、`absolute`、`needle`、`floor-height` の
+うち該当した検査名を、この順に `;` で連結したものです（該当したものだけを
+含む部分集合）。`absolute` は高さが 1.0m 未満のときだけ、`floor-height` は
+`building` が house/apartments/residential のときだけ該当します。
+`needle` は部分立体には付けません。
+`needle` が含まれる場合は、あわせて `plateau:footprint_m2` に底面積を平方メートル・
+小数点以下 4 桁で付与します。
+
+`plateau:height_warning` と `plateau:footprint_m2` は OSM のタグではありません。
+エディタ側でこれらを OSM に書き込む前に必ず取り除く必要があります。そのため、
+このタグを取り除くエディタ側の変更を先に本番へデプロイしてから、この API の
+変更をデプロイしてください。
+
 ## ライセンス
 
 データソースのライセンスは [Plateau](https://www.mlit.go.jp/plateau/) の利用規約に従います。

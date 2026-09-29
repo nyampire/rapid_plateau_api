@@ -1,6 +1,7 @@
 # 高さの警告（API 側）実装計画
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** API が建物を返すときに高さの怪しさを判定し、該当した建物に目印のタグを添えます。
 
@@ -14,15 +15,21 @@
 
 ## Global Constraints
 
-- 閾値は `plateau_height_outliers.py` の `DEFAULT_` 定数を読み込んで使います。値を書き写しません。
-- 警告にする検査は次のとおりです。`degenerate-area`、`part-over-outline`、`needle` はすべて、`absolute` は高さ 1.0 m 未満だけ、`floor-height` は `building` が `house`、`apartments`、`residential` のものだけです。
-- 目印のタグは `plateau:height_warning` です。値は検査の名前を `CHECKS` の並びで `;` でつないだものです。
+- 閾値は `plateau_height_outliers.py` の `DEFAULT_` 定数を読み込んで使います。
+  値を書き写しません。
+- 警告にする検査は次のとおりです。
+  `degenerate-area`、`part-over-outline`、`needle` はすべて、`absolute` は高さ 1.0 m 未満だけ、`floor-height` は `building` が `house`、`apartments`、`residential` のものだけです。
+- 目印のタグは `plateau:height_warning` です。
+  値は検査の名前を `CHECKS` の並びで `;` でつないだものです。
 - `needle` に該当したときだけ、`plateau:footprint_m2` に底面積（平方メートル、小数 4 桁）を添えます。
 - 球面上の面積は、平面での面積が正のときだけ計算します。
-- 本番への反映は、エディタの変更を公開した後に行います。この計画には本番への反映を含めません。
+- 本番への反映は、エディタの変更を公開した後に行います。
+  この計画には本番への反映を含めません。
 - コメント、docstring、コミットメッセージは日本語のですます調で、1 行に 1 文です。
-- `git add -A` は使いません。ファイルを明示して `git add` します。
-- 統合試験は `LC_ALL=C PLATEAU_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/plateau_test python3 -m pytest --run-integration` で実行します。手元の PostgreSQL 17 と PostGIS で、空のデータベース `plateau_test` を作り、`CREATE EXTENSION postgis;` を済ませておきます。
+- `git add -A` は使いません。
+  ファイルを明示して `git add` します。
+- 統合試験は `LC_ALL=C PLATEAU_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/plateau_test python3 -m pytest --run-integration` で実行します。
+  手元の PostgreSQL 17 と PostGIS で、空のデータベース `plateau_test` を作り、`CREATE EXTENSION postgis;` を済ませておきます。
 
 ---
 
@@ -290,7 +297,8 @@ git commit -m "feat: 建物の高さが怪しいかを 1 件ずつ判定する�
 
 **Interfaces:**
 - Consumes: `annotate_height_warnings`（Task 1）
-- Produces: `get_buildings_in_bbox` が返す各行に `height_warnings: List[str]` と `footprint_m2: Optional[float]` が入ります。`planar_area` は返す前に取り除きます。
+- Produces: `get_buildings_in_bbox` が返す各行に `height_warnings: List[str]` と `footprint_m2: Optional[float]` が入ります。
+  `planar_area` は返す前に取り除きます。
 
 - [ ] **Step 1: 失敗する統合試験を書く**
 
@@ -517,7 +525,8 @@ git commit -m "feat: 建物を返すときに高さの警告を判定する"
 
 **Interfaces:**
 - Consumes: 行の `height_warnings`、`footprint_m2`（Task 2）
-- Produces: way と、外形のタグを複製する relation に、`plateau:height_warning` と `plateau:footprint_m2` のタグが付きます。エディタの計画がこの 2 つのタグ名を使います。
+- Produces: way と、外形のタグを複製する relation に、`plateau:height_warning` と `plateau:footprint_m2` のタグが付きます。
+  エディタの計画がこの 2 つのタグ名を使います。
 
 - [ ] **Step 1: 失敗する試験を書く**
 
@@ -753,7 +762,7 @@ Expected: 失敗なし
 データベースは読むだけで、サーバの API は止めません。
 
 変更前との差が 1 回あたり 20 % を超える場合は、ここで止めて相談します。
-面積の計算を絞る案は、設計文書の「応答時間」の節にあります。
+面積の計算はすでに高さ 15 m 超の建物に絞ってあるため、それでも遅い場合は次にどうするか相談します。
 
 - [ ] **Step 3: Pull Request を作る**
 

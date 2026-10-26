@@ -35,6 +35,11 @@ def batch_env(tmp_path):
         # tmp_path 配下の存在しない名前にして pgrep が一致しないようにする。
         # pgrep -f はこの値を拡張正規表現として扱うが、tmp_path にメタ文字は出ない。
         'STRAY_IMPORT_PATTERN': str(tmp_path / 'no_stray_import_marker'),
+        # 既定の 06:00-06:35 のままだと、テストを動かした時刻がこの時間帯に
+        # 入ったとき、都市まで進むテストが 120 秒の sleep で時間切れになる。
+        # 始まりと終わりを同じ分にして、時間帯を空にする。
+        'UPGRADE_WINDOW_START_MIN': '0',
+        'UPGRADE_WINDOW_END_MIN': '0',
     })
 
     class Env:
@@ -393,3 +398,80 @@ def test_early_abort_fails_zero_disables_the_early_abort(batch_env):
     assert (batch_env.logs / 'batch_status').read_text().strip() == 'DONE'
     failed_lines = (batch_env.logs / 'failed.txt').read_text().splitlines()
     assert len(failed_lines) == 4, failed_lines
+
+
+def _tz_where_local_time_is(hour, minute):
+    """いまの時刻が hour:minute に見える TZ の値を返す。
+
+    POSIX の TZ は「名前-時差」で UTC より進んだ地域を表す。
+    date +%H はこの TZ に従うので、faketime なしで壁時計をずらせる。
+    """
+    now = time.gmtime()
+    offset = (hour * 60 + minute - (now.tm_hour * 60 + now.tm_min)) % 1440
+    return 'FAK-%d:%02d' % (offset // 60, offset % 60)
+
+
+def test_batch_does_not_depend_on_the_wall_clock(batch_env):
+    """テストを動かした時刻が 06:00-06:35 でも、待たずに完走する。
+
+    GitHub の実行環境は UTC で、06:05 UTC に始まった実行では、都市まで進む
+    テストが 120 秒の sleep に入り、すべて 15 秒の時間切れで落ちた。
+    """
+    targets = batch_env.tmp / 'targets.txt'
+    targets.write_text('13402\n')
+    batch_env.run_env['TZ'] = _tz_where_local_time_is(6, 10)
+
+    r = subprocess.run(['bash', str(BATCH), str(targets)],
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert batch_env.called.read_text().split() == ['13402']
+
+
+def test_upgrade_window_holds_the_city_until_it_ends(batch_env):
+    """時間帯の中にいる間は、都市を始めずに待つ。
+
+    一日中を時間帯にして、待ちに入ったことを summary.log で確かめる。
+    待ちは sleep 120 なので、終わりまでは待たずにプロセスグループごと止める。
+    """
+    targets = batch_env.tmp / 'targets.txt'
+    targets.write_text('13402\n')
+    batch_env.run_env['UPGRADE_WINDOW_START_MIN'] = '0'
+    batch_env.run_env['UPGRADE_WINDOW_END_MIN'] = '1440'
+    summary = batch_env.logs / 'summary.log'
+
+    proc = subprocess.Popen(['bash', str(BATCH), str(targets)],
+                            env=batch_env.run_env, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 10
+        waiting = False
+        while time.time() < deadline:
+            if summary.exists() and 'In apt-daily-upgrade window' in summary.read_text():
+                waiting = True
+                break
+            time.sleep(0.1)
+        assert waiting, '時間帯の待ちに入らなかった'
+        assert proc.poll() is None, 'バッチが待たずに終わった'
+        assert not batch_env.called.exists()
+    finally:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=10)
+
+
+@pytest.mark.parametrize('name', ['UPGRADE_WINDOW_START_MIN', 'UPGRADE_WINDOW_END_MIN'])
+def test_upgrade_window_not_a_number_exits_6_with_bad_config(batch_env, name):
+    """時間帯の分が数字でなければ、都市を始める前に exit 6 で止まる。"""
+    targets = batch_env.tmp / 'targets.txt'
+    targets.write_text('13402\n')
+    batch_env.run_env[name] = '6:00'
+
+    r = subprocess.run(['bash', str(BATCH), str(targets)],
+                       env=batch_env.run_env, capture_output=True, text=True, timeout=15)
+
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert (batch_env.logs / 'batch_status').read_text().strip() == 'BAD_CONFIG'
+    assert not batch_env.called.exists()

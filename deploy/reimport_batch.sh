@@ -6,7 +6,7 @@
 # 一覧のパスを省略すると $HOME/reimport_targets.txt を読む。
 # done.txt にある都市は飛ばす。$HOME/reimport_pause があるか、
 # wrapper が exit 2 (ディスク不足) を返したら止まる。
-# apt-daily-upgrade の時間帯 (06:00-06:35 JST) は都市の手前で待つ。
+# apt-daily-upgrade の時間帯 (既定 06:00-06:35 JST) は都市の手前で待つ。
 set -uo pipefail
 
 LIST="${1:-$HOME/reimport_targets.txt}"
@@ -20,6 +20,11 @@ LIST="${1:-$HOME/reimport_targets.txt}"
 # batch_status=DONE を見ると即座に終わるので、数秒で完走する失敗の
 # 連鎖には間に合わない。バッチ自身にも同じ形の門を持たせる。
 : "${EARLY_ABORT_FAILS:=3}"
+# apt-daily-upgrade の時間帯を 0 時からの分で持つ。終わりの分は含まない。
+# サーバは JST で動くので既定は 06:00-06:35 のまま。テストは UTC の実行環境で
+# 壁時計がこの時間帯に入ると 120 秒の sleep に捕まるので、変数で外せるようにする。
+: "${UPGRADE_WINDOW_START_MIN:=360}"
+: "${UPGRADE_WINDOW_END_MIN:=395}"
 
 DONE="$REIMPORT_LOG_DIR/done.txt"
 FAILED="$REIMPORT_LOG_DIR/failed.txt"
@@ -63,6 +68,12 @@ if ! need_int "$EARLY_ABORT_FAILS"; then
   exit 6
 fi
 
+if ! need_int "$UPGRADE_WINDOW_START_MIN" || ! need_int "$UPGRADE_WINDOW_END_MIN"; then
+  echo "[$(date '+%F %T')] ABORT: UPGRADE_WINDOW_START_MIN / UPGRADE_WINDOW_END_MIN が数字でない (値: $UPGRADE_WINDOW_START_MIN / $UPGRADE_WINDOW_END_MIN)" | tee -a "$SUMMARY"
+  echo BAD_CONFIG > "$STATUS"
+  exit 6
+fi
+
 touch "$DONE" "$FAILED"
 
 rm -f "$STATUS"
@@ -84,9 +95,10 @@ wait_through_upgrade_window() {
     h=$(date +%H)
     m=$(date +%M)
     mod=$((10#$h * 60 + 10#$m))
-    if [ $mod -ge 360 ] && [ $mod -lt 395 ]; then
+    if [ $mod -ge "$UPGRADE_WINDOW_START_MIN" ] && [ $mod -lt "$UPGRADE_WINDOW_END_MIN" ]; then
       if [ $logged -eq 0 ]; then
-        echo "[$(date '+%F %T')] In apt-daily-upgrade window, waiting until 06:35" | tee -a "$SUMMARY"
+        printf -v until '%02d:%02d' $((UPGRADE_WINDOW_END_MIN / 60)) $((UPGRADE_WINDOW_END_MIN % 60))
+        echo "[$(date '+%F %T')] In apt-daily-upgrade window, waiting until $until" | tee -a "$SUMMARY"
         logged=1
       fi
       sleep 120

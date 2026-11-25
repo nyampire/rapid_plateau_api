@@ -1,348 +1,355 @@
 # Plateau Building Data Pipeline for Rapid Editor
 
-[Plateau](https://www.mlit.go.jp/plateau/) の建築物データを PostGIS に格納し、
-[Rapid エディタ](https://github.com/nyampire/Rapid) 向けに OSM XML 形式で配信する
-パイプラインです。
+[PLATEAU](https://www.mlit.go.jp/plateau/)の建物データをPostGISに取り込み、[Rapidエディタ](https://github.com/nyampire/Rapid)が読めるOSM XMLで配信するバックエンドです。
+扱うのはPLATEAUの建物だけで、橋梁、トンネル、植生などは対象外です。
 
-扱うのは Plateau の**建築物のみ**です。橋梁・トンネル・植生などのカテゴリは
-対象外です。
+エディタは<https://rapid.nyampire.info/>で公開しています。
 
-関連リポジトリは 3 つあります。
+関連するリポジトリは3つあります。
 
 | リポジトリ | 役割 |
 |---|---|
-| [nyampire/rapid_plateau_api](https://github.com/nyampire/rapid_plateau_api) | このリポジトリ（バックエンド） |
-| [nyampire/Rapid](https://github.com/nyampire/Rapid) | エディタ（Plateau インポート機能を追加した Rapid フォーク版） |
-| [nyampire/rapid_plateau_dashboard](https://github.com/nyampire/rapid_plateau_dashboard) | インポート進捗の可視化 |
+| [nyampire/rapid_plateau_api](https://github.com/nyampire/rapid_plateau_api) | このリポジトリ。取り込みと配信 |
+| [nyampire/Rapid](https://github.com/nyampire/Rapid) | PLATEAUの建物を読み込む機能を足したRapidのフォーク |
+| [nyampire/rapid_plateau_dashboard](https://github.com/nyampire/rapid_plateau_dashboard) | OSMへの取り込みの進み具合を集計するダッシュボード |
 
-## 構成
+## 全体の流れ
+
+建物データの入口は2つあります。
+一つは、CityGMLをOSM形式に変換済みのデータを配信元からダウンロードする道です。
+もう一つは、CityGMLを手元でcitygml-osmに通して変換する道で、配信元が止まっているあいだの代わりに使っています。
 
 ```
-plateau_downloader.py        配布元からメッシュデータをダウンロード
-        |
-        v
-plateau_importer2postgis.py  ダウンロードしたデータを PostGIS にインポート
-        |
-        v
-osmfj_plateau_api.py         PostGIS から Rapid 向けに OSM XML を配信 (FastAPI)
+ 配信元の変換済みデータ ── plateau_downloader.py ──┐
+                                                    │
+ G空間情報センターの CityGML ─ scripts/reimport/ ───┤  (citygml-osm で .osm に変換して送る)
+                                                    ▼
+                                  plateau_importer2postgis.py
+                                                    │
+                                                    ▼
+                         PostGIS (plateau_buildings, plateau_building_nodes)
+                                   │                          │
+                                   ▼                          ▼
+                          osmfj_plateau_api.py        rapid_plateau_dashboard
+                          (OSM XML、対応エリア)       (同じデータベースを読む)
+                                   │
+                                   ▼
+                              Rapid エディタ
 ```
 
-取り込みの入力は citygml-osm が CityGML から変換した `.osm` である。
-その出力の性質と、取り込み側でどこまで対処できるかは
-[docs/converter-output.md](docs/converter-output.md) にまとめてある。
+取り込みの入力になる`.osm`の性質と、取り込みの側でどこまで対処できるかは[docs/converter-output.md](docs/converter-output.md)にあります。
+変換から配信までの各段階が建物の形に何をするかの説明は、[docs/geometry-pipeline.md](docs/geometry-pipeline.md)です。
 
-変換から配信まで、どの段が建物の図形に何をするかは
-[docs/geometry-pipeline.md](docs/geometry-pipeline.md) にまとめてある。
+## はじめかた
 
-## 必要環境
-
-- Python 3.9+
-- PostgreSQL + PostGIS
-- 依存パッケージ:
+Python 3と、PostGISを入れたPostgreSQLが要ります。
+CIはPython 3.12で動かしています。
 
 ```bash
-pip install fastapi uvicorn psycopg2-binary requests beautifulsoup4
+pip install -r requirements.txt
 ```
 
-## 使い方
+テーブルを作るSQLは[DEPLOY.md](DEPLOY.md)の「テーブル作成」にあります。
+インポーターは足りない列のいくつかを自分で足しますが、テーブルそのものと`city_code`の列は作りません。
 
-### 1. データのダウンロード
+APIは、環境変数`DATABASE_URL`に書いた接続先を使います。
 
 ```bash
-# 利用可能な市区町村一覧を表示（配布元から都度取得）
-python plateau_downloader.py --list
+export DATABASE_URL="postgresql://user:pass@localhost:5432/dbname"
+python osmfj_plateau_api.py   # http://localhost:8000 で起動する
+```
 
-# 市区町村名で検索
-python plateau_downloader.py --cityname 米子
+`DATABASE_URL`を設定しないと、コードに書いた開発用の接続先を使います。
+サーバへの置き方（systemd、nginx、証明書）の手順も、[DEPLOY.md](DEPLOY.md)の中です。
 
-# 市区町村コード指定でダウンロード
-python plateau_downloader.py --citycode 31202
+## データの取り込み
 
-# 出力先を指定
+### 配信元からダウンロードする
+
+`plateau_downloader.py`は、配信元<http://surveyor.mydns.jp/task-bldg/>からメッシュごとのデータを取得します。
+
+```bash
+python plateau_downloader.py --list                # 取得できる市区町村の一覧 (配信元から毎回取得する)
+python plateau_downloader.py --cityname 米子       # 市区町村名で探す (部分一致)
+python plateau_downloader.py --citycode 31202      # 市区町村コードを指定して取得する
 python plateau_downloader.py --citycode 13101 --output-dir ./chiyoda_data
-
-# 全市区町村を一括ダウンロード (市区町村間30秒インターバル)
-python plateau_downloader.py --all
-
-# インターバルを60秒に変更
+python plateau_downloader.py --all                 # すべての市区町村を取得する (都市のあいだに 30 秒待つ)
 python plateau_downloader.py --all --city-interval 60
 ```
 
-データは `./plateau_data/{citycode}/` に保存されます。
+取得したデータは`./plateau_data/{市区町村コード}/`に入ります。
+多数の都市をまとめて取得して取り込むときは、`batch_import_2024.py`が2つの処理を都市ごとに続けて実行します。
 
-データソース: http://surveyor.mydns.jp/task-bldg/
+### 手元で変換する
 
-### 2. PostGIS へのインポート
+CityGMLを手元で変換して取り込む手順は[scripts/reimport/README.md](scripts/reimport/README.md)にあります。
+手元で取り出しから変換、サーバへの転送までを行い、サーバ側の取り込みは[deploy/README.md](deploy/README.md)の手順で動かします。
 
-```bash
-# data-dir のディレクトリ名から市区町村コードを自動推定
-python plateau_importer2postgis.py --data-dir ./plateau_data/31202
-
-# 市区町村コードを明示指定
-python plateau_importer2postgis.py --data-dir ./plateau_data/31202 --citycode 31202
-
-# 座標範囲チェックを指定 (min_lat,max_lat,min_lon,max_lon)
-python plateau_importer2postgis.py --data-dir ./plateau_data/31202 --coord-bounds "35.2,35.6,133.0,133.5"
-
-# PostgreSQL 接続先を指定
-python plateau_importer2postgis.py --data-dir ./plateau_data/31202 \
-  --postgres-url "postgresql://user:pass@localhost:5432/dbname"
-```
-
-デフォルトの接続先: `postgresql://osmfj_user:secure_plateau_password@localhost:5432/osmfj_plateau`
-
-### 3. API サーバーの起動
+### PostGISに取り込む
 
 ```bash
-python osmfj_plateau_api.py
+# 市区町村コードは data-dir のディレクトリ名から推定する
+python plateau_importer2postgis.py --data-dir ./plateau_data/31202 --postgres-url "$DATABASE_URL"
+
+# 市区町村コードを指定する
+python plateau_importer2postgis.py --data-dir ./plateau_data/31202 --citycode 31202 --postgres-url "$DATABASE_URL"
+
+# 座標の範囲を検査する (min_lat,max_lat,min_lon,max_lon)
+python plateau_importer2postgis.py --data-dir ./plateau_data/31202 --coord-bounds "35.2,35.6,133.0,133.5" --postgres-url "$DATABASE_URL"
+
+# zip を展開せず、data-dir の下の .osm を直接読む (手元で変換したデータ)
+python plateau_importer2postgis.py --data-dir <ディレクトリ> --citycode 30406 --no-zip --postgres-url "$DATABASE_URL"
 ```
 
-http://localhost:8000 で起動します。
+市区町村コードが決まっていれば、インポーターは取り込みの前にその都市の既存のデータを消します。
+そのため、取り込み直すときに`plateau_purge.py`を先に実行する必要はありません。
 
-### API エンドポイント
+ダッシュボードの`dash_city_master`テーブルがあれば、インポーターは市区町村の行政界の外に重心が落ちる建物を消します。
+隣の都市と重なるメッシュで、同じ建物が両方の都市に入るのを防ぐためです。
+このテーブルがなければ、この処理だけを警告を出して飛ばします。
 
-| エンドポイント | 説明 |
-|---------------|------|
-| `GET /` | API 情報 |
-| `GET /health` | ヘルスチェック |
-| `GET /api/stats` | データベース統計情報 |
-| `GET /api/mapwithai/buildings?bbox=min_lon,min_lat,max_lon,max_lat` | 建物データ取得 (OSM XML) |
-| `GET /api/mapwithai/coverage` | Plateau対応エリアの GeoJSON FeatureCollection（都市単位の凹包） |
+取り込んだあとは、対応エリアの表示を更新するために`python plateau_coverage.py --refresh`を実行してください。
 
-ダッシュボード用の `/api/dashboard/*` は、対応するモジュールが配置されている
-場合にのみマウントされます。
+## API
 
-#### 建物データ取得のパラメータ
+| 窓口 | 内容 |
+|---|---|
+| `GET /` | APIの情報 |
+| `GET /health` | 動作確認 |
+| `GET /api/stats` | データベースの統計 |
+| `GET /api/mapwithai/buildings?bbox=min_lon,min_lat,max_lon,max_lat` | 範囲内の建物（OSM XML） |
+| `GET /api/mapwithai/coverage` | 対応エリア。都市ごとの凹包のGeoJSON FeatureCollection |
 
-| パラメータ | 型 | デフォルト | 説明 |
-|-----------|-----|-----------|------|
-| `bbox` | string | (必須) | `min_lon,min_lat,max_lon,max_lat` 形式 |
-| `limit` | int | 1000 | 最大取得件数 |
-| `use_intersects` | bool | true | true: ST_Intersects, false: ST_Contains(centroid) |
+ダッシュボードの`/api/dashboard/*`は、ダッシュボードのモジュールが置かれているときだけ組み込まれます。
 
-#### LOD2 建物とリレーション
+### 建物の取得のパラメータ
 
-LOD2 の建物は、外形と屋根などの部分から成ります。API はこれを
-`type=building` リレーションとして出力し、部分は `building:part` の way に
-なります。外形と部分が同じ座標を共有する箇所ではノードを共有させるため、
-クライアント側で形状を編集しても崩れません。
+| パラメータ | 型 | 既定値 | 説明 |
+|---|---|---|---|
+| `bbox` | string | （必須） | `min_lon,min_lat,max_lon,max_lat` |
+| `limit` | int | 1000 | 返す建物の最大件数 |
+| `use_intersects` | bool | true | trueなら範囲と交わる建物を、falseなら重心が範囲に入る建物を返す |
 
-同一の建物が複数のメッシュにまたがって重複している場合は、レスポンス生成の
-時点で除外します。
+### LOD2の建物とリレーション
 
-## データベーススキーマ
+LOD2の建物は、外形と、屋根などの部分から成ります。
+APIはこれを`type=building`のリレーションとして返し、部分は`building:part`のwayになります。
+外形と部分が同じ座標を通る箇所ではノードを共有させているので、エディタで形を編集しても外形と部分がずれません。
 
-インポーターは以下の2テーブルを使用します。
+同じ建物が隣り合う2つの都市のデータに入っているときは、応答を作る段階で1件にまとめます。
+`dash_city_master`に行政界があれば、重心がその都市の行政界の外にある建物も返しません。
 
-### plateau_buildings
-
-| カラム | 型 | 説明 |
-|--------|-----|------|
-| id | serial | 主キー |
-| osm_id | bigint | OSM 互換 ID |
-| building | text | 建物タイプ (`yes`, `apartments` 等) |
-| height | float | 建物高さ (m) |
-| ele | float | 標高 (m) |
-| building_levels | int | 階数 |
-| source_dataset | text | データソース識別子 (`plateau_{citycode}_{file}`) |
-| plateau_id | text | 変換出力の元要素。way 由来は `w-123`、multipolygon 由来は `r-456`。変換をやり直すと値が変わるため安定した識別子ではない（それは `ref_mlit_plateau`） |
-| name | text | 建物名称 |
-| addr_full | text | 住所 (通り名+番地の結合) |
-| addr_housenumber | text | 番地 |
-| addr_street | text | 通り名 |
-| start_date | text | 建設年 |
-| building_material | text | 建材 |
-| roof_material | text | 屋根材 |
-| roof_shape | text | 屋根形状 |
-| amenity | text | 施設種別 |
-| shop | text | 店舗種別 |
-| tourism | text | 観光施設 |
-| leisure | text | レジャー施設 |
-| landuse | text | 土地利用 |
-| **city_code** | varchar(5) NOT NULL | 市区町村コード（indexed、都市単位クエリ用） |
-| geom | geometry | ポリゴン (SRID 4326) |
-| centroid | geometry | 重心点 (SRID 4326) |
-
-Indexes:
-- `idx_buildings_geom` (GiST on geom)
-- `idx_buildings_centroid` (GiST on centroid)
-- `idx_buildings_osm_id` (btree)
-- `idx_buildings_city_code` (btree) — 都市単位のクエリで活用
-
-### plateau_building_nodes
-
-| カラム | 型 | 説明 |
-|--------|-----|------|
-| id | serial | 主キー |
-| osm_id | bigint | ノード ID (負の値) |
-| building_id | int | 建物 ID (外部キー → plateau_buildings.id) |
-| sequence_id | int | ノード順序 (環ごとに 0 から再開) |
-| ring_id | int NOT NULL DEFAULT 0 | 環の種別。0=外環、1以上=内環 (穴) |
-| lat | float | 緯度 |
-| lon | float | 経度 |
-| geom | geometry | ポイント |
-
-### plateau_coverage (Materialized View)
-
-対応エリア表示用に都市単位の凹包を保持。
-
-| カラム | 型 | 説明 |
-|--------|-----|------|
-| city_code | varchar(5) | 市区町村コード (PK) |
-| geom | geometry | ConcaveHull (target_percent=0.5) |
-| building_count | int | 都市内の建物数 |
-
-データ更新後（インポート・パージ）に `REFRESH MATERIALIZED VIEW CONCURRENTLY` で
-再構築する。
-
-このビューは全都市を対象に凹包を計算し直すため、都市数に応じて負荷が大きくなる。
-多数の都市を続けて処理する場合は、都度 REFRESH せず、
-`plateau_purge.py --skip-coverage-refresh` で省いたうえで、全都市の処理が
-終わってから `plateau_coverage.py --refresh` を一度だけ実行する。
-
-### plateau_purge_history
-
-パージ実行履歴の監査ログ。
-
-| カラム | 型 | 説明 |
-|--------|-----|------|
-| id | serial | PK |
-| city_code | varchar(5) | パージした都市 |
-| buildings_deleted | int | 削除した建物数 |
-| nodes_deleted | int | 削除したノード数 |
-| executed_at | timestamp | 実行日時 |
-| executed_by | text | 実行ユーザ |
-| hostname | text | 実行サーバ |
-| duration_seconds | real | 所要時間 |
-
-## 運用ツール
-
-メンテナンス用の CLI ツール群。すべて Dry Run モードがデフォルトで、変更は `--execute` 指定時のみ実行されます。
-
-### スキーマ・マイグレーション (`plateau_migrate.py`)
-
-`city_code` カラムを `plateau_buildings` に追加する一回限りのマイグレーション。
-Phase 1〜4 のスキーマ変更 + 既存データへの city_code 設定 + インデックス作成 + NOT NULL 制約。
-
-```bash
-# Dry Run（読み取り専用、ディスク容量・抽出可否などをレポート）
-python plateau_migrate.py
-
-# 本番実行（確認プロンプトあり）
-python plateau_migrate.py --execute
-
-# 自動化向け（プロンプトスキップ）
-python plateau_migrate.py --execute --yes
-```
-
-冪等性あり。途中で失敗しても再実行で安全に続行可能。
-ロールバック: `ALTER TABLE plateau_buildings DROP COLUMN city_code;`
-
-### カバレッジビュー管理 (`plateau_coverage.py`)
-
-`plateau_coverage` マテリアライズドビューの管理。
-
-```bash
-# 初回のみ: ビュー作成 + 初期 REFRESH
-python plateau_coverage.py --init
-
-# データ更新後の REFRESH（CONCURRENTLY）
-python plateau_coverage.py --refresh
-
-# ビュー定義変更時の再構築（DROP + CREATE + REFRESH）
-python plateau_coverage.py --reinit
-
-# 状態確認
-python plateau_coverage.py --status
-```
-
-### 都市データのパージ (`plateau_purge.py`)
-
-OSM への取り込みが完了した都市のデータを安全に削除。
-
-```bash
-# 監査ログテーブル初期化（初回のみ）
-python plateau_purge.py --init-audit-table
-
-# Dry Run（削除対象を確認）
-python plateau_purge.py --citycode 13112
-
-# 本番実行（2段階確認プロンプト）
-python plateau_purge.py --citycode 13112 --execute
-
-# 多数の都市を続けて処理する場合、都度の REFRESH を省く
-python plateau_purge.py --citycode 13112 --execute --skip-coverage-refresh
-```
-
-安全装置:
-- デフォルト Dry Run
-- 2段階確認: city_code 再入力 + `DELETE` 文字列入力
-- pg_advisory_lock で同時実行防止
-- 監査ログテーブルに自動記録
-- 削除後の VACUUM ANALYZE + coverage REFRESH を自動実行
-
-## テスト
-
-```bash
-pip install -r requirements-dev.txt
-pytest                                # 224テスト
-pytest --cov=. --cov-report=term      # カバレッジ表示
-```
-
-GitHub Actions でも実行されます。
-
-一部の統合テストは実際の PostgreSQL を使います。環境変数
-`PLATEAU_TEST_DATABASE_URL` を設定すると有効になり、未設定ならスキップされます。
-
-詳細は `tests/README.md` 参照。
-
-## Rapid エディタとの連携
-
-Rapid エディタの Plateau データセット設定で、この API の URL を指定することで
-建物データが地図上に表示されます。API は OSM XML 形式でデータを返します。
-
-配信される OSM タグ:
+### 返すOSMタグ
 
 | タグ | 説明 |
-|------|------|
-| `building` | 建物タイプ |
-| `height` | 建物高さ (m) |
-| `ele` | 標高 (m) |
+|---|---|
+| `building` | 建物の種類 |
+| `height` | 高さ（m） |
+| `ele` | 標高（m） |
 | `building:levels` | 階数 |
-| `name` | 建物名称 |
+| `name` | 名称 |
 | `addr:housenumber` | 番地 |
 | `addr:street` | 通り名 |
 | `start_date` | 建設年 |
 | `building:material` | 建材 |
 | `roof:material` | 屋根材 |
-| `roof:shape` | 屋根形状 |
-| `amenity` | 施設種別 |
-| `shop` | 店舗種別 |
+| `roof:shape` | 屋根の形 |
+| `amenity` | 施設の種類 |
+| `shop` | 店舗の種類 |
 | `tourism` | 観光施設 |
 | `leisure` | レジャー施設 |
 | `landuse` | 土地利用 |
 
-これに加えて、各 way に `representative_point` を付与しています。外形の内部に
-必ず落ちる代表点で、`lon,lat` の形式です。エディタ側のタグ転記機能が、Plateau
-外形とどの OSM 建物が対応するかを判定するのに使います。重心（centroid）では
-なく内部点を使うのは、凹んだポリゴンでは重心がポリゴンの外に出てしまうためです。
+各wayには`representative_point`も付けます。
+外形の内側に必ず入る代表点で、`lon,lat`の形です。
+Rapidのタグ転記の機能は、PLATEAUの外形がどのOSMの建物に当たるかを、この点で判定します。
+凹んだ形では重心が外形の外に出るので、重心ではなく内側の点を使っています。
+形が壊れていて代表点を計算できない建物には、このタグを付けません。
 
-ジオメトリが壊れていて代表点を計算できない場合、このタグは省略されます。
+高さが疑わしい建物には`plateau:height_warning`を付けます。
+値は、当てはまった検査の名前を`degenerate-area`、`part-over-outline`、`absolute`、`needle`、`floor-height`の順に`;`でつないだものです。
+`absolute`は高さが1.0 m未満のときだけ、`floor-height`は`building`がhouse、apartments、residentialのときだけ当てはまります。
+`needle`は部分には付けません。
+`needle`が当てはまったときは、底面積を`plateau:footprint_m2`に平方メートル単位、小数点以下4桁で付けます。
 
-さらに、高さが怪しい建物には `plateau:height_warning` を付与しています。値は
-`degenerate-area`、`part-over-outline`、`absolute`、`needle`、`floor-height` の
-うち該当した検査名を、この順に `;` で連結したものです（該当したものだけを
-含む部分集合）。`absolute` は高さが 1.0m 未満のときだけ、`floor-height` は
-`building` が house/apartments/residential のときだけ該当します。
-`needle` は部分立体には付けません。
-`needle` が含まれる場合は、あわせて `plateau:footprint_m2` に底面積を平方メートル・
-小数点以下 4 桁で付与します。
+`plateau:height_warning`と`plateau:footprint_m2`はOSMのタグではないので、エディタがOSMに書き込む前に取り除く必要があります。
+APIのこの変更をデプロイするときは、これらのタグを取り除くエディタ側の変更を先に本番へ入れてください。
 
-`plateau:height_warning` と `plateau:footprint_m2` は OSM のタグではありません。
-エディタ側でこれらを OSM に書き込む前に必ず取り除く必要があります。そのため、
-このタグを取り除くエディタ側の変更を先に本番へデプロイしてから、この API の
-変更をデプロイしてください。
+## データベース
+
+テーブルの作成は[DEPLOY.md](DEPLOY.md)のSQLで行います。
+次の表の列は、そのSQLと、インポーターが足す列を合わせたものです。
+
+### plateau_buildings
+
+建物の外形と部分を1行ずつ持ちます。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| id | serial | 主キー |
+| osm_id | bigint | OSM互換のID |
+| building | text | 建物の種類（`yes`、`apartments`など） |
+| height | double precision | 高さ（m） |
+| ele | double precision | 標高（m） |
+| building_levels | integer | 階数 |
+| building_levels_underground | integer | 地下の階数。インポーターは値を入れない |
+| source_dataset | text | 取り込み元（`plateau_{市区町村コード}_{ファイル}`） |
+| plateau_id | text | 変換出力の元の要素。way由来は`w-123`、multipolygon由来は`r-456`。変換をやり直すと値が変わるので、安定した識別子としては`ref_mlit_plateau`を使う |
+| geometry_wkt | text | 外形のWKT |
+| name | text | 名称 |
+| addr_full | text | 住所（通り名と番地をつないだもの） |
+| addr_housenumber | text | 番地 |
+| addr_street | text | 通り名 |
+| start_date | text | 建設年 |
+| building_material | text | 建材 |
+| roof_material | text | 屋根材 |
+| roof_shape | text | 屋根の形 |
+| amenity | text | 施設の種類 |
+| shop | text | 店舗の種類 |
+| tourism | text | 観光施設 |
+| leisure | text | レジャー施設 |
+| landuse | text | 土地利用 |
+| geom | geometry(Polygon, 4326) | 外形 |
+| centroid | geometry(Point, 4326) | 重心 |
+| city_code | varchar(5) NOT NULL | 市区町村コード |
+| building_part | text | 部分のとき`building:part`の値。外形ではNULL |
+| parent_building_id | integer | 部分のとき、親の外形の`id`。親を消すと部分も消える（ON DELETE CASCADE） |
+| ref_mlit_plateau | text | PLATEAUの建物ID |
+
+索引は`geom`と`centroid`（GiST）、`osm_id`、`city_code`、`parent_building_id`に張ってあります。
+
+### plateau_building_nodes
+
+外形と部分の頂点を1行ずつ持つテーブルです。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| id | serial | 主キー |
+| osm_id | bigint | ノードのID（負の値） |
+| building_id | integer | 建物の`id`（外部キー。建物を消すとノードも消える） |
+| sequence_id | integer | ノードの順番。環ごとに0から数え直す |
+| ring_id | integer NOT NULL DEFAULT 0 | 環の種類。0は外側の環、1以上は穴 |
+| lat | double precision | 緯度 |
+| lon | double precision | 経度 |
+| geom | geometry(Point, 4326) | 点 |
+
+### plateau_coverage（マテリアライズドビュー）
+
+対応エリアを表示するために、都市ごとの凹包を持ちます。
+`plateau_coverage.py --init`で作ります。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| city_code | varchar(5) | 市区町村コード（主キー） |
+| geom | geometry | 建物の重心から作った凹包（ConcaveHull、target_percent=0.5） |
+| building_count | int | 都市の建物の数 |
+
+建物を取り込んだり消したりしたあとは、`REFRESH MATERIALIZED VIEW CONCURRENTLY`で作り直します。
+作り直すたびに全都市の凹包を計算し直すので、都市が多いほど時間とメモリを使います。
+多数の都市を続けて処理するときは、`plateau_purge.py --skip-coverage-refresh`で都市ごとの作り直しを省き、最後に`plateau_coverage.py --refresh`を一度だけ実行してください。
+
+### plateau_purge_history
+
+`plateau_purge.py`で都市のデータを消した記録です。
+`plateau_purge.py --init-audit-table`で作ります。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| id | serial | 主キー |
+| city_code | varchar(5) | 消した都市 |
+| buildings_deleted | int | 消した建物の数 |
+| nodes_deleted | int | 消したノードの数 |
+| executed_at | timestamp | 実行した日時 |
+| executed_by | text | 実行したユーザ |
+| hostname | text | 実行したサーバ |
+| duration_seconds | real | かかった時間 |
+
+## 運用の道具
+
+どの道具も、既定では何も変えずに結果を表示するだけです。
+`--execute`を付けたときだけデータベースを変えます。
+
+### 対応エリアのビュー（`plateau_coverage.py`）
+
+```bash
+python plateau_coverage.py --init      # ビューを作り、初回の REFRESH をする
+python plateau_coverage.py --refresh   # データを変えたあとに REFRESH する (CONCURRENTLY)
+python plateau_coverage.py --reinit    # ビューの定義を変えたあとに作り直す (DROP、CREATE、REFRESH)
+python plateau_coverage.py --status    # 状態を見る
+```
+
+調べるときは、`--refresh`に`--no-concurrent`を付けるとCONCURRENTLYを使わずにREFRESHします。
+
+### 都市のデータを消す（`plateau_purge.py`）
+
+OSMへの取り込みが終わった都市のデータを消す道具です。
+
+```bash
+python plateau_purge.py --init-audit-table     # 記録のテーブルを作る (初回だけ)
+python plateau_purge.py --citycode 13112       # 消す対象を確かめる
+python plateau_purge.py --citycode 13112 --execute
+python plateau_purge.py --citycode 13112 --execute --skip-coverage-refresh   # 対応エリアの REFRESH を省く
+```
+
+`--execute`を付けると、市区町村コードと`DELETE`の文字列を続けて入力するよう求めます。
+同時に2つ実行しないよう`pg_advisory_lock`を取り、消した結果を`plateau_purge_history`に記録します。
+消したあとは`VACUUM ANALYZE`と対応エリアのREFRESHを自動で実行します。
+
+### 建物の高さの調査（`plateau_height_outliers.py`）
+
+高さが疑わしい建物を、検査ごとに数えます。
+データベースは読むだけです。
+検査の内容と閾値は[docs/height-outlier-survey.md](docs/height-outlier-survey.md)にあります。
+
+```bash
+python plateau_height_outliers.py --postgres-url "$DATABASE_URL"
+python plateau_height_outliers.py --postgres-url "$DATABASE_URL" --check needle --city 13101
+```
+
+APIが付ける`plateau:height_warning`は、この調査と同じ閾値を使います。
+
+### 既存のデータベースの移行
+
+`plateau_migrate.py`と`plateau_migrate_fk_cascade.py`は、古い定義のデータベースを今の定義に揃える一度きりの移行です。
+新しく作るデータベースでは要りません。
+
+`plateau_migrate.py`は`plateau_buildings`に`city_code`の列を足し、既存の行に値を入れて索引とNOT NULL制約を付けます。
+途中で失敗しても、もう一度実行すれば続きから進みます。
+元に戻すときは`ALTER TABLE plateau_buildings DROP COLUMN city_code;`を実行します。
+
+```bash
+python plateau_migrate.py                    # 確かめるだけ (ディスクの空きや、コードを取り出せるか)
+python plateau_migrate.py --execute          # 実行する (確認のプロンプトあり)
+python plateau_migrate.py --execute --yes    # プロンプトを省く
+```
+
+`plateau_migrate_fk_cascade.py`の役割は、`plateau_building_nodes.building_id`の外部キーにON DELETE CASCADEを付けることです。
+
+## テスト
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+pytest --cov=. --cov-report=term   # カバレッジを表示する
+```
+
+GitHub Actionsでも同じテストを実行します。
+一部のテストは実際のPostgreSQLを使い、環境変数`PLATEAU_TEST_DATABASE_URL`を設定したときだけ動きます。
+詳しくは[tests/README.md](tests/README.md)にあります。
+
+## 関連する文書
+
+| 文書 | 内容 |
+|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 全体の構造と、これまでの設計判断 |
+| [DEPLOY.md](DEPLOY.md) | サーバの構築とデプロイの手順 |
+| [deploy/README.md](deploy/README.md) | サーバ側の再取り込みの手順 |
+| [scripts/reimport/README.md](scripts/reimport/README.md) | 手元でCityGMLを変換して送る手順 |
+| [docs/converter-output.md](docs/converter-output.md) | citygml-osmの出力の性質 |
+| [docs/geometry-pipeline.md](docs/geometry-pipeline.md) | 各段階が建物の形に何をするか |
+| [docs/height-outlier-survey.md](docs/height-outlier-survey.md) | 建物の高さの調査 |
+| [docs/upstream-consultation.md](docs/upstream-consultation.md) | citygml-osmの上流への相談 |
 
 ## ライセンス
 
-データソースのライセンスは [Plateau](https://www.mlit.go.jp/plateau/) の利用規約に従います。
+PLATEAUの建物データは、[PLATEAU](https://www.mlit.go.jp/plateau/)の利用規約に従います。

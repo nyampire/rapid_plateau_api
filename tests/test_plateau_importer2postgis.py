@@ -937,13 +937,13 @@ class TestRefMlitPlateau:
         assert rows[1][24] == '13206-bldg-11049'
 
     def test_both_insert_statements_list_the_column(self):
-        """INSERT は 2 箇所ある。片方を落とすと静かに NULL が入る。"""
+        """INSERT は 1 箇所。列を落とすと静かに NULL が入る。"""
         import re
         src = (Path(__file__).parent.parent / 'plateau_importer2postgis.py').read_text()
         inserts = re.findall(
             r'INSERT INTO plateau_buildings\s*\((.*?)\)\s*VALUES', src, re.S
         )
-        assert len(inserts) == 2, f'INSERT の数が変わった: {len(inserts)}'
+        assert len(inserts) == 1, f'INSERT の数が変わった: {len(inserts)}'
         for cols in inserts:
             assert 'ref_mlit_plateau' in cols
 

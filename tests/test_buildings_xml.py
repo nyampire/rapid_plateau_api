@@ -371,19 +371,23 @@ class TestGetBuildingsInBboxQuery:
         assert 'parent_building_id' in sql
 
     def test_query_params_count_and_order(self, api):
-        """params は 9 個 (bbox×2 + limit) で正しい順序"""
+        """params は 13 個 (bbox×3 + limit) で正しい順序"""
         conn, cursor = self._setup_api_with_mock_cursor(api)
         with patch.object(api, 'get_connection', return_value=conn):
             api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
         params = cursor.execute.call_args[0][1]
-        # 9 個: bbox_outlines spatial(4) + LIMIT(1) + orphan_parts spatial(4)
-        assert len(params) == 9
+        # 13 個: bbox_outlines spatial(4) + LIMIT(1) + orphan_parts spatial(4)
+        #        + detached_parts spatial(4)
+        assert len(params) == 13
+        assert 'detached_parts' in cursor.execute.call_args[0][0]
         # bbox_outlines: min_lon, min_lat, max_lon, max_lat
         assert params[0:4] == [139.7, 35.7, 139.8, 35.8]
         # limit
         assert params[4] == 10
         # orphan_parts: 同じ bbox を再度
         assert params[5:9] == [139.7, 35.7, 139.8, 35.8]
+        # detached_parts: 同じ bbox をもう一度
+        assert params[9:13] == [139.7, 35.7, 139.8, 35.8]
 
     def test_query_placeholder_count_matches_params(self, api):
         """SQL の %s プレースホルダ数 = params 数 (psycopg2 が hard fail する条件)"""
@@ -422,16 +426,19 @@ class TestGetBuildingsInBboxQuery:
         with patch.object(api, 'get_connection', return_value=conn):
             api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
         sql = cursor.execute.call_args[0][0]
-        # dash_city_master を参照する EXISTS が SQL 全体で 4 回現れること:
+        # dash_city_master を参照する EXISTS が SQL 全体で 6 回現れること:
         #   - bbox_outlines の city_boundary_filter (1 回)
         #   - bbox_outlines の dedup_tiebreaker (#31 で追加、1 回)
         #   - orphan_parts の city_boundary_filter (1 回)
         #   - orphan_parts の dedup_tiebreaker (#31 Task 3 で追加、1 回)
+        #   - detached_parts の city_boundary_filter (1 回)
+        #   - detached_parts の dedup_tiebreaker (1 回)
         boundary_filter_occurrences = sql.count('FROM dash_city_master m')
-        assert boundary_filter_occurrences == 4, (
-            f"dash_city_master subquery should appear 4 times "
+        assert boundary_filter_occurrences == 6, (
+            f"dash_city_master subquery should appear 6 times "
             f"(outlines filter + outlines dedup tiebreaker + orphan parts filter "
-            f"+ orphan parts dedup tiebreaker), "
+            f"+ orphan parts dedup tiebreaker + detached parts filter "
+            f"+ detached parts dedup tiebreaker), "
             f"got {boundary_filter_occurrences}"
         )
 

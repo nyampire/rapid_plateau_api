@@ -193,7 +193,8 @@ class OSMFJPlateauAPI:
                              THEN ST_Area(b.geom::geography)
                         END AS footprint_m2,
                         COUNT(*) OVER () AS pre_dedup_count,
-                        NULL::boolean AS intersects_parent
+                        NULL::boolean AS intersects_parent,
+                        FALSE AS promoted_part
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
                       AND b.building_part IS NULL
@@ -226,20 +227,24 @@ class OSMFJPlateauAPI:
                              THEN ST_Area(b.geom::geography)
                         END AS footprint_m2,
                         0 AS pre_dedup_count,
-                        ST_Intersects(ST_MakeValid(b.geom), g.geom) AS intersects_parent
+                        ST_Intersects(ST_MakeValid(b.geom), g.geom) AS intersects_parent,
+                        FALSE AS promoted_part
                     FROM plateau_buildings b
                     JOIN bbox_outline_geom g ON g.id = b.parent_building_id
                 ),
                 orphan_parts AS (
                     -- bbox 内で relation 無しの building:part
+                    -- 独立した建物として返すので、building_part と parent_building_id は
+                    -- NULL にします。WHERE と dedup_key は元の列を使います。
                     -- outline と同じ dedup key + tiebreaker で出口防御 (#31)
                     SELECT DISTINCT ON ({dedup_key})
                         b.id, b.osm_id, b.building, b.height, b.ele,
                         b.building_levels, b.name, b.addr_housenumber,
                         b.addr_street, b.start_date, b.building_material,
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
-                        b.tourism, b.leisure, b.landuse, b.building_part,
-                        b.parent_building_id,
+                        b.tourism, b.leisure, b.landuse,
+                        NULL::text AS building_part,
+                        NULL::bigint AS parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
                         ST_Area(b.geom) AS planar_area,
@@ -248,7 +253,8 @@ class OSMFJPlateauAPI:
                              THEN ST_Area(b.geom::geography)
                         END AS footprint_m2,
                         0 AS pre_dedup_count,
-                        NULL::boolean AS intersects_parent
+                        NULL::boolean AS intersects_parent,
+                        TRUE AS promoted_part
                     FROM plateau_buildings b
                     WHERE b.building_part = 'yes'
                       AND b.parent_building_id IS NULL
@@ -256,17 +262,60 @@ class OSMFJPlateauAPI:
                       {city_boundary_filter}
                     ORDER BY {dedup_key}, {dedup_tiebreaker}
                 ),
+                detached_parts AS (
+                    -- 親の外形と重ならない building:part を、独立した建物として返す。
+                    -- 親が bbox の外にあっても、部分立体自身の位置で拾います。
+                    -- 建物IDが無い (NULL / 'Null') もの、同じ親に同じ建物IDの兄弟が
+                    -- いるものは対象外です。
+                    SELECT DISTINCT ON ({dedup_key})
+                        b.id, b.osm_id, b.building, b.height, b.ele,
+                        b.building_levels, b.name, b.addr_housenumber,
+                        b.addr_street, b.start_date, b.building_material,
+                        b.roof_material, b.roof_shape, b.amenity, b.shop,
+                        b.tourism, b.leisure, b.landuse,
+                        NULL::text AS building_part,
+                        NULL::bigint AS parent_building_id,
+                        ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
+                            AS representative_point,
+                        ST_Area(b.geom) AS planar_area,
+                        CASE WHEN b.height > {DEFAULT_NEEDLE_HEIGHT_M}
+                                  AND ST_Area(b.geom) > 0
+                             THEN ST_Area(b.geom::geography)
+                        END AS footprint_m2,
+                        0 AS pre_dedup_count,
+                        NULL::boolean AS intersects_parent,
+                        TRUE AS promoted_part
+                    FROM plateau_buildings b
+                    JOIN plateau_buildings o ON o.id = b.parent_building_id
+                    WHERE b.building_part = 'yes'
+                      AND {spatial_condition}
+                      AND NOT ST_Intersects(ST_MakeValid(b.geom), ST_MakeValid(o.geom))
+                      AND b.ref_mlit_plateau IS NOT NULL
+                      AND b.ref_mlit_plateau <> 'Null'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM plateau_buildings s
+                          WHERE s.parent_building_id = b.parent_building_id
+                            AND s.id <> b.id
+                            AND s.ref_mlit_plateau = b.ref_mlit_plateau
+                      )
+                      {city_boundary_filter}
+                    ORDER BY {dedup_key}, {dedup_tiebreaker}
+                ),
                 all_buildings AS (
-                    -- UNION ALL: the three CTEs are mutually disjoint by WHERE
-                    -- (outlines: building_part IS NULL; related_parts:
-                    -- parent_building_id IN outlines; orphan_parts: building_part='yes'
-                    -- AND parent_building_id IS NULL), so a sort/hash dedup is
-                    -- pure overhead.
+                    -- UNION ALL: bbox_outlines / related_parts / orphan_parts は
+                    -- WHERE で互いに重ならない (outlines: building_part IS NULL;
+                    -- related_parts: parent_building_id IN outlines; orphan_parts:
+                    -- building_part='yes' AND parent_building_id IS NULL) ので、
+                    -- ソートやハッシュでの重複除去は不要です。
+                    -- detached_parts の行は related_parts の行と同じ建物になりうるので、
+                    -- その重なりは buildings_to_osm_xml で外します。
                     SELECT * FROM bbox_outlines
                     UNION ALL
                     SELECT * FROM related_parts
                     UNION ALL
                     SELECT * FROM orphan_parts
+                    UNION ALL
+                    SELECT * FROM detached_parts
                 )
                 SELECT
                     ub.id, ub.osm_id, ub.building, ub.height, ub.ele,
@@ -280,6 +329,7 @@ class OSMFJPlateauAPI:
                     ub.footprint_m2,
                     ub.pre_dedup_count,
                     ub.intersects_parent,
+                    ub.promoted_part,
                     bn.nodes
                 FROM all_buildings ub
                 LEFT JOIN LATERAL (
@@ -300,6 +350,7 @@ class OSMFJPlateauAPI:
             """
 
             params = [min_lon, min_lat, max_lon, max_lat, limit,
+                      min_lon, min_lat, max_lon, max_lat,
                       min_lon, min_lat, max_lon, max_lat]
 
             cursor.execute(query, params)

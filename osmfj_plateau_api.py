@@ -652,6 +652,11 @@ class OSMFJPlateauAPI:
         # これで、重心距離は中央値 1,786m、最大 30,258m。#41 で importer は
         # 修正済みだが、既存データは再取り込みまで残る。
         #
+        # この除外は、兄弟と建物ID を共有する部分立体と、建物ID が Null の
+        # 部分立体を外すために今も残している。外形と重ならず建物ID が一意な
+        # ものは、上の昇格で独立した建物として出すので、ここでは数えない。
+        # 案 B (取り込み側で親子の紐づけを直す) が入ったら、撤去を考える。
+        #
         # 撤去条件: 全都市の再取り込みが済み、本番で下記が 0 件になったとき。
         #   SELECT count(*) FROM plateau_buildings p
         #   JOIN plateau_buildings o ON p.parent_building_id = o.id
@@ -678,10 +683,19 @@ class OSMFJPlateauAPI:
             nonlocal out_of_range_node_count
             out_of_range_node_count += 1
 
+        # 外形と重ならない部分立体は、related_parts と detached_parts の両方から
+        # 返る。前者は親付きの部分立体、後者は独立した建物として昇格した行で、
+        # 同じ id を持つ。昇格した方だけを残すので、前者を外した件数は
+        # 「親と交差しない部分立体を除外」に数えない (二重に数えるため)。
+        # promoted_part が無い行 (モックなど) は FALSE として扱う。
+        promoted_ids = {b['id'] for b in buildings if b.get('promoted_part')}
+        promoted_parts = sum(1 for b in buildings if b.get('promoted_part'))
+
         kept_buildings = []
         for b in buildings:
             if b.get('intersects_parent') is False:
-                dropped_far_parts += 1
+                if b['id'] not in promoted_ids:
+                    dropped_far_parts += 1
                 continue
             kept_buildings.append(b)
         buildings = kept_buildings
@@ -974,6 +988,7 @@ class OSMFJPlateauAPI:
         # 0 件のときも出す。撤去してよいかは「発火しなくなったこと」で判断する
         # ので、0 が記録に残らないと不在を証明できない。
         logger.info(f"出口補正: 親と交差しない部分立体を除外 {dropped_far_parts}件")
+        logger.info(f"出口補正: 部分立体を独立した建物として出力 {promoted_parts}件")
         # 0 件のときも出す。理由は dropped_far_parts と同じ (発火しなくなった
         # ことを不在の証拠として使うため)。
         logger.info(

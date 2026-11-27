@@ -839,6 +839,67 @@ class TestDropPartsNotIntersectingParent:
         assert str(-(2 * 1000)) in way_ids
 
 
+class TestPromotedDetachedParts:
+    """外形と重ならない部分立体は、独立した建物として一度だけ出す。
+
+    related_parts と detached_parts の両方から同じ行が返るので、
+    出力側で昇格した方だけを残す。
+    """
+
+    def _square(self, base_id, lat, lon, d=0.0002):
+        return [
+            {'id': base_id + i, 'lat': la, 'lon': lo, 'sequence_id': i}
+            for i, (la, lo) in enumerate([
+                (lat, lon), (lat + d, lon), (lat + d, lon + d), (lat, lon + d)
+            ])
+        ]
+
+    def _pair(self):
+        nodes = self._square(200, 34.0, 134.0)
+        related = _make_building(
+            building_id=2, nodes=nodes, building=None, building_part='yes',
+            parent_building_id=1, intersects_parent=False, promoted_part=False)
+        promoted = _make_building(
+            building_id=2, nodes=nodes, building='yes', building_part=None,
+            parent_building_id=None, intersects_parent=None, promoted_part=True)
+        return related, promoted
+
+    def test_promoted_row_wins_over_its_related_duplicate(self, api):
+        related, promoted = self._pair()
+
+        root = ET.fromstring(api.buildings_to_osm_xml([related, promoted]))
+
+        ways = root.findall('way')
+        assert len(ways) == 1
+        tags = {t.get('k'): t.get('v') for t in ways[0].findall('tag')}
+        assert tags.get('building') == 'yes'
+        assert 'building:part' not in tags
+        assert root.findall('relation') == []
+
+    def test_promoted_roof_gets_layer(self, api):
+        promoted = _make_building(
+            building_id=2, building='roof', building_part=None,
+            parent_building_id=None, intersects_parent=None, promoted_part=True)
+
+        root = ET.fromstring(api.buildings_to_osm_xml([promoted]))
+
+        tags = {t.get('k'): t.get('v') for t in root.find('way').findall('tag')}
+        assert tags.get('layer') == '1'
+
+    def test_drop_count_excludes_promoted_duplicates(self, api, caplog):
+        related, promoted = self._pair()
+        lone = _make_building(
+            building_id=3, nodes=self._square(300, 35.0, 135.0),
+            building=None, building_part='yes', parent_building_id=1,
+            intersects_parent=False, promoted_part=False)
+
+        with caplog.at_level(logging.INFO):
+            api.buildings_to_osm_xml([related, promoted, lone])
+
+        assert '出口補正: 親と交差しない部分立体を除外 1件' in caplog.text
+        assert '出口補正: 部分立体を独立した建物として出力 1件' in caplog.text
+
+
 class TestMultipolygonOutput:
     """穴のある建物は type=multipolygon で返す。
 

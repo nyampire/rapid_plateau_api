@@ -193,7 +193,8 @@ class OSMFJPlateauAPI:
                              THEN ST_Area(b.geom::geography)
                         END AS footprint_m2,
                         COUNT(*) OVER () AS pre_dedup_count,
-                        NULL::boolean AS intersects_parent
+                        NULL::boolean AS intersects_parent,
+                        FALSE AS promoted_part
                     FROM plateau_buildings b
                     WHERE {spatial_condition}
                       AND b.building_part IS NULL
@@ -226,20 +227,24 @@ class OSMFJPlateauAPI:
                              THEN ST_Area(b.geom::geography)
                         END AS footprint_m2,
                         0 AS pre_dedup_count,
-                        ST_Intersects(ST_MakeValid(b.geom), g.geom) AS intersects_parent
+                        ST_Intersects(ST_MakeValid(b.geom), g.geom) AS intersects_parent,
+                        FALSE AS promoted_part
                     FROM plateau_buildings b
                     JOIN bbox_outline_geom g ON g.id = b.parent_building_id
                 ),
                 orphan_parts AS (
                     -- bbox 内で relation 無しの building:part
+                    -- 独立した建物として返すので、building_part と parent_building_id は
+                    -- NULL にします。WHERE と dedup_key は元の列を使います。
                     -- outline と同じ dedup key + tiebreaker で出口防御 (#31)
                     SELECT DISTINCT ON ({dedup_key})
                         b.id, b.osm_id, b.building, b.height, b.ele,
                         b.building_levels, b.name, b.addr_housenumber,
                         b.addr_street, b.start_date, b.building_material,
                         b.roof_material, b.roof_shape, b.amenity, b.shop,
-                        b.tourism, b.leisure, b.landuse, b.building_part,
-                        b.parent_building_id,
+                        b.tourism, b.leisure, b.landuse,
+                        NULL::text AS building_part,
+                        NULL::bigint AS parent_building_id,
                         ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
                             AS representative_point,
                         ST_Area(b.geom) AS planar_area,
@@ -248,7 +253,8 @@ class OSMFJPlateauAPI:
                              THEN ST_Area(b.geom::geography)
                         END AS footprint_m2,
                         0 AS pre_dedup_count,
-                        NULL::boolean AS intersects_parent
+                        NULL::boolean AS intersects_parent,
+                        TRUE AS promoted_part
                     FROM plateau_buildings b
                     WHERE b.building_part = 'yes'
                       AND b.parent_building_id IS NULL
@@ -256,17 +262,60 @@ class OSMFJPlateauAPI:
                       {city_boundary_filter}
                     ORDER BY {dedup_key}, {dedup_tiebreaker}
                 ),
+                detached_parts AS (
+                    -- 親の外形と重ならない building:part を、独立した建物として返す。
+                    -- 親が bbox の外にあっても、部分立体自身の位置で拾います。
+                    -- 建物IDが無い (NULL / 'Null') もの、同じ親に同じ建物IDの兄弟が
+                    -- いるものは対象外です。
+                    SELECT DISTINCT ON ({dedup_key})
+                        b.id, b.osm_id, b.building, b.height, b.ele,
+                        b.building_levels, b.name, b.addr_housenumber,
+                        b.addr_street, b.start_date, b.building_material,
+                        b.roof_material, b.roof_shape, b.amenity, b.shop,
+                        b.tourism, b.leisure, b.landuse,
+                        NULL::text AS building_part,
+                        NULL::bigint AS parent_building_id,
+                        ST_AsGeoJSON(ST_PointOnSurface(b.geom))::jsonb -> 'coordinates'
+                            AS representative_point,
+                        ST_Area(b.geom) AS planar_area,
+                        CASE WHEN b.height > {DEFAULT_NEEDLE_HEIGHT_M}
+                                  AND ST_Area(b.geom) > 0
+                             THEN ST_Area(b.geom::geography)
+                        END AS footprint_m2,
+                        0 AS pre_dedup_count,
+                        NULL::boolean AS intersects_parent,
+                        TRUE AS promoted_part
+                    FROM plateau_buildings b
+                    JOIN plateau_buildings o ON o.id = b.parent_building_id
+                    WHERE b.building_part = 'yes'
+                      AND {spatial_condition}
+                      AND NOT ST_Intersects(ST_MakeValid(b.geom), ST_MakeValid(o.geom))
+                      AND b.ref_mlit_plateau IS NOT NULL
+                      AND b.ref_mlit_plateau <> 'Null'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM plateau_buildings s
+                          WHERE s.parent_building_id = b.parent_building_id
+                            AND s.id <> b.id
+                            AND s.ref_mlit_plateau = b.ref_mlit_plateau
+                      )
+                      {city_boundary_filter}
+                    ORDER BY {dedup_key}, {dedup_tiebreaker}
+                ),
                 all_buildings AS (
-                    -- UNION ALL: the three CTEs are mutually disjoint by WHERE
-                    -- (outlines: building_part IS NULL; related_parts:
-                    -- parent_building_id IN outlines; orphan_parts: building_part='yes'
-                    -- AND parent_building_id IS NULL), so a sort/hash dedup is
-                    -- pure overhead.
+                    -- UNION ALL: bbox_outlines / related_parts / orphan_parts は
+                    -- WHERE で互いに重ならない (outlines: building_part IS NULL;
+                    -- related_parts: parent_building_id IN outlines; orphan_parts:
+                    -- building_part='yes' AND parent_building_id IS NULL) ので、
+                    -- ソートやハッシュでの重複除去は不要です。
+                    -- detached_parts の行は related_parts の行と同じ建物になりうるので、
+                    -- その重なりは buildings_to_osm_xml で外します。
                     SELECT * FROM bbox_outlines
                     UNION ALL
                     SELECT * FROM related_parts
                     UNION ALL
                     SELECT * FROM orphan_parts
+                    UNION ALL
+                    SELECT * FROM detached_parts
                 )
                 SELECT
                     ub.id, ub.osm_id, ub.building, ub.height, ub.ele,
@@ -280,6 +329,7 @@ class OSMFJPlateauAPI:
                     ub.footprint_m2,
                     ub.pre_dedup_count,
                     ub.intersects_parent,
+                    ub.promoted_part,
                     bn.nodes
                 FROM all_buildings ub
                 LEFT JOIN LATERAL (
@@ -300,6 +350,7 @@ class OSMFJPlateauAPI:
             """
 
             params = [min_lon, min_lat, max_lon, max_lat, limit,
+                      min_lon, min_lat, max_lon, max_lat,
                       min_lon, min_lat, max_lon, max_lat]
 
             cursor.execute(query, params)
@@ -336,6 +387,7 @@ class OSMFJPlateauAPI:
                 1 for r in result
                 if r.get('parent_building_id') is None
                 and r.get('building_part') is None
+                and not r.get('promoted_part')
             )
             # raw_count > limit ⇔ LIMIT truncation definitely happened, in
             # which case post-LIMIT dedup state is unknowable without re-querying.
@@ -601,6 +653,17 @@ class OSMFJPlateauAPI:
         # これで、重心距離は中央値 1,786m、最大 30,258m。#41 で importer は
         # 修正済みだが、既存データは再取り込みまで残る。
         #
+        # 外形と重ならず建物ID が一意な部分立体は、get_buildings_in_bbox の
+        # detached_parts で独立した建物に昇格しています。ここでは数えません。
+        #
+        # この除外は、兄弟と建物ID を共有する部分立体と、建物ID が Null の
+        # 部分立体を外す役目に加えて、昇格した行と同じ id を持つ related_parts の
+        # 行を外す役目も持っています。これだけを外すと、同じ建物が relation の
+        # 部分と独立した way の二重に出ます。
+        # 案 B (取り込み側で親子の紐づけを直す) が入ったら、撤去を考えます。
+        # 撤去するときは detached_parts と同時に外してください。撤去条件の SQL が
+        # 0 件になれば、detached_parts も行を返さなくなります。
+        #
         # 撤去条件: 全都市の再取り込みが済み、本番で下記が 0 件になったとき。
         #   SELECT count(*) FROM plateau_buildings p
         #   JOIN plateau_buildings o ON p.parent_building_id = o.id
@@ -627,10 +690,20 @@ class OSMFJPlateauAPI:
             nonlocal out_of_range_node_count
             out_of_range_node_count += 1
 
+        # 外形と重ならない部分立体は、related_parts と detached_parts の両方から
+        # 返る。前者は親付きの部分立体、後者は独立した建物として昇格した行で、
+        # 同じ id を持つ。昇格した方だけを残すので、前者を外した件数は
+        # 「親と交差しない部分立体を除外」に数えない (二重に数えるため)。
+        # promoted_part が無い行 (モックなど) は FALSE として扱う。
+        promoted_ids = {b['id'] for b in buildings if b.get('promoted_part')}
+        # 昇格した建物の件数は、way を実際に作った時点で数える。
+        promoted_parts = 0
+
         kept_buildings = []
         for b in buildings:
             if b.get('intersects_parent') is False:
-                dropped_far_parts += 1
+                if b['id'] not in promoted_ids:
+                    dropped_far_parts += 1
                 continue
             kept_buildings.append(b)
         buildings = kept_buildings
@@ -740,6 +813,8 @@ class OSMFJPlateauAPI:
 
                     all_ways.append(way_elem)
                     _register_element_id('way', way_id)
+                    if building.get('promoted_part'):
+                        promoted_parts += 1
                     # relation 構築の準備
                     if is_part and parent_id is not None:
                         parts_by_parent_db_id.setdefault(parent_id, []).append(way_id)
@@ -863,6 +938,8 @@ class OSMFJPlateauAPI:
                         'relation',
                         self._relation_id(building_db_id, self.RELATION_KIND_MULTIPOLYGON))
                     all_relations.append(rel_elem)
+                    if building.get('promoted_part'):
+                        promoted_parts += 1
 
                     processed_buildings += 1
 
@@ -923,6 +1000,7 @@ class OSMFJPlateauAPI:
         # 0 件のときも出す。撤去してよいかは「発火しなくなったこと」で判断する
         # ので、0 が記録に残らないと不在を証明できない。
         logger.info(f"出口補正: 親と交差しない部分立体を除外 {dropped_far_parts}件")
+        logger.info(f"出口補正: 部分立体を独立した建物として出力 {promoted_parts}件")
         # 0 件のときも出す。理由は dropped_far_parts と同じ (発火しなくなった
         # ことを不在の証拠として使うため)。
         logger.info(

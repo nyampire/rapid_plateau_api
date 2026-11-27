@@ -344,6 +344,21 @@ class TestGetBuildingsInBboxQuery:
         assert 'related_parts' in sql
         assert 'orphan_parts' in sql
 
+    def test_dedup_log_does_not_count_promoted_rows_as_outlines(self, api, caplog):
+        """昇格した部分立体は外形ではないので、重複除去の件数から差し引かない"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        base = dict(building_part=None, parent_building_id=None, nodes=[],
+                    representative_point=None, planar_area=None)
+        cursor.fetchall.return_value = [
+            dict(base, id=1, pre_dedup_count=5, promoted_part=False),
+            dict(base, id=2, pre_dedup_count=0, promoted_part=True),
+            dict(base, id=3, pre_dedup_count=0, promoted_part=True),
+        ]
+        with patch.object(api, 'get_connection', return_value=conn):
+            with caplog.at_level(logging.INFO):
+                api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        assert 'outline_candidates: 5, deduped: 4件' in caplog.text
+
     def test_query_filters_outlines_with_building_part_is_null(self, api):
         """outline CTE は building_part IS NULL でフィルタする"""
         conn, cursor = self._setup_api_with_mock_cursor(api)
@@ -371,19 +386,23 @@ class TestGetBuildingsInBboxQuery:
         assert 'parent_building_id' in sql
 
     def test_query_params_count_and_order(self, api):
-        """params は 9 個 (bbox×2 + limit) で正しい順序"""
+        """params は 13 個 (bbox×3 + limit) で正しい順序"""
         conn, cursor = self._setup_api_with_mock_cursor(api)
         with patch.object(api, 'get_connection', return_value=conn):
             api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
         params = cursor.execute.call_args[0][1]
-        # 9 個: bbox_outlines spatial(4) + LIMIT(1) + orphan_parts spatial(4)
-        assert len(params) == 9
+        # 13 個: bbox_outlines spatial(4) + LIMIT(1) + orphan_parts spatial(4)
+        #        + detached_parts spatial(4)
+        assert len(params) == 13
+        assert 'detached_parts' in cursor.execute.call_args[0][0]
         # bbox_outlines: min_lon, min_lat, max_lon, max_lat
         assert params[0:4] == [139.7, 35.7, 139.8, 35.8]
         # limit
         assert params[4] == 10
         # orphan_parts: 同じ bbox を再度
         assert params[5:9] == [139.7, 35.7, 139.8, 35.8]
+        # detached_parts: 同じ bbox をもう一度
+        assert params[9:13] == [139.7, 35.7, 139.8, 35.8]
 
     def test_query_placeholder_count_matches_params(self, api):
         """SQL の %s プレースホルダ数 = params 数 (psycopg2 が hard fail する条件)"""
@@ -422,16 +441,19 @@ class TestGetBuildingsInBboxQuery:
         with patch.object(api, 'get_connection', return_value=conn):
             api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
         sql = cursor.execute.call_args[0][0]
-        # dash_city_master を参照する EXISTS が SQL 全体で 4 回現れること:
+        # dash_city_master を参照する EXISTS が SQL 全体で 6 回現れること:
         #   - bbox_outlines の city_boundary_filter (1 回)
         #   - bbox_outlines の dedup_tiebreaker (#31 で追加、1 回)
         #   - orphan_parts の city_boundary_filter (1 回)
         #   - orphan_parts の dedup_tiebreaker (#31 Task 3 で追加、1 回)
+        #   - detached_parts の city_boundary_filter (1 回)
+        #   - detached_parts の dedup_tiebreaker (1 回)
         boundary_filter_occurrences = sql.count('FROM dash_city_master m')
-        assert boundary_filter_occurrences == 4, (
-            f"dash_city_master subquery should appear 4 times "
+        assert boundary_filter_occurrences == 6, (
+            f"dash_city_master subquery should appear 6 times "
             f"(outlines filter + outlines dedup tiebreaker + orphan parts filter "
-            f"+ orphan parts dedup tiebreaker), "
+            f"+ orphan parts dedup tiebreaker + detached parts filter "
+            f"+ detached parts dedup tiebreaker), "
             f"got {boundary_filter_occurrences}"
         )
 
@@ -830,6 +852,80 @@ class TestDropPartsNotIntersectingParent:
 
         way_ids = {w.get('id') for w in root.findall('way')}
         assert str(-(2 * 1000)) in way_ids
+
+
+class TestPromotedDetachedParts:
+    """外形と重ならない部分立体は、独立した建物として一度だけ出す。
+
+    related_parts と detached_parts の両方から同じ行が返るので、
+    出力側で昇格した方だけを残す。
+    """
+
+    def _square(self, base_id, lat, lon, d=0.0002):
+        return [
+            {'id': base_id + i, 'lat': la, 'lon': lo, 'sequence_id': i}
+            for i, (la, lo) in enumerate([
+                (lat, lon), (lat + d, lon), (lat + d, lon + d), (lat, lon + d)
+            ])
+        ]
+
+    def _pair(self):
+        nodes = self._square(200, 34.0, 134.0)
+        related = _make_building(
+            building_id=2, nodes=nodes, building=None, building_part='yes',
+            parent_building_id=1, intersects_parent=False, promoted_part=False)
+        promoted = _make_building(
+            building_id=2, nodes=nodes, building='yes', building_part=None,
+            parent_building_id=None, intersects_parent=None, promoted_part=True)
+        return related, promoted
+
+    def test_promoted_row_wins_over_its_related_duplicate(self, api):
+        related, promoted = self._pair()
+
+        root = ET.fromstring(api.buildings_to_osm_xml([related, promoted]))
+
+        ways = root.findall('way')
+        assert len(ways) == 1
+        tags = {t.get('k'): t.get('v') for t in ways[0].findall('tag')}
+        assert tags.get('building') == 'yes'
+        assert 'building:part' not in tags
+        assert root.findall('relation') == []
+
+    def test_promoted_roof_gets_layer(self, api):
+        promoted = _make_building(
+            building_id=2, building='roof', building_part=None,
+            parent_building_id=None, intersects_parent=None, promoted_part=True)
+
+        root = ET.fromstring(api.buildings_to_osm_xml([promoted]))
+
+        tags = {t.get('k'): t.get('v') for t in root.find('way').findall('tag')}
+        assert tags.get('layer') == '1'
+
+    def test_drop_count_excludes_promoted_duplicates(self, api, caplog):
+        related, promoted = self._pair()
+        lone = _make_building(
+            building_id=3, nodes=self._square(300, 35.0, 135.0),
+            building=None, building_part='yes', parent_building_id=1,
+            intersects_parent=False, promoted_part=False)
+
+        with caplog.at_level(logging.INFO):
+            api.buildings_to_osm_xml([related, promoted, lone])
+
+        assert '出口補正: 親と交差しない部分立体を除外 1件' in caplog.text
+        assert '出口補正: 部分立体を独立した建物として出力 1件' in caplog.text
+
+    def test_promoted_row_with_too_few_valid_nodes_is_not_counted(self, api, caplog):
+        """way を作れなかった昇格行は、出力した件数に数えない"""
+        broken = _make_building(
+            building_id=5, nodes=self._square(500, 36.0, 136.0)[:2],
+            building='yes', building_part=None, parent_building_id=None,
+            intersects_parent=None, promoted_part=True)
+
+        with caplog.at_level(logging.INFO):
+            root = ET.fromstring(api.buildings_to_osm_xml([broken]))
+
+        assert root.findall('way') == []
+        assert '出口補正: 部分立体を独立した建物として出力 0件' in caplog.text
 
 
 class TestMultipolygonOutput:

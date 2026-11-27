@@ -108,3 +108,59 @@ class TestFarPartIsNotServed:
         refs = {m.get('ref') for m in rel.findall('member')}
         assert str(-(2 * 1000)) in refs
         assert '-3' not in refs, 'relation に遠方の部分立体が残っている'
+
+
+@pytest.mark.integration
+class TestDetachedPartIsServedAsBuilding:
+    def test_detached_part_in_range_is_served_once_as_building(
+        self, fresh_plateau_full_schema, integration_client
+    ):
+        conn = fresh_plateau_full_schema
+        cur = conn.cursor()
+        outline = 'POLYGON((133.0 33.0,133.001 33.0,133.001 33.001,133.0 33.001,133.0 33.0))'
+        part = 'POLYGON((133.0015 33.0,133.0019 33.0,133.0019 33.0004,133.0015 33.0004,133.0015 33.0))'
+        cur.execute(
+            "INSERT INTO plateau_buildings (id, osm_id, building, city_code, geom, centroid)"
+            " VALUES (1, -1, 'yes', '39201', ST_GeomFromText(%s, 4326),"
+            " ST_PointOnSurface(ST_GeomFromText(%s, 4326)))",
+            (outline, outline),
+        )
+        cur.execute(
+            "INSERT INTO plateau_buildings"
+            " (id, osm_id, building_part, parent_building_id, ref_mlit_plateau,"
+            "  city_code, geom, centroid)"
+            " VALUES (2, -2, 'yes', 1, 'A-4', '39201', ST_GeomFromText(%s, 4326),"
+            " ST_PointOnSurface(ST_GeomFromText(%s, 4326)))",
+            (part, part),
+        )
+        rings = {
+            1: [(33.0, 133.0), (33.0, 133.001), (33.001, 133.001), (33.001, 133.0)],
+            2: [(33.0, 133.0015), (33.0, 133.0019), (33.0004, 133.0019), (33.0004, 133.0015)],
+        }
+        node_id = -100
+        for building_id, ring in rings.items():
+            for seq, (lat, lon) in enumerate(ring):
+                cur.execute(
+                    "INSERT INTO plateau_building_nodes"
+                    " (osm_id, building_id, sequence_id, lat, lon)"
+                    " VALUES (%s, %s, %s, %s, %s)",
+                    (node_id, building_id, seq, lat, lon),
+                )
+                node_id -= 1
+        conn.commit()
+
+        res = integration_client.get(
+            '/api/mapwithai/buildings',
+            params={'bbox': '132.999,32.999,133.003,33.002'},
+        )
+        assert res.status_code == 200
+        root = ET.fromstring(res.text)
+
+        part_way_id = str(-(2 * 1000))
+        part_ways = [w for w in root.findall('way') if w.get('id') == part_way_id]
+        assert len(part_ways) == 1
+        tags = {t.get('k'): t.get('v') for t in part_ways[0].findall('tag')}
+        assert tags['building'] == 'yes'
+        assert 'building:part' not in tags
+        for rel in root.findall('relation'):
+            assert part_way_id not in {m.get('ref') for m in rel.findall('member')}

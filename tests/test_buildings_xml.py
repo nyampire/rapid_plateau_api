@@ -344,6 +344,21 @@ class TestGetBuildingsInBboxQuery:
         assert 'related_parts' in sql
         assert 'orphan_parts' in sql
 
+    def test_dedup_log_does_not_count_promoted_rows_as_outlines(self, api, caplog):
+        """昇格した部分立体は外形ではないので、重複除去の件数から差し引かない"""
+        conn, cursor = self._setup_api_with_mock_cursor(api)
+        base = dict(building_part=None, parent_building_id=None, nodes=[],
+                    representative_point=None, planar_area=None)
+        cursor.fetchall.return_value = [
+            dict(base, id=1, pre_dedup_count=5, promoted_part=False),
+            dict(base, id=2, pre_dedup_count=0, promoted_part=True),
+            dict(base, id=3, pre_dedup_count=0, promoted_part=True),
+        ]
+        with patch.object(api, 'get_connection', return_value=conn):
+            with caplog.at_level(logging.INFO):
+                api.get_buildings_in_bbox(139.7, 35.7, 139.8, 35.8, limit=10)
+        assert 'outline_candidates: 5, deduped: 4件' in caplog.text
+
     def test_query_filters_outlines_with_building_part_is_null(self, api):
         """outline CTE は building_part IS NULL でフィルタする"""
         conn, cursor = self._setup_api_with_mock_cursor(api)
@@ -898,6 +913,19 @@ class TestPromotedDetachedParts:
 
         assert '出口補正: 親と交差しない部分立体を除外 1件' in caplog.text
         assert '出口補正: 部分立体を独立した建物として出力 1件' in caplog.text
+
+    def test_promoted_row_with_too_few_valid_nodes_is_not_counted(self, api, caplog):
+        """way を作れなかった昇格行は、出力した件数に数えない"""
+        broken = _make_building(
+            building_id=5, nodes=self._square(500, 36.0, 136.0)[:2],
+            building='yes', building_part=None, parent_building_id=None,
+            intersects_parent=None, promoted_part=True)
+
+        with caplog.at_level(logging.INFO):
+            root = ET.fromstring(api.buildings_to_osm_xml([broken]))
+
+        assert root.findall('way') == []
+        assert '出口補正: 部分立体を独立した建物として出力 0件' in caplog.text
 
 
 class TestMultipolygonOutput:

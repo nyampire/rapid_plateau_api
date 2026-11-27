@@ -160,7 +160,7 @@ class TestDetachedPartIsServedAsBuilding:
         part_ways = [w for w in root.findall('way') if w.get('id') == part_way_id]
         assert len(part_ways) == 1
         tags = {t.get('k'): t.get('v') for t in part_ways[0].findall('tag')}
-        assert 'building' in tags
+        assert tags['building'] == 'yes'
         assert 'building:part' not in tags
         for rel in root.findall('relation'):
             assert part_way_id not in {m.get('ref') for m in rel.findall('member')}
